@@ -23,11 +23,14 @@ export const chooseModalSlice = createSlice({
     addSelection: (state, action) => {
       const newSelection = {name: action.payload};
       state.selections = [...state.selections, newSelection];
+    },
+    changeZeroIndex: (state) => {
+      state.selections[0].name = 'test';
     }
   }
 })
 
 
-export const { setIsOpen, removeSelection, addSelection } = chooseModalSlice.actions;
+export const { setIsOpen, removeSelection, addSelection, changeZeroIndex } = chooseModalSlice.actions;
 
 export default chooseModalSlice.reducer;

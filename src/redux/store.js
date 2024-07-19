@@ -1,12 +1,12 @@
 import { configureStore } from "@reduxjs/toolkit";
-import counterReducer from './slices/counterSlice'
+import userInfoReducer from "./slices/userInfoSlice";
 import chooseModalReducer from "./slices/chooseModalSlice";
 import { pokemonApi } from "./Apis/pokemonApi";
 
 
 export default configureStore({
   reducer: {
-    counter: counterReducer,
+    userInfo: userInfoReducer,
     chooseModal: chooseModalReducer,
     [pokemonApi.reducerPath]: pokemonApi.reducer,
   },
