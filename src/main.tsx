@@ -6,9 +6,11 @@ import {
   RouterProvider
 } from 'react-router-dom';
 
+import './index.css'
+
 import App from './App.tsx'
 
-import HomePage from './routes/HomePage';
+import SearchPage from './routes/SearchPage.jsx';
 import ErrorPage from './routes/ErrorPage'
 import AuthenticationPage from './routes/AuthenticationPage'
 import HelpMeChoosePage from './routes/HelpMeChoosePage'
@@ -25,9 +27,9 @@ const router = createBrowserRouter([
     element: <App />,
     errorElement: <ErrorPage />,
     children: [
-      { index: true, element: <HomePage />},
+      { index: true, element: <SearchPage />},
       {
-        path: 'helpMeChoose/*',
+        path: 'choose/*',
         element: <HelpMeChoosePage />
       },
       {

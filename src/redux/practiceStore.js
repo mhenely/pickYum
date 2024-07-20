@@ -1,5 +1,4 @@
 import { configureStore } from "@reduxjs/toolkit";
-// import counterSlice from "./slices/counterSlice";
 import counterReducer from "./slices/practiceSlice";
 import { pokemonApi } from "./Apis/pokemonApi";
 

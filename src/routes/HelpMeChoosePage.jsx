@@ -1,11 +1,11 @@
 import { useSelector, useDispatch } from "react-redux";
 import { useState } from "react";
 
-import { addUserAcceptance, removeUserSelection } from "../redux/slices/userInfoSlice";
+import { addUserAcceptance, addUserSelection, removeUserSelection, updateUserFavorites } from "../redux/slices/userInfoSlice";
 import { restaurants } from "../tempData/restaurants";
 
-// ability to see past accepted restaurants
-// ability to see favorites
+// ability to turn off connections to food/app
+  // user can manually enter in choices and use the coin flip or roulette wheel for any choice unrelated to food selections
 
 const HelpMeChoosePage = () => {
   const [ flipResult, setFlipResult ] = useState(null)
@@ -20,7 +20,8 @@ const HelpMeChoosePage = () => {
     }
   })
 
-  const selectedList = useSelector(state => state.userInfo.users[0].selections);
+  const userInfo = useSelector(state => state.userInfo.users[0]);
+  const selectedList = userInfo.selections;
 
   const heads = selectedList[0] || null;
   const tails = selectedList[1] || null;
@@ -41,13 +42,26 @@ const HelpMeChoosePage = () => {
   }
 
   const handleSelctionRemoval = () => {
-    dispatch(removeUserSelection(flipId));
+    dispatch(removeUserSelection({id: flipId}));
     setFlipResult(null);
 
   }
 
   return (
    <div>
+      <div className="favorites-list">
+        <h2>Favorites</h2>
+        {
+          userInfo.favorites.map((id) => {
+            return (
+              <div key={restaurants[id].name + id}>
+                <span onClick={() => dispatch(addUserSelection(id))}>{restaurants[id].name}</span>
+                <button onClick={() => dispatch(updateUserFavorites({restaurantId: id}))}>X</button>
+              </div>
+            )
+          })
+        }
+      </div>
       <h2>Selections</h2>
       <div className="selected-list">
         {
@@ -55,6 +69,7 @@ const HelpMeChoosePage = () => {
             return (
               <div key={restaurants[id].name}>
                 {restaurants[id].name}
+                <button onClick={() => dispatch(removeUserSelection({id}))}>X</button>
               </div>
             )
           })

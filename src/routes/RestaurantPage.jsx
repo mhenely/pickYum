@@ -4,6 +4,9 @@ import { addUserSelection } from "../redux/slices/userInfoSlice";
 
 import HelpMeChooseModal from "../components/helpMeChooseModal/HelpMeChooseModal";
 
+// add to favorites
+// add to selected
+
 const RestaurantPage = () => {
 
 const isOpen = useSelector(state => state.chooseModal.isOpen)

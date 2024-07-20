@@ -16,8 +16,12 @@ export const userInfoSlice = createSlice({
       Object.keys(action.payload).forEach((key) => {
         if (action.payload[key]) {
           state.users[0][key] = action.payload[key];
+          console.log({
+            [key]: action.payload[key]
+          })
         }
       })
+      console.log({user: state.users[0]})
     },
 
     addUserReview: (state, action) => {
@@ -51,10 +55,11 @@ export const userInfoSlice = createSlice({
 
     updateUserFavorites: (state, action) => {
       const { restaurantId, userId } = action.payload;
+      console.log({restaurantId})
       if (state.users[0].favorites.find((favorite) => favorite == restaurantId)) {
         state.users[0].favorites = state.users[0].favorites.filter((favorite) => favorite != restaurantId);
       } else {
-        state.users[0].favorites = [state.users[0].favorites, restaurantId];
+        state.users[0].favorites = [...state.users[0].favorites, restaurantId];
       }
     },
 
@@ -64,6 +69,7 @@ export const userInfoSlice = createSlice({
     },
 
     removeUserSelection: (state, action) => {
+      console.log(action.payload)
       state.users[0].selections = state.users[0].selections.filter((selection) => selection != action.payload)
     },
 
