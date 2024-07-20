@@ -2,12 +2,12 @@ import { createSlice } from "@reduxjs/toolkit";
 
 const initialState = {
   isOpen: false,
-  selections: [
-    {name: 'PF Changs'},
-    {name: 'Burger King'},
-    {name: 'Steak n Shake'},
-    {name: 'Guthries'}
-  ],
+  // selections: [
+  //   {name: 'PF Changs'},
+  //   {name: 'Burger King'},
+  //   {name: 'Steak n Shake'},
+  //   {name: 'Guthries'}
+  // ],
 }
 
 export const chooseModalSlice = createSlice({

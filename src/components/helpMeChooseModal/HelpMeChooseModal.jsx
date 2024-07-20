@@ -1,11 +1,6 @@
-// need a variable in state to track whether should be opened or closed
-// receive list of restaurants already selected
-// button to redirect to helpMeChoose route
-// button visible on every page except helpMeChoose
-// click on button to open/close modal
-
 import { useDispatch, useSelector } from "react-redux";
-import { removeSelection } from "../../redux/slices/chooseModalSlice";
+import { removeUserSelection } from "../../redux/slices/userInfoSlice";
+import { restaurants } from "../../tempData/restaurants";
 
 const HelpMeChooseModal = ({ selectedList }) => {
 
@@ -15,10 +10,11 @@ const HelpMeChooseModal = ({ selectedList }) => {
     <div>
       {
         selectedList.map((selection) => {
+          const name = restaurants[selection].name;
           return (
-            <div key={selection.name}>
-              {selection.name}
-              <button onClick={() => dispatch(removeSelection(selection.name))}>X</button>
+            <div key={name}>
+              {name}
+              <button onClick={() => dispatch(removeUserSelection(selection))}>X</button>
             </div>
           )
         })

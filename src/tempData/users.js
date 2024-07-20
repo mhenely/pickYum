@@ -9,6 +9,22 @@ export const users = [
     "city":"Richmond",
     "state":"Virginia",
     "zipcode":"23203",
+    "favorites": [1, 2, 3, 10],
+    "selections": [4, 6, 8, 18],
+    "accepted": [
+      {
+        "restaurantId": 1,
+        "date": "5/6/2024"
+      },
+      {
+        "restaurantId": 10,
+        "date": "5/3/2024"
+      },
+      {
+        "restaurantId": 5,
+        "date": "5/2/2024"
+      },
+    ],
     "reviews":
       {
         "1":
@@ -28,7 +44,7 @@ export const users = [
           {
             "reviewId": 3,
             "content":"Was ok.",
-            "rating":3,
+            "rating":2,
             "date":"4/6/2024"
           },
         ],
@@ -70,6 +86,7 @@ export const users = [
     "city":"Shreveport",
     "state":"Louisiana",
     "zipcode":"71105",
+    "favorites": [11, 7, 13, 30],
     "reviews":
     {
       "restaurantId":
@@ -90,6 +107,7 @@ export const users = [
     "city":"Milwaukee",
     "state":"Wisconsin",
     "zipcode":"53285",
+    "favorites": [1, 5, 3, 10],
     "reviews":
     {
       "restaurantId":
