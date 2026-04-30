@@ -1,23 +1,23 @@
-import './star-rating.styles.css';
+const Star = ({ fill }) => (
+  <span className="relative inline-block text-gray-300">
+    &#9733;
+    {fill > 0 && (
+      <span
+        className="absolute inset-0 overflow-hidden text-amber-400"
+        style={{ width: `${fill * 100}%` }}
+      >
+        &#9733;
+      </span>
+    )}
+  </span>
+);
 
-const StarRating = ({ rating, maxRating = 5 }) => {
-
-  return (
-    <>
-      {
-        [...Array(maxRating)].map((_, idx) => {
-          const ratingValue = idx + 1;
-          return (
-            // fully fill all stars where ratingValue <= rating
-            // if 
-            <div key={idx} className={`star ${ratingValue <= rating ? 'active' : ratingValue - rating > 0 && ratingValue - rating < 1 ? 'partial' : 'empty'}`}>
-              &#9733;
-            </div>
-          )
-        })
-      }
-    </>
-  )
-}
+const StarRating = ({ rating, maxRating = 5 }) => (
+  <div className="flex">
+    {[...Array(maxRating)].map((_, idx) => (
+      <Star key={idx} fill={Math.min(1, Math.max(0, rating - idx))} />
+    ))}
+  </div>
+);
 
 export default StarRating;

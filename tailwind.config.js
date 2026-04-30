@@ -8,6 +8,6 @@ export default {
     extend: {},
   },
   plugins: [
-    import('@tailwindcss/forms'),
+    require('@tailwindcss/forms'),
   ],
 }

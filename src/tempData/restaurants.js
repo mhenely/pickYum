@@ -1,3 +1,6 @@
+// Mock restaurant data — 40 entries keyed by string ID (e.g., restaurants["1"])
+// Shape: { name, type, rating (1-5), hours (opening time), price (1-4), phone, website, takeout, delivery, yelp }
+// IDs 41-100 are commented out below — uncomment to expand the dataset
 export const restaurants ={ "1": {"name":"Twinte","type":"Chinese","rating":3,"hours":"6:26 AM","price":2,"phone":"224-235-0414","website":"pen.io","takeout":false,"delivery":false,"yelp":"behance.net"},
   "2": {"name":"Shufflester","type":"Japanese","rating":5,"hours":"2:52 PM","price":2,"phone":"576-297-3199","website":"nih.gov","takeout":false,"delivery":true,"yelp":"gov.uk"},
   "3": {"name":"Gabcube","type":"Mexican","rating":5,"hours":"4:05 PM","price":1,"phone":"794-564-9564","website":"mail.ru","takeout":true,"delivery":true,"yelp":"webs.com"},

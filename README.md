@@ -1,30 +1,86 @@
-# React + TypeScript + Vite
+# PickYum
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A restaurant decision-making app that helps you choose where to eat. Add restaurants to your selections list and use a coin flip to decide between two options.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Coin Flip**: Add up to 2 restaurants to your selection and flip a coin to pick one
+- **Favorites**: Mark restaurants as favorites for quick access
+- **Reviews**: Write and manage star-rated reviews per restaurant
+- **Acceptance History**: Track every restaurant you've accepted via the coin flip
+- **User Profile**: Update your email, address, and password
 
-## Expanding the ESLint configuration
+## Tech Stack
 
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
+| Layer | Technology |
+|---|---|
+| UI | React 18, Tailwind CSS, Headless UI |
+| Routing | React Router DOM v6 |
+| State | Redux Toolkit |
+| Build | Vite 5 |
 
-- Configure the top-level `parserOptions` property like this:
+## Getting Started
 
-```js
-export default {
-  // other rules...
-  parserOptions: {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    project: ['./tsconfig.json', './tsconfig.node.json', './tsconfig.app.json'],
-    tsconfigRootDir: __dirname,
-  },
-}
+```bash
+npm install
+npm run dev
 ```
 
-- Replace `plugin:@typescript-eslint/recommended` to `plugin:@typescript-eslint/recommended-type-checked` or `plugin:@typescript-eslint/strict-type-checked`
-- Optionally add `plugin:@typescript-eslint/stylistic-type-checked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and add `plugin:react/recommended` & `plugin:react/jsx-runtime` to the `extends` list
+The app runs at `http://localhost:5173` by default.
+
+## Project Structure
+
+```
+src/
+├── routes/           # Page-level components (one file per route)
+├── components/       # Shared UI components (Navigation, modals, star rating)
+├── redux/
+│   ├── store.js
+│   └── slices/       # userInfoSlice is the primary slice
+├── tempData/         # Mock data (restaurants.js, users.js) — no backend yet
+├── data/             # Empty — reserved for future API response types
+└── utils/            # Empty — reserved for future helper functions
+```
+
+## State Management
+
+All user state lives in `userInfoSlice`. It manages:
+
+- `selections` — array of restaurant IDs queued for the coin flip (max 2 are used)
+- `favorites` — array of restaurant IDs the user has favorited
+- `reviews` — object keyed by restaurant ID, each value is an array of review objects
+- `accepted` — array of `{ restaurantId, date }` objects from accepted coin flips
+- `email`, `address`, `password` — user profile fields
+
+The only other active slice is `chooseModalSlice`, which tracks whether the selection modal is open.
+
+## Data Flow
+
+```
+User action in component
+  → dispatch(action) from userInfoSlice
+  → Redux updates state (Immer handles immutability)
+  → useSelector hooks re-read state
+  → Component re-renders
+```
+
+No API calls are made. All data is loaded from `src/tempData/` and lives in Redux for the session. **Data resets on page refresh.**
+
+## Routes
+
+| Path | Page | Status |
+|---|---|---|
+| `/` | Search | Placeholder — not implemented |
+| `/choose/:userId` | Help Me Choose (coin flip) | Working |
+| `/restaurant/:restaurantId` | Restaurant Detail | Partially implemented |
+| `/userHistory/:userId` | Reviews & History | Working |
+| `/userInfo/:userId` | User Profile | Working |
+| `/authentication` | Login/Sign Up | Placeholder — not implemented |
+
+## Known Limitations
+
+- No backend — all data is mock/hardcoded and resets on refresh
+- Only supports a single hardcoded user (`users[0]`)
+- Search and Authentication pages are empty stubs
+- `restaurantsSlice` and `pokemonApi` exist in Redux but are not wired up
+- No tests

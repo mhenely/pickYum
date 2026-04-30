@@ -14,7 +14,7 @@ import SearchPage from './routes/SearchPage.jsx';
 import ErrorPage from './routes/ErrorPage'
 import AuthenticationPage from './routes/AuthenticationPage'
 import HelpMeChoosePage from './routes/HelpMeChoosePage'
-import UserHistoryPage from './routes/UserHistoryPage'
+import HistoryPage from './routes/HistoryPage.jsx'
 import UserInfoPage from './routes/UserInfoPage'
 import RestaurantPage from './routes/RestaurantPage';
 // import Navigation from './components/Navigation'
@@ -33,8 +33,8 @@ const router = createBrowserRouter([
         element: <HelpMeChoosePage />
       },
       {
-        path: 'userHistory/:userId',
-        element: <UserHistoryPage />
+        path: 'History/:userId',
+        element: <HistoryPage />
       },
       {
         path: 'userInfo/:userId',
