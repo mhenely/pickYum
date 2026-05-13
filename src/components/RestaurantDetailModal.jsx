@@ -2,11 +2,12 @@ import { useState, useEffect } from 'react';
 import { Dialog, DialogPanel } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { useDispatch, useSelector } from 'react-redux';
-import { addUserSelection, removeUserSelection, updateUserFavorites, setRestaurantNote, persistAddReview, removeUserReview } from '../redux/slices/userInfoSlice';
+import { addUserOption, removeUserOption, updateUserFavorites, setRestaurantNote, persistAddReview, removeUserReview } from '../redux/slices/userInfoSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
 import RatingDisplay from './RatingDisplay';
 import InfoRow from './InfoRow';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
+import { normalizeUrl } from '../utils/normalizeUrl';
 import { socialApi } from '../lib/socialApi';
 import { api } from '../lib/api';
 
@@ -105,7 +106,7 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
   const reviews   = userInfo.reviews[sid(restaurantId)] || [];
   const avgRating = reviews.length ? mean(reviews.map((rv) => rv.rating)) : null;
   const isFavorite = userInfo.favorites.map(sid).includes(sid(restaurantId));
-  const isSelected = userInfo.selections.map(sid).includes(sid(restaurantId));
+  const isSelected = userInfo.options.map(sid).includes(sid(restaurantId));
   const noteDirty = noteText !== savedNote;
 
   const handleSaveNote = () => {
@@ -169,8 +170,8 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
               <InfoRow label="Price"   value={PRICE_LABELS[r.price] ?? '—'} />
               <InfoRow label="Opens"   value={r.hours ?? '—'} />
               {r.phone   && <InfoRow label="Phone"   value={r.phone}   href={`tel:${r.phone}`} />}
-              {r.website && <InfoRow label="Website" value={r.website} href={/^https?:\/\//i.test(r.website) ? r.website : `https://${r.website}`} external />}
-              {r.yelp    && <InfoRow label="Yelp"    value={r.yelp}    href={/^https?:\/\//i.test(r.yelp)    ? r.yelp    : `https://${r.yelp}`}    external />}
+              {r.website && <InfoRow label="Website" value={r.website} href={normalizeUrl(r.website)} external />}
+              {r.yelp    && <InfoRow label="Yelp"    value={r.yelp}    href={normalizeUrl(r.yelp)}    external />}
             </div>
 
             {/* Service availability */}
@@ -192,8 +193,8 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
               <button
                 onClick={() =>
                   isSelected
-                    ? dispatch(removeUserSelection(sid(restaurantId)))
-                    : dispatch(addUserSelection(sid(restaurantId)))
+                    ? dispatch(removeUserOption(sid(restaurantId)))
+                    : dispatch(addUserOption(sid(restaurantId)))
                 }
                 className={[
                   'flex-1 rounded-lg py-2 text-sm font-semibold transition-colors',
@@ -202,7 +203,7 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
                     : 'bg-orange-500 text-white hover:bg-orange-500',
                 ].join(' ')}
               >
-                {isSelected ? 'Remove from Selections' : 'Add to Selections'}
+                {isSelected ? 'Remove from Options' : 'Add to Options'}
               </button>
               <button
                 onClick={() =>

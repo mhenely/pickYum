@@ -8,8 +8,8 @@ vi.mock('../../lib/api', () => ({
     users: {
       addFavorite:           vi.fn().mockResolvedValue(undefined),
       removeFavorite:        vi.fn().mockResolvedValue(undefined),
-      addSelection:          vi.fn().mockResolvedValue(undefined),
-      removeSelection:       vi.fn().mockResolvedValue(undefined),
+      addOption:          vi.fn().mockResolvedValue(undefined),
+      removeOption:       vi.fn().mockResolvedValue(undefined),
       addAccepted:           vi.fn().mockResolvedValue({ accepted: { id: 1, restaurantId: 5, acceptedAt: new Date().toISOString(), restaurant: {} } }),
       deleteReview:          vi.fn().mockResolvedValue(undefined),
       removeFromHistory:     vi.fn().mockResolvedValue({ message: 'ok' }),
@@ -18,7 +18,7 @@ vi.mock('../../lib/api', () => ({
       updateProfile:         vi.fn().mockResolvedValue({ user: { id: 1, email: 'x', username: 'y' } }),
       recordFlip:            vi.fn().mockResolvedValue({ flipCount: 1 }),
       getAll:                vi.fn().mockResolvedValue({
-        favorites: [], selections: [], accepted: [], archived: [], reviews: [],
+        favorites: [], options: [], accepted: [], archived: [], reviews: [],
       }),
       refreshPlaces:         vi.fn().mockResolvedValue({ updated: [] }),
     },
@@ -31,8 +31,8 @@ import authReducer from '../../redux/slices/authSlice';
 import userInfoReducer, {
   setUserData,
   updateUserFavorites,
-  addUserSelection,
-  removeUserSelection,
+  addUserOption,
+  removeUserOption,
   addUserAcceptance,
   removeUserReview,
   removeFromHistory,
@@ -70,7 +70,7 @@ async function buildStore(authStatus: 'authenticated' | 'unauthenticated' = 'aut
   }
   store.dispatch(setUserData({
     id: 1, email: 'a@b.c', username: 'alice',
-    flipCount: 0, favorites: [], selections: [], accepted: [], archived: [], reviews: {},
+    flipCount: 0, favorites: [], options: [], accepted: [], archived: [], reviews: {},
   }));
   // Stash a known DB-backed restaurant in customRestaurants so isDbId/customRestaurants
   // guards pass for restaurant id 42.
@@ -88,8 +88,8 @@ describe('Guest mode skips every API sync', () => {
   it('does not call any api method for unauthenticated dispatches', async () => {
     const store = await buildStore('unauthenticated');
     store.dispatch(updateUserFavorites({ restaurantId: '42' }));
-    store.dispatch(addUserSelection('42'));
-    store.dispatch(removeUserSelection('42'));
+    store.dispatch(addUserOption('42'));
+    store.dispatch(removeUserOption('42'));
     store.dispatch(addUserAcceptance({ restaurantId: 42 }));
     store.dispatch(archiveRestaurant('42'));
     store.dispatch(unarchiveRestaurant('42'));
@@ -97,8 +97,8 @@ describe('Guest mode skips every API sync', () => {
     await flush();
 
     expect(api.users.addFavorite).not.toHaveBeenCalled();
-    expect(api.users.addSelection).not.toHaveBeenCalled();
-    expect(api.users.removeSelection).not.toHaveBeenCalled();
+    expect(api.users.addOption).not.toHaveBeenCalled();
+    expect(api.users.removeOption).not.toHaveBeenCalled();
     expect(api.users.addAccepted).not.toHaveBeenCalled();
     expect(api.users.archiveRestaurant).not.toHaveBeenCalled();
     expect(api.users.unarchiveRestaurant).not.toHaveBeenCalled();
@@ -107,18 +107,18 @@ describe('Guest mode skips every API sync', () => {
 });
 
 describe('Custom (local) IDs are skipped — listener only syncs DB-backed integer ids', () => {
-  it('addUserSelection with "custom-…" id does not call the API', async () => {
+  it('addUserOption with "custom-…" id does not call the API', async () => {
     const store = await buildStore();
-    store.dispatch(addUserSelection('custom-12345'));
+    store.dispatch(addUserOption('custom-12345'));
     await flush();
-    expect(api.users.addSelection).not.toHaveBeenCalled();
+    expect(api.users.addOption).not.toHaveBeenCalled();
   });
 
-  it('addUserSelection without a customRestaurants entry does not call the API', async () => {
+  it('addUserOption without a customRestaurants entry does not call the API', async () => {
     const store = await buildStore();
-    store.dispatch(addUserSelection('999')); // valid id format but unknown restaurant
+    store.dispatch(addUserOption('999')); // valid id format but unknown restaurant
     await flush();
-    expect(api.users.addSelection).not.toHaveBeenCalled();
+    expect(api.users.addOption).not.toHaveBeenCalled();
   });
 });
 
@@ -145,26 +145,42 @@ describe('Favorites listener distinguishes add vs remove via the previous state'
   });
 });
 
-describe('Selections / accepted / archive listeners', () => {
-  it('addUserSelection → api.users.addSelection', async () => {
+describe('Options / accepted / archive listeners', () => {
+  it('addUserOption → api.users.addOption', async () => {
     const store = await buildStore();
-    store.dispatch(addUserSelection('42'));
+    store.dispatch(addUserOption('42'));
     await flush();
-    expect(api.users.addSelection).toHaveBeenCalledWith(42);
+    expect(api.users.addOption).toHaveBeenCalledWith(42);
   });
 
-  it('removeUserSelection → api.users.removeSelection', async () => {
+  it('removeUserOption → api.users.removeOption', async () => {
     const store = await buildStore();
-    store.dispatch(removeUserSelection('42'));
+    store.dispatch(removeUserOption('42'));
     await flush();
-    expect(api.users.removeSelection).toHaveBeenCalledWith(42);
+    expect(api.users.removeOption).toHaveBeenCalledWith(42);
   });
 
-  it('addUserAcceptance → api.users.addAccepted', async () => {
+  it('addUserAcceptance → api.users.addAccepted with snapshot + chooseMethod', async () => {
     const store = await buildStore();
-    store.dispatch(addUserAcceptance({ restaurantId: 42 }));
+    store.dispatch(addUserAcceptance({
+      restaurantId: 42,
+      optionsSnapshot: ['42', '43'],
+      chooseMethod: 'flip',
+    }));
     await flush();
-    expect(api.users.addAccepted).toHaveBeenCalledWith(42);
+    expect(api.users.addAccepted).toHaveBeenCalledWith(42, {
+      optionsSnapshot: ['42', '43'],
+      chooseMethod: 'flip',
+    });
+  });
+
+  it('skips the API write for group-context acceptances flagged _serverHandled', async () => {
+    const store = await buildStore();
+    store.dispatch(addUserAcceptance({ restaurantId: 42, _serverHandled: true }));
+    await flush();
+    // Listener should bail before calling the API — the server's accept-result
+    // already wrote the UserAccepted row.
+    expect(api.users.addAccepted).not.toHaveBeenCalled();
   });
 
   it('archiveRestaurant → api.users.archiveRestaurant (only when restaurant exists locally)', async () => {

@@ -5,6 +5,7 @@ import RatingDisplay from "./RatingDisplay";
 import ScheduleModal from "./ScheduleModal";
 import InfoRow from "./InfoRow";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
+import { normalizeUrl } from "../utils/normalizeUrl";
 
 const AcceptModal = ({ restaurantId, userInfo, onClose, restaurantMap = {} }) => {
   const r = restaurantMap[restaurantId];
@@ -73,9 +74,9 @@ const AcceptModal = ({ restaurantId, userInfo, onClose, restaurantMap = {} }) =>
             <div className="grid grid-cols-2 gap-x-8 gap-y-4">
               <InfoRow label="Price"   value={PRICE_LABELS[r.price]} />
               <InfoRow label="Opens"   value={r.hours} />
-              <InfoRow label="Phone"   value={r.phone}   href={`tel:${r.phone}`} />
-              <InfoRow label="Website" value={r.website} href={`https://${r.website}`} external />
-              <InfoRow label="Yelp"    value={r.yelp}    href={`https://${r.yelp}`}    external />
+              <InfoRow label="Phone"   value={r.phone}   href={r.phone ? `tel:${r.phone}` : undefined} />
+              <InfoRow label="Website" value={r.website} href={normalizeUrl(r.website)} external />
+              <InfoRow label="Yelp"    value={r.yelp}    href={normalizeUrl(r.yelp)}    external />
             </div>
 
             {/* ── Service availability ───────────────────────────── */}

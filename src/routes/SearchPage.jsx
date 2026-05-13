@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import RestaurantDetailModal from "../components/RestaurantDetailModal";
-import { addUserSelection, updateUserFavorites, addCustomRestaurant } from "../redux/slices/userInfoSlice";
+import { addUserOption, updateUserFavorites, addCustomRestaurant } from "../redux/slices/userInfoSlice";
 import {
   setNearbyResults, setLocationInput, setRadiusMeters, clearNearby,
   togglePriceFilter, clearPriceFilters, toggleOpenNow, setOpenAtTime,
@@ -177,7 +177,7 @@ export default function SearchPage() {
           googlePlaceId: place.googlePlaceId,
         },
       }));
-      dispatch(addUserSelection(id));
+      dispatch(addUserOption(id));
     } catch (err) {
       console.error("Failed to add Places restaurant:", err);
     } finally {
@@ -449,7 +449,7 @@ export default function SearchPage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {sortedLocal.map(([id, r]) => {
               const isFavorited = currentUser.favorites.map(String).includes(String(id));
-              const isSelected  = currentUser.selections.map(String).includes(String(id));
+              const isSelected  = currentUser.options.map(String).includes(String(id));
               return (
                 <div key={id} onClick={() => setDetailId(id)} className="flex flex-col rounded-lg border border-gray-200 p-4 shadow-sm bg-white cursor-pointer hover:border-orange-300 hover:shadow-md transition-shadow">
                   <div className="flex justify-between items-start">
@@ -486,11 +486,11 @@ export default function SearchPage() {
                       {r.delivery && <span className="bg-gray-100 px-2 py-0.5 rounded">Delivery</span>}
                     </div>
                     <button
-                      onClick={(e) => { e.stopPropagation(); dispatch(addUserSelection(id)); }}
+                      onClick={(e) => { e.stopPropagation(); dispatch(addUserOption(id)); }}
                       disabled={isSelected}
                       className="mt-3 w-full rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-3 py-1.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-brand-sm"
                     >
-                      {isSelected ? 'Added to selections' : 'Add to selections'}
+                      {isSelected ? 'Added to options' : 'Add to options'}
                     </button>
                   </div>
                 </div>
@@ -539,7 +539,7 @@ export default function SearchPage() {
                   .find(([, r]) => r.googlePlaceId === placeId || r.name === name);
                 const existingId = existingEntry?.[0];
                 const isSelected = existingId
-                  ? currentUser.selections.map(String).includes(existingId)
+                  ? currentUser.options.map(String).includes(existingId)
                   : false;
                 const isAdding = addingId === placeId;
 
@@ -591,7 +591,7 @@ export default function SearchPage() {
                         disabled={isSelected || isAdding}
                         className="mt-3 w-full rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-3 py-1.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-brand-sm"
                       >
-                        {isAdding ? 'Adding…' : isSelected ? 'Added to selections' : 'Add to selections'}
+                        {isAdding ? 'Adding…' : isSelected ? 'Added to options' : 'Add to options'}
                       </button>
                     </div>
                   </div>

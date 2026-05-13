@@ -4,8 +4,14 @@ import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter, externalApiLimiter } from '../middleware/rateLimits';
+import { validatePassword } from './auth';
+import { issueToken } from '../lib/emailTokens';
+import { sendEmail, verifyEmailTemplate } from '../lib/email';
+import { logger } from '../lib/logger';
 
 const router = Router();
+
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
 // All user routes require authentication and are rate-limited on writes
 router.use(requireAuth);
@@ -15,6 +21,13 @@ const parseRestaurantId = (raw: string): number | null => {
   const id = Number(raw);
   return Number.isInteger(id) && id > 0 ? id : null;
 };
+
+// String-input caps. Picked generously enough for real usernames / addresses
+// / review text, tight enough that a hostile client can't store megabytes per
+// row. Username/email match what the registration UI already constrains.
+const MAX_USERNAME_LEN   = 32;
+const MAX_EMAIL_LEN      = 254; // RFC 5321 maximum
+const MAX_REVIEW_CONTENT = 4000;
 
 async function recomputeCommunityRating(restaurantId: number): Promise<void> {
   const userAvgs = await prisma.review.groupBy({
@@ -32,12 +45,66 @@ async function recomputeCommunityRating(restaurantId: number): Promise<void> {
 // ── Profile ───────────────────────────────────────────────────
 
 // PATCH /api/users/me
+// Sensitive updates (password, email) require re-authentication via
+// `currentPassword`. Username-only updates are not gated — they're public info
+// already and re-prompting for a password for a username change is friction
+// without security benefit.
+//
+// Password changes additionally run the same complexity check as registration
+// (validatePassword); the old code skipped this, letting an attacker who
+// already has a session weaken the password before exfiltrating it.
+//
+// Email changes flip emailVerified=false and fire a fresh verification email
+// so an attacker can't change the recovery address and have password-reset
+// links go to them. The session cookie is preserved (we don't sign out the
+// caller) since they just proved current-password control.
 router.patch('/me', async (req: Request, res: Response) => {
-  const { email, username, password } = req.body as {
+  const { email, username, password, currentPassword } = req.body as {
     email?: string;
     username?: string;
     password?: string;
+    currentPassword?: string;
   };
+
+  // Reject obviously oversized inputs early — Prisma would 500 on overflow,
+  // and storing 10MB usernames isn't a feature anyone needs.
+  if (typeof email === 'string' && email.length > MAX_EMAIL_LEN) {
+    res.status(400).json({ error: `email must be ${MAX_EMAIL_LEN} characters or fewer` }); return;
+  }
+  if (typeof username === 'string' && (username.length === 0 || username.length > MAX_USERNAME_LEN)) {
+    res.status(400).json({ error: `username must be 1-${MAX_USERNAME_LEN} characters` }); return;
+  }
+
+  const wantsSensitiveChange = Boolean(email || password);
+
+  if (wantsSensitiveChange) {
+    if (typeof currentPassword !== 'string' || !currentPassword) {
+      res.status(400).json({ error: 'currentPassword is required to change email or password' });
+      return;
+    }
+    const me = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { passwordHash: true },
+    });
+    if (!me?.passwordHash) {
+      // OAuth-only accounts have no password — they can't re-authenticate this
+      // way. Direct them to set one first (via the reset flow) before changing
+      // email. Avoids silently allowing email change on accounts that have no
+      // local password gate.
+      res.status(400).json({ error: 'Set a password first before changing email — use the password reset flow' });
+      return;
+    }
+    const ok = await bcrypt.compare(currentPassword, me.passwordHash);
+    if (!ok) {
+      res.status(401).json({ error: 'Current password is incorrect' });
+      return;
+    }
+  }
+
+  if (password) {
+    const pwError = validatePassword(password);
+    if (pwError) { res.status(400).json({ error: pwError }); return; }
+  }
 
   if (email) {
     const taken = await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' }, NOT: { id: req.userId } } });
@@ -49,7 +116,14 @@ router.patch('/me', async (req: Request, res: Response) => {
   }
 
   const data: Record<string, unknown> = {};
-  if (email) data.email = email;
+  if (email) {
+    data.email = email;
+    // Force re-verification after an email change so an attacker who hijacks a
+    // session can't move the account to an address they control without owning
+    // the new inbox.
+    data.emailVerified = false;
+    data.emailVerifiedAt = null;
+  }
   if (username) data.username = username;
   if (password) data.passwordHash = await bcrypt.hash(password, 12);
 
@@ -58,6 +132,21 @@ router.patch('/me', async (req: Request, res: Response) => {
     data,
     select: { id: true, email: true, username: true },
   });
+
+  // Fire-and-forget the verification email when the address changed. A failed
+  // send isn't fatal (the user can request a resend from the profile page).
+  if (email) {
+    (async () => {
+      try {
+        const raw = await issueToken(user.id, 'VERIFY_EMAIL');
+        const url = `${CLIENT_URL}/verify-email?token=${encodeURIComponent(raw)}`;
+        await sendEmail({ to: user.email, ...verifyEmailTemplate(url) });
+      } catch (err) {
+        logger.error({ err, userId: user.id }, 'failed to send verification email after email change');
+      }
+    })();
+  }
+
   res.json({ user });
 });
 
@@ -73,13 +162,13 @@ router.delete('/me', async (req: Request, res: Response) => {
 
 // GET /api/users/me/all — returns all user collections in one round-trip
 router.get('/me/all', async (req: Request, res: Response) => {
-  const [favRows, selRows, accRows, arcRows, revRows] = await Promise.all([
+  const [favRows, optRows, accRows, arcRows, revRows] = await Promise.all([
     prisma.userFavorite.findMany({
       where: { userId: req.userId },
       include: { restaurant: true },
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.userSelection.findMany({
+    prisma.userOption.findMany({
       where: { userId: req.userId },
       include: { restaurant: true },
       orderBy: { createdAt: 'asc' },
@@ -103,7 +192,7 @@ router.get('/me/all', async (req: Request, res: Response) => {
 
   res.json({
     favorites: favRows.map((f) => f.restaurant),
-    selections: selRows.map((s) => s.restaurant),
+    options: optRows.map((o) => o.restaurant),
     accepted: accRows,
     archived: arcRows.map((a) => a.restaurant),
     reviews: revRows,
@@ -152,29 +241,29 @@ router.delete('/me/favorites/:restaurantId', async (req: Request, res: Response)
   res.json({ message: 'Removed from favorites' });
 });
 
-// ── Selections ────────────────────────────────────────────────
+// ── Options ───────────────────────────────────────────────────
 
-// GET /api/users/me/selections
-router.get('/me/selections', async (req: Request, res: Response) => {
-  const selections = await prisma.userSelection.findMany({
+// GET /api/users/me/options
+router.get('/me/options', async (req: Request, res: Response) => {
+  const options = await prisma.userOption.findMany({
     where: { userId: req.userId },
     include: { restaurant: true },
     orderBy: { createdAt: 'asc' },
   });
-  res.json({ selections: selections.map((s) => s.restaurant) });
+  res.json({ options: options.map((o) => o.restaurant) });
 });
 
-// POST /api/users/me/selections/:restaurantId
-router.post('/me/selections/:restaurantId', async (req: Request, res: Response) => {
+// POST /api/users/me/options/:restaurantId
+router.post('/me/options/:restaurantId', async (req: Request, res: Response) => {
   const restaurantId = parseRestaurantId(req.params.restaurantId);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
   try {
-    await prisma.userSelection.upsert({
+    await prisma.userOption.upsert({
       where: { userId_restaurantId: { userId: req.userId, restaurantId } },
       create: { userId: req.userId, restaurantId },
       update: {},
     });
-    res.status(201).json({ message: 'Added to selections' });
+    res.status(201).json({ message: 'Added to options' });
   } catch (err: any) {
     if (err?.code === 'P2003') {
       res.status(422).json({ error: 'Restaurant not found in database' });
@@ -184,14 +273,14 @@ router.post('/me/selections/:restaurantId', async (req: Request, res: Response) 
   }
 });
 
-// DELETE /api/users/me/selections/:restaurantId
-router.delete('/me/selections/:restaurantId', async (req: Request, res: Response) => {
+// DELETE /api/users/me/options/:restaurantId
+router.delete('/me/options/:restaurantId', async (req: Request, res: Response) => {
   const restaurantId = parseRestaurantId(req.params.restaurantId);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
-  await prisma.userSelection.deleteMany({
+  await prisma.userOption.deleteMany({
     where: { userId: req.userId, restaurantId },
   });
-  res.json({ message: 'Removed from selections' });
+  res.json({ message: 'Removed from options' });
 });
 
 // ── Accepted history ──────────────────────────────────────────
@@ -206,18 +295,196 @@ router.get('/me/accepted', async (req: Request, res: Response) => {
   res.json({ accepted });
 });
 
+const VALID_CHOOSE_METHODS = new Set(['flip', 'spin', 'vote', 'surprise', 'direct']);
+
 // POST /api/users/me/accepted
 router.post('/me/accepted', async (req: Request, res: Response) => {
-  const { restaurantId } = req.body as { restaurantId?: number };
+  const { restaurantId, optionsSnapshot, chooseMethod } = req.body as {
+    restaurantId?: number;
+    optionsSnapshot?: unknown;
+    chooseMethod?: unknown;
+  };
   if (!restaurantId) {
     res.status(400).json({ error: 'restaurantId is required' });
     return;
   }
+
+  // Snapshot is an array of stringy IDs, capped — a Json column is forgiving
+  // but we don't want a misbehaving client pushing megabytes of payload here.
+  let cleanSnapshot: string[] | undefined;
+  if (optionsSnapshot !== undefined && optionsSnapshot !== null) {
+    if (!Array.isArray(optionsSnapshot) || optionsSnapshot.length > 100) {
+      res.status(400).json({ error: 'optionsSnapshot must be an array of ≤100 IDs' });
+      return;
+    }
+    cleanSnapshot = optionsSnapshot
+      .map((v) => String(v))
+      .filter((s) => s.length > 0 && s.length <= 64);
+  }
+
+  let cleanMethod: string | undefined;
+  if (chooseMethod !== undefined && chooseMethod !== null) {
+    if (typeof chooseMethod !== 'string' || !VALID_CHOOSE_METHODS.has(chooseMethod)) {
+      res.status(400).json({ error: `chooseMethod must be one of: ${[...VALID_CHOOSE_METHODS].join(', ')}` });
+      return;
+    }
+    cleanMethod = chooseMethod;
+  }
+
   const record = await prisma.userAccepted.create({
-    data: { userId: req.userId, restaurantId },
+    data: {
+      userId: req.userId,
+      restaurantId,
+      // Prisma's Json input type rejects `undefined` differently from `null`;
+      // omitting via spread keeps legacy clients (no snapshot) working unchanged.
+      ...(cleanSnapshot !== undefined && { optionsSnapshot: cleanSnapshot }),
+      chooseMethod: cleanMethod ?? null,
+    },
     include: { restaurant: true },
   });
   res.status(201).json({ accepted: record });
+});
+
+// ── Insights ──────────────────────────────────────────────────
+//
+// Aggregate analytics over the user's acceptance history. Compute in one pass
+// over UserAccepted: a single findMany + an in-memory rollup, which is fine
+// for any realistic per-user history size (acceptances are sparse).
+
+// GET /api/users/me/insights
+router.get('/me/insights', async (req: Request, res: Response) => {
+  const userId = req.userId;
+
+  const rows = await prisma.userAccepted.findMany({
+    where: { userId },
+    select: {
+      restaurantId: true,
+      acceptedAt: true,
+      optionsSnapshot: true,
+      chooseMethod: true,
+      restaurant: { select: { id: true, name: true, cuisineType: true } },
+    },
+    orderBy: { acceptedAt: 'desc' },
+  });
+
+  // First pass: build a map of restaurantId → consideration / win counts.
+  // Considerations come from optionsSnapshot entries; wins from the
+  // acceptance itself (one per row).
+  type RestStat = { name: string | null; cuisineType: string | null; considered: number; wins: number };
+  const stats = new Map<string, RestStat>();
+
+  const bump = (id: string, key: 'considered' | 'wins', name?: string | null, cuisineType?: string | null) => {
+    const entry = stats.get(id) ?? { name: name ?? null, cuisineType: cuisineType ?? null, considered: 0, wins: 0 };
+    entry[key] += 1;
+    if (name && !entry.name) entry.name = name;
+    if (cuisineType && !entry.cuisineType) entry.cuisineType = cuisineType;
+    stats.set(id, entry);
+  };
+
+  const methodCounts: Record<string, number> = {};
+  const cuisineConsidered: Record<string, number> = {};
+  const cuisineChosen: Record<string, number> = {};
+
+  for (const row of rows) {
+    const winnerId = String(row.restaurantId);
+    bump(winnerId, 'wins', row.restaurant?.name, row.restaurant?.cuisineType);
+
+    if (row.restaurant?.cuisineType) {
+      cuisineChosen[row.restaurant.cuisineType] = (cuisineChosen[row.restaurant.cuisineType] ?? 0) + 1;
+    }
+
+    if (Array.isArray(row.optionsSnapshot)) {
+      for (const id of row.optionsSnapshot as unknown[]) {
+        const idStr = String(id);
+        if (!idStr) continue;
+        bump(idStr, 'considered');
+      }
+    }
+
+    const method = row.chooseMethod ?? 'unknown';
+    methodCounts[method] = (methodCounts[method] ?? 0) + 1;
+  }
+
+  // Fill in names + cuisine for restaurants that appeared in snapshots but
+  // were never winners — they aren't joined on UserAccepted.restaurant.
+  const missingIds = [...stats.entries()]
+    .filter(([, v]) => !v.name)
+    .map(([id]) => Number(id))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  if (missingIds.length > 0) {
+    const fillers = await prisma.restaurant.findMany({
+      where: { id: { in: missingIds } },
+      select: { id: true, name: true, cuisineType: true },
+    });
+    for (const r of fillers) {
+      const entry = stats.get(String(r.id));
+      if (entry) {
+        entry.name = r.name;
+        entry.cuisineType = r.cuisineType;
+      }
+    }
+  }
+
+  // Second pass: derive cuisine-considered totals using the now-filled names.
+  // We rebuild this here rather than during the first pass so cuisines on
+  // not-yet-resolved snapshot entries get counted too.
+  for (const row of rows) {
+    if (!Array.isArray(row.optionsSnapshot)) continue;
+    for (const id of row.optionsSnapshot as unknown[]) {
+      const entry = stats.get(String(id));
+      if (entry?.cuisineType) {
+        cuisineConsidered[entry.cuisineType] = (cuisineConsidered[entry.cuisineType] ?? 0) + 1;
+      }
+    }
+  }
+
+  // ── Roll-ups ──
+  const all = [...stats.entries()]
+    .filter(([, v]) => v.considered > 0 || v.wins > 0)
+    .map(([id, v]) => ({
+      restaurantId: id,
+      name: v.name ?? `Restaurant #${id}`,
+      cuisineType: v.cuisineType,
+      considered: v.considered,
+      wins: v.wins,
+      winRate: v.considered > 0 ? v.wins / v.considered : (v.wins > 0 ? 1 : 0),
+    }));
+
+  const topConsidered = [...all]
+    .filter((r) => r.considered > 0)
+    .sort((a, b) => b.considered - a.considered)
+    .slice(0, 5);
+
+  // "Often considered, never chosen" — entries with ≥ 2 considerations and 0 wins.
+  // A threshold of 2 filters out one-off pool entries and surfaces real avoidance.
+  const oftenSkipped = [...all]
+    .filter((r) => r.considered >= 2 && r.wins === 0)
+    .sort((a, b) => b.considered - a.considered)
+    .slice(0, 5);
+
+  const recent = rows.slice(0, 8).map((r) => ({
+    restaurantId: String(r.restaurantId),
+    name: r.restaurant?.name ?? `Restaurant #${r.restaurantId}`,
+    acceptedAt: r.acceptedAt,
+    chooseMethod: r.chooseMethod ?? null,
+    competing: Array.isArray(r.optionsSnapshot)
+      ? (r.optionsSnapshot as unknown[])
+          .map(String)
+          .filter((id) => id !== String(r.restaurantId))
+          .map((id) => stats.get(id)?.name ?? `Restaurant #${id}`)
+      : [],
+  }));
+
+  res.json({
+    totalDecisions: rows.length,
+    distinctChosen: new Set(rows.map((r) => r.restaurantId)).size,
+    methodCounts,
+    cuisineConsidered,
+    cuisineChosen,
+    topConsidered,
+    oftenSkipped,
+    recent,
+  });
 });
 
 // ── Archives ──────────────────────────────────────────────────
@@ -270,22 +537,39 @@ router.get('/me/reviews', async (req: Request, res: Response) => {
 // POST /api/users/me/reviews
 router.post('/me/reviews', async (req: Request, res: Response) => {
   const { restaurantId, rating, content } = req.body as {
-    restaurantId?: number;
-    rating?: number;
-    content?: string;
+    restaurantId?: unknown;
+    rating?: unknown;
+    content?: unknown;
   };
 
-  if (!restaurantId || rating == null) {
-    res.status(400).json({ error: 'restaurantId and rating are required' });
+  // restaurantId must be a positive integer — pass NaN/3.14/"5" through to
+  // Prisma and you get a confusing 500 instead of a clean 400.
+  if (typeof restaurantId !== 'number' || !Number.isInteger(restaurantId) || restaurantId <= 0) {
+    res.status(400).json({ error: 'restaurantId must be a positive integer' });
     return;
   }
-  if (rating < 1 || rating > 5) {
-    res.status(400).json({ error: 'rating must be between 1 and 5' });
+  // rating must be a finite number in 1..5. The old check `rating < 1 || rating > 5`
+  // accepts NaN (NaN compares false in both directions) and Infinity (Infinity > 5 — fine
+  // but Decimal storage rejects it later anyway). Tighten here so the error is the
+  // caller's, not Prisma's.
+  if (typeof rating !== 'number' || !Number.isFinite(rating) || rating < 1 || rating > 5) {
+    res.status(400).json({ error: 'rating must be a finite number between 1 and 5' });
     return;
+  }
+  // Content is optional but capped — storing megabyte reviews is not a feature.
+  let cleanContent: string | undefined;
+  if (content !== undefined && content !== null) {
+    if (typeof content !== 'string') {
+      res.status(400).json({ error: 'content must be a string' }); return;
+    }
+    if (content.length > MAX_REVIEW_CONTENT) {
+      res.status(400).json({ error: `content must be ${MAX_REVIEW_CONTENT} characters or fewer` }); return;
+    }
+    cleanContent = content;
   }
 
   const review = await prisma.review.create({
-    data: { userId: req.userId, restaurantId, rating, content },
+    data: { userId: req.userId, restaurantId, rating, content: cleanContent ?? null },
     include: { restaurant: true },
   });
   recomputeCommunityRating(restaurantId).catch((err) => console.warn('[communityRating] recompute failed:', err));
@@ -311,7 +595,7 @@ router.delete('/me/reviews/:reviewId', async (req: Request, res: Response) => {
 // ── History wipe ──────────────────────────────────────────────
 
 // DELETE /api/users/me/history/:restaurantId
-// Removes ALL of this user's traces of one restaurant: favorites, selections,
+// Removes ALL of this user's traces of one restaurant: favorites, options,
 // archives, accepted history, and reviews. Used by the History page's "delete"
 // action. Atomic so the UI's local optimistic update can't drift from the DB.
 router.delete('/me/history/:restaurantId', async (req: Request, res: Response) => {
@@ -322,7 +606,7 @@ router.delete('/me/history/:restaurantId', async (req: Request, res: Response) =
 
   await prisma.$transaction([
     prisma.userFavorite.deleteMany({ where: { userId: req.userId, restaurantId } }),
-    prisma.userSelection.deleteMany({ where: { userId: req.userId, restaurantId } }),
+    prisma.userOption.deleteMany({ where: { userId: req.userId, restaurantId } }),
     prisma.userArchive.deleteMany({ where: { userId: req.userId, restaurantId } }),
     prisma.userAccepted.deleteMany({ where: { userId: req.userId, restaurantId } }),
     prisma.review.deleteMany({ where: { userId: req.userId, restaurantId } }),
@@ -375,9 +659,9 @@ router.post('/me/refresh-places', externalApiLimiter, async (req: Request, res: 
   const userLinks = await prisma.user.findUnique({
     where: { id: req.userId },
     select: {
-      favorites:  { select: { restaurantId: true } },
-      selections: { select: { restaurantId: true } },
-      accepted:   { select: { restaurantId: true } },
+      favorites: { select: { restaurantId: true } },
+      options:   { select: { restaurantId: true } },
+      accepted:  { select: { restaurantId: true } },
     },
   });
 
@@ -385,7 +669,7 @@ router.post('/me/refresh-places', externalApiLimiter, async (req: Request, res: 
 
   const linkedIds = [...new Set([
     ...userLinks.favorites.map((f) => f.restaurantId),
-    ...userLinks.selections.map((s) => s.restaurantId),
+    ...userLinks.options.map((o) => o.restaurantId),
     ...userLinks.accepted.map((a) => a.restaurantId),
   ])];
 

@@ -67,7 +67,7 @@ function GroupCard({ group }) {
   const badge = STATUS_BADGE[group.status] ?? STATUS_BADGE.OPEN;
   // List endpoint returns _count.members (members excluding host). +1 for the host.
   const memberCount = (group._count?.members ?? 0) + 1;
-  const selectionCount = group.selections?.length ?? 0;
+  const optionCount = group.options?.length ?? 0;
 
   return (
     <Link
@@ -87,7 +87,7 @@ function GroupCard({ group }) {
       </div>
       <div className="mt-3 flex items-center gap-4 text-xs text-gray-500">
         <span>{memberCount} member{memberCount !== 1 ? 's' : ''}</span>
-        {group.status !== 'DONE' && <span>{selectionCount} selection{selectionCount !== 1 ? 's' : ''}</span>}
+        {group.status !== 'DONE' && <span>{optionCount} option{optionCount !== 1 ? 's' : ''}</span>}
         {group.status === 'VOTING' && group.sessionId && (
           <span className="text-orange-600 font-medium">Voting in progress →</span>
         )}

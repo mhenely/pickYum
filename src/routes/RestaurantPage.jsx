@@ -3,15 +3,17 @@ import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router-dom";
 import {
   addUserAcceptance,
-  removeUserSelection,
+  removeUserOption,
   updateUserFavorites,
 } from "../redux/slices/userInfoSlice";
 import RatingDisplay from "../components/RatingDisplay";
+import RestaurantMiniCard from "../components/RestaurantMiniCard";
 import useCurrentUser from "../hooks/useCurrentUser";
 import getMostRecentDate from "../utils/getMostRecentDate";
 
 import InfoRow from "../components/InfoRow";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
+import { normalizeUrl } from "../utils/normalizeUrl";
 import RestaurantDetailModal from "../components/RestaurantDetailModal";
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -22,66 +24,6 @@ const mean = (nums) => nums.reduce((a, b) => a + b, 0) / nums.length;
 const getUserRating = (reviews, id) => {
   const list = reviews[sid(id)];
   return list?.length ? mean(list.map((r) => r.rating)) : null;
-};
-
-// ── Mini card — mirrors ChoosePage style ──────────────────────
-
-const MiniCard = ({ id, isActive, personalRating, lastChosen, onClick, onRemove, onUnfavorite, onInfo, restaurantMap = {} }) => {
-  const r = restaurantMap[id];
-  if (!r) return null;
-  return (
-    <div
-      onClick={onClick}
-      className={[
-        "relative rounded-lg border p-3 bg-white cursor-pointer shadow-sm",
-        "transition-all duration-150 select-none",
-        "hover:shadow-md hover:border-orange-300",
-        isActive
-          ? "border-orange-500 ring-2 ring-orange-300 bg-orange-50"
-          : "border-gray-200",
-      ].join(" ")}
-    >
-      <div className="flex justify-between items-start gap-2">
-        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); onInfo?.(); }}
-            className="font-semibold text-sm text-orange-600 hover:underline leading-tight text-left"
-          >
-            {r.name}
-          </button>
-          <RatingDisplay
-            restaurantId={id}
-            googleRating={r.rating ?? null}
-            personalRating={personalRating}
-            compact
-          />
-          {lastChosen && (
-            <span className="text-[10px] text-gray-400 whitespace-nowrap">
-              Last Chosen {lastChosen}
-            </span>
-          )}
-        </div>
-        {onUnfavorite && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onUnfavorite(); }}
-            className="text-red-500 hover:text-red-300 text-base shrink-0 leading-none"
-          >
-            &#9829;
-          </button>
-        )}
-        {onRemove && !onUnfavorite && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onRemove(); }}
-            className="text-gray-300 hover:text-red-400 text-xs shrink-0 mt-0.5 leading-none"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-      <p className="text-xs text-gray-500 mt-0.5">{r.type}</p>
-      <p className="text-xs text-gray-400">Opens {r.hours}</p>
-    </div>
-  );
 };
 
 // ── Detail panel ─────────────────────────────────────────────
@@ -135,8 +77,8 @@ const DetailPanel = ({ id, userInfo, dispatch, onChooseNow, restaurantMap = {} }
         <InfoRow label="Price"   value={PRICE_LABELS[r.price] ?? '—'} />
         <InfoRow label="Hours"   value={cleanVal(r.hours) ?? '—'} />
         <InfoRow label="Phone"   value={phone ?? '—'}   href={phone ? `tel:${phone}` : undefined} />
-        <InfoRow label="Website" value={website ?? '—'} href={website ? `https://${website}` : undefined} external />
-        <InfoRow label="Yelp"    value={yelp ?? '—'}    href={yelp ? `https://${yelp}` : undefined} external />
+        <InfoRow label="Website" value={website ?? '—'} href={normalizeUrl(website)} external />
+        <InfoRow label="Yelp"    value={yelp ?? '—'}    href={normalizeUrl(yelp)}    external />
       </div>
 
       <div className="flex gap-2 mt-3">
@@ -250,7 +192,7 @@ const RestaurantPage = () => {
   const userInfo = useCurrentUser();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const allRestaurants = customRestaurants;
-  const { favorites, selections, reviews } = userInfo;
+  const { favorites, options, reviews } = userInfo;
 
   const [activeIds, setActiveIds] = useState(
     restaurantId ? [restaurantId] : []
@@ -310,8 +252,14 @@ const RestaurantPage = () => {
     setActiveIds((prev) => prev.filter((x) => sid(x) !== sid(id)));
 
   const handleChooseNow = (id) => {
-    dispatch(addUserAcceptance({ restaurantId: id }));
-    dispatch(removeUserSelection(id));
+    // Direct accept from the restaurant page — the active list at this moment
+    // was the user's consideration set (everything currently in `activeIds`).
+    dispatch(addUserAcceptance({
+      restaurantId: id,
+      optionsSnapshot: activeIds.map(String),
+      chooseMethod: 'direct',
+    }));
+    dispatch(removeUserOption(id));
     setChosenId(id);
   };
 
@@ -432,13 +380,13 @@ const RestaurantPage = () => {
                   </p>
                   <div className="flex flex-col gap-2">
                     {favorites.map((id) => (
-                      <MiniCard
+                      <RestaurantMiniCard
                         key={id}
                         id={id}
                         isActive={activeSet.has(sid(id))}
                         personalRating={getUserRating(reviews, id)}
                         lastChosen={getMostRecentDate(userInfo.accepted, id)}
-                        onClick={() => handleCardClick(id)}
+                        onCardClick={() => handleCardClick(id)}
                         onUnfavorite={() =>
                           dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
                         }
@@ -450,21 +398,21 @@ const RestaurantPage = () => {
                 </div>
               )}
 
-              {selections.length > 0 && (
+              {options.length > 0 && (
                 <div>
                   <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                    Selections
+                    Options
                   </p>
                   <div className="flex flex-col gap-2">
-                    {selections.map((id) => (
-                      <MiniCard
+                    {options.map((id) => (
+                      <RestaurantMiniCard
                         key={id}
                         id={id}
                         isActive={activeSet.has(sid(id))}
                         personalRating={getUserRating(reviews, id)}
                         lastChosen={getMostRecentDate(userInfo.accepted, id)}
-                        onClick={() => handleCardClick(id)}
-                        onRemove={() => dispatch(removeUserSelection(id))}
+                        onCardClick={() => handleCardClick(id)}
+                        onRemove={() => dispatch(removeUserOption(id))}
                         onInfo={() => setDetailId(id)}
                         restaurantMap={allRestaurants}
                       />
@@ -473,9 +421,9 @@ const RestaurantPage = () => {
                 </div>
               )}
 
-              {favorites.length === 0 && selections.length === 0 && (
+              {favorites.length === 0 && options.length === 0 && (
                 <p className="text-sm text-gray-400 italic text-center">
-                  No restaurants in your favorites or selections yet.
+                  No restaurants in your favorites or options yet.
                 </p>
               )}
             </div>
@@ -494,13 +442,13 @@ const RestaurantPage = () => {
           ) : (
             <div className="flex flex-col gap-3">
               {favorites.map((id) => (
-                <MiniCard
+                <RestaurantMiniCard
                   key={id}
                   id={id}
                   isActive={activeSet.has(sid(id))}
                   personalRating={getUserRating(reviews, id)}
                   lastChosen={getMostRecentDate(userInfo.accepted, id)}
-                  onClick={() => handleCardClick(id)}
+                  onCardClick={() => handleCardClick(id)}
                   onUnfavorite={() =>
                     dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
                   }
@@ -561,22 +509,22 @@ const RestaurantPage = () => {
           )}
         </div>
 
-        {/* Right: Selections */}
+        {/* Right: Options */}
         <div className="w-full lg:w-52 lg:shrink-0">
-          <h2 className="text-lg font-bold text-gray-900 mb-3">Selections</h2>
-          {selections.length === 0 ? (
-            <p className="text-xs text-gray-400 italic">No selections yet.</p>
+          <h2 className="text-lg font-bold text-gray-900 mb-3">Options</h2>
+          {options.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">No options yet.</p>
           ) : (
             <div className="flex flex-col gap-3">
-              {selections.map((id) => (
-                <MiniCard
+              {options.map((id) => (
+                <RestaurantMiniCard
                   key={id}
                   id={id}
                   isActive={activeSet.has(sid(id))}
                   personalRating={getUserRating(reviews, id)}
                   lastChosen={getMostRecentDate(userInfo.accepted, id)}
-                  onClick={() => handleCardClick(id)}
-                  onRemove={() => dispatch(removeUserSelection(id))}
+                  onCardClick={() => handleCardClick(id)}
+                  onRemove={() => dispatch(removeUserOption(id))}
                   onInfo={() => setDetailId(id)}
                   restaurantMap={allRestaurants}
                 />

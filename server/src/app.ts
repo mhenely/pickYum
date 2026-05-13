@@ -53,7 +53,11 @@ export function createApp() {
     origin: clientUrl || 'http://localhost:5173',
     credentials: true,
   }));
-  app.use(express.json());
+  // 32KB upper bound — the largest legitimate payload is a session create with
+  // 50 candidate IDs + restaurant snapshots, which weighs in around 5KB. 32KB
+  // gives generous headroom while making it expensive for an attacker to push
+  // megabytes of garbage at the JSON parser before any route validation runs.
+  app.use(express.json({ limit: '32kb' }));
   app.use(cookieParser());
   app.use(passport.initialize());
 

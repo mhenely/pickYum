@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
-import { persistAddReview, removeUserReview, updateUserFavorites, archiveRestaurant, unarchiveRestaurant, removeFromHistory, addUserSelection } from '../redux/slices/userInfoSlice';
+import { persistAddReview, removeUserReview, updateUserFavorites, archiveRestaurant, unarchiveRestaurant, removeFromHistory, addUserOption } from '../redux/slices/userInfoSlice';
 import RatingDisplay from '../components/RatingDisplay';
 import RestaurantReviewModal from '../components/RestaurantReviewModal';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
@@ -66,7 +66,7 @@ const ConfirmModal = ({ action, restaurantName, onConfirm, onCancel }) => (
 
 // ── Restaurant card ───────────────────────────────────────────
 
-const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, isArchived, isInSelections, note, onCardClick, onNameClick, onArchiveAction, dispatch }) => {
+const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, isArchived, isInOptions, note, onCardClick, onNameClick, onArchiveAction, dispatch }) => {
   const reviews = currentUser.reviews[id] || [];
   const personalRating =
     reviews.length > 0
@@ -188,12 +188,12 @@ const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, isArchived, 
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                if (!isInSelections) dispatch(addUserSelection(id));
+                if (!isInOptions) dispatch(addUserOption(id));
               }}
-              disabled={isInSelections}
+              disabled={isInOptions}
               className="rounded-md border border-orange-200 px-2 py-1 text-xs font-medium text-orange-500 hover:bg-orange-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
-              {isInSelections ? '✓ In selections' : '+ Add to selections'}
+              {isInOptions ? '✓ In options' : '+ Add to options'}
             </button>
           )}
         </div>
@@ -241,7 +241,7 @@ const UserHistoryPage = () => {
   };
 
   const archivedSet = new Set((currentUser.archived ?? []).map(String));
-  const selectionSet = new Set(currentUser.selections.map(String));
+  const optionSet = new Set(currentUser.options.map(String));
 
   // Unique restaurant IDs that appear in history (accepted + reviewed)
   const allHistoryIds = [
@@ -353,7 +353,7 @@ const UserHistoryPage = () => {
               currentUser={currentUser}
               favoriteSet={favoriteSet}
               isArchived={false}
-              isInSelections={selectionSet.has(String(id))}
+              isInOptions={optionSet.has(String(id))}
               note={currentUser.notes?.[String(id)] ?? null}
               onCardClick={handleCardClick}
               onNameClick={setDetailId}
@@ -389,7 +389,7 @@ const UserHistoryPage = () => {
                     currentUser={currentUser}
                     favoriteSet={favoriteSet}
                     isArchived={true}
-                    isInSelections={false}
+                    isInOptions={false}
                     note={currentUser.notes?.[String(id)] ?? null}
                     onCardClick={handleCardClick}
                     onArchiveAction={handleArchiveAction}

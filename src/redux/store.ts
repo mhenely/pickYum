@@ -22,7 +22,7 @@ export type RootState   = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;
 
 // Persist guest-mode state to localStorage so unauthenticated users keep their
-// favorites/selections/etc. across page reloads. Authenticated users skip this
+// favorites/options/etc. across page reloads. Authenticated users skip this
 // path — their data is the server's source of truth.
 //
 // 300 ms debounce: keeps subscribe cheap during burst dispatches (e.g. loading
@@ -42,7 +42,7 @@ store.subscribe(() => {
     try {
       localStorage.setItem('pickyum_guest', JSON.stringify({
         favorites:         user.favorites,
-        selections:        user.selections,
+        options:           user.options,
         accepted:          user.accepted,
         archived:          user.archived   ?? [],
         reviews:           user.reviews,

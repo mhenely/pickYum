@@ -75,13 +75,13 @@ const AboutPage = () => {
         <AccordionItem title="Getting Started" emoji="🚀" defaultOpen>
           <div className="flex flex-col gap-3 mt-3">
             <p className="text-sm text-gray-600 leading-relaxed">
-              pickYum requires an account so your selections, favorites, and history stay with you. Sign up with email or log in instantly with Google.
+              pickYum requires an account so your options, favorites, and history stay with you. Sign up with email or log in instantly with Google.
             </p>
             <Step number="1" title="Create an account or log in">
               Head to the <Link to="/authentication" className="text-orange-600 hover:underline font-medium">Sign In page</Link> and enter your email and password, or click <strong>Continue with Google</strong>.
             </Step>
-            <Step number="2" title="Add restaurants to your Selections">
-              Selections are the pool of restaurants for tonight. Add them from the <strong>Search</strong>, <strong>Compare</strong>, or <strong>Choose</strong> page — anywhere you see <Chip>Add to Selections</Chip>.
+            <Step number="2" title="Add restaurants to your Options">
+              Options are the pool of restaurants for tonight. Add them from the <strong>Search</strong>, <strong>Compare</strong>, or <strong>Choose</strong> page — anywhere you see <Chip>Add to Options</Chip>.
             </Step>
             <Step number="3" title="Let the app decide">
               Go to <strong>Choose</strong> and flip a coin or spin the roulette. Accept the winner — it's logged to your history automatically.
@@ -95,13 +95,13 @@ const AboutPage = () => {
               <p className="font-semibold text-gray-800 text-sm mb-2">🪙 Coin Flip Mode</p>
               <ol className="flex flex-col gap-2.5">
                 <Step number="1" title="Assign Heads and Tails">
-                  Tap the <Chip color="amber">H</Chip> or <Chip>T</Chip> buttons on any selection card, or drag the tokens onto a card.
+                  Tap the <Chip color="amber">H</Chip> or <Chip>T</Chip> buttons on any option card, or drag the tokens onto a card.
                 </Step>
                 <Step number="2" title="Flip the coin">
                   Click <strong>Choose My Fate</strong>. The coin spins and lands on Heads or Tails.
                 </Step>
                 <Step number="3" title="Accept or remove the winner">
-                  Click <Chip color="green">Accept</Chip> to log it and remove from selections, or <Chip color="red">Remove</Chip> to drop it without logging.
+                  Click <Chip color="green">Accept</Chip> to log it and remove from options, or <Chip color="red">Remove</Chip> to drop it without logging.
                 </Step>
               </ol>
             </div>
@@ -109,26 +109,26 @@ const AboutPage = () => {
               <p className="font-semibold text-gray-800 text-sm mb-2">🎰 Roulette Mode</p>
               <p className="text-sm text-gray-600 mb-2">Switch to roulette when you have more than two options. Click <strong>Switch to Roulette</strong> in the left sidebar.</p>
               <ul className="text-sm text-gray-600 space-y-1.5 list-disc list-inside">
-                <li>All current selections appear as wheel slices (requires at least 2).</li>
+                <li>All current options appear as wheel slices (requires at least 2).</li>
                 <li>Click <strong>Choose My Fate</strong> to spin. The wheel slows and highlights the winner.</li>
                 <li>Use <strong>🎲 Surprise Me</strong> to skip the flip and jump straight to the acceptance screen.</li>
               </ul>
             </div>
             <div className="rounded-lg bg-orange-50 border border-orange-100 px-4 py-3">
               <p className="text-sm text-orange-800">
-                <strong>Tip:</strong> Use <strong>⚙ Filters</strong> to narrow the flip pool by price, cuisine, or "open now" — without removing restaurants from your selections.
+                <strong>Tip:</strong> Use <strong>⚙ Filters</strong> to narrow the flip pool by price, cuisine, or "open now" — without removing restaurants from your options.
               </p>
             </div>
           </div>
         </AccordionItem>
 
-        <AccordionItem title="Selections & Favorites" emoji="⭐">
+        <AccordionItem title="Options & Favorites" emoji="⭐">
           <div className="flex flex-col gap-4 mt-3">
             <div>
-              <p className="text-sm font-semibold text-gray-700 mb-1.5">Selections</p>
+              <p className="text-sm font-semibold text-gray-700 mb-1.5">Options</p>
               <ul className="text-sm text-gray-600 space-y-1.5 list-disc list-inside">
-                <li>Selections appear in the header bar on Search, Compare, and Choose pages.</li>
-                <li>Remove one by clicking <strong>✕</strong> next to its name in the bar or the Selections dropdown.</li>
+                <li>Options appear in the header bar on Search, Compare, and Choose pages.</li>
+                <li>Remove one by clicking <strong>✕</strong> next to its name in the bar or the Options dropdown.</li>
                 <li>Can't find your restaurant? Type a custom name on the Choose page to add it instantly.</li>
               </ul>
             </div>
@@ -148,10 +148,10 @@ const AboutPage = () => {
             Evaluate up to <strong>4 restaurants at once</strong> before handing it off to the coin.
           </p>
           <ul className="text-sm text-gray-600 space-y-2 list-disc list-inside">
-            <li>Click any restaurant card in the Favorites or Selections sidebars to open its detail panel.</li>
+            <li>Click any restaurant card in the Favorites or Options sidebars to open its detail panel.</li>
             <li>Keep clicking to add more panels side-by-side (up to 4). Click a panel's <strong>✕</strong> to close it.</li>
             <li>Each panel shows cuisine, price, hours, phone, website, Yelp, takeout/delivery, and ratings.</li>
-            <li>Use <Chip>Add to Selections</Chip> and <Chip color="red">♥ Favorite</Chip> without leaving the page.</li>
+            <li>Use <Chip>Add to Options</Chip> and <Chip color="red">♥ Favorite</Chip> without leaving the page.</li>
           </ul>
         </AccordionItem>
 
@@ -217,7 +217,7 @@ const AboutPage = () => {
 
         <AccordionItem title="Tips & Shortcuts" emoji="💡">
           <ul className="text-sm text-gray-600 space-y-2.5 list-disc list-inside mt-3">
-            <li>The <strong>Selections dropdown</strong> in the navbar lets you peek at your lineup and remove restaurants from any page.</li>
+            <li>The <strong>Options dropdown</strong> in the navbar lets you peek at your lineup and remove restaurants from any page.</li>
             <li>On the Choose page, type in the search box to find and add any restaurant — or add a custom name on the fly.</li>
             <li>Use <strong>🎲 Surprise Me</strong> to skip straight to a random pick without flipping or spinning.</li>
             <li>Your Google profile photo appears in the navbar. Without Google login, a generic avatar shows instead.</li>
@@ -232,7 +232,7 @@ const AboutPage = () => {
       <div className="mt-10 rounded-2xl bg-orange-500 px-8 py-8 text-center">
         <p className="text-white font-bold text-xl mb-2">Ready to eat?</p>
         <p className="text-orange-100 text-sm mb-5">
-          Add some restaurants to your selections and let the coin decide.
+          Add some restaurants to your options and let the coin decide.
         </p>
         <Link
           to={userId ? `/choose/${userId}` : '/authentication'}

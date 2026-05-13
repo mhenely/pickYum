@@ -4,9 +4,9 @@ import { Link, useBlocker } from "react-router-dom";
 
 import {
   addUserAcceptance,
-  addUserSelection,
+  addUserOption,
   addCustomRestaurant,
-  removeUserSelection,
+  removeUserOption,
   updateUserFavorites,
   incrementFlipCount,
 } from "../redux/slices/userInfoSlice";
@@ -58,7 +58,7 @@ const isOpenNow = (hoursStr) => {
 const HelpMeChoosePage = () => {
   const dispatch = useDispatch();
   const userInfo = useCurrentUser();
-  const { favorites, selections, reviews } = userInfo;
+  const { favorites, options, reviews } = userInfo;
 
   // ── Mode ──────────────────────────────────────────────────
   const [mode, setMode] = useState("coinflip");
@@ -97,10 +97,10 @@ const HelpMeChoosePage = () => {
   const [showFilters, setShowFilters]   = useState(false);
 
   useEffect(() => {
-    const ids = selections.map(sid);
+    const ids = options.map(sid);
     if (headsId && !ids.includes(sid(headsId))) setHeadsId(null);
     if (tailsId && !ids.includes(sid(tailsId))) setTailsId(null);
-  }, [selections, headsId, tailsId]);
+  }, [options, headsId, tailsId]);
 
   // ── Custom restaurants ────────────────────────────────────
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
@@ -117,7 +117,7 @@ const HelpMeChoosePage = () => {
       )
     : new Set();
 
-  const flipPool = selections.filter((id) => {
+  const flipPool = options.filter((id) => {
     const r = allRestaurants[id];
     if (!r) return false;
     if (priceFilter.size > 0 && !priceFilter.has(r.price)) return false;
@@ -132,8 +132,8 @@ const HelpMeChoosePage = () => {
   const filtersActive =
     priceFilter.size > 0 || cuisineFilter || openNowOnly || avoidDays > 0;
 
-  const selectionCuisines = [...new Set(
-    selections.map((id) => allRestaurants[id]?.type).filter(Boolean)
+  const optionCuisines = [...new Set(
+    options.map((id) => allRestaurants[id]?.type).filter(Boolean)
   )].sort();
 
   // ── Custom restaurant add ─────────────────────────────────
@@ -146,7 +146,7 @@ const HelpMeChoosePage = () => {
         id,
         data: { name: trimmed, type: 'Custom', price: 1, rating: null, hours: 'N/A', phone: 'N/A', website: 'N/A', yelp: 'N/A', takeout: false, delivery: false },
       }));
-      dispatch(addUserSelection(id));
+      dispatch(addUserOption(id));
       setSearchQuery('');
       return;
     }
@@ -157,7 +157,7 @@ const HelpMeChoosePage = () => {
         id,
         data: { name: trimmed, type: 'Custom', price: restaurant.priceLevel ?? 1, rating: null, hours: restaurant.hours ?? 'N/A', phone: restaurant.phone ?? 'N/A', website: restaurant.website ?? 'N/A', yelp: restaurant.yelpUrl ?? 'N/A', takeout: restaurant.takeout ?? false, delivery: restaurant.delivery ?? false },
       }));
-      dispatch(addUserSelection(id));
+      dispatch(addUserOption(id));
       setSearchQuery('');
     } catch (err) {
       console.error('Failed to create custom restaurant:', err);
@@ -174,15 +174,15 @@ const HelpMeChoosePage = () => {
   // ── Group vote modal ──────────────────────────────────────
   const [showGroupModal, setShowGroupModal] = useState(false);
 
-  // ── Selection search ──────────────────────────────────────
+  // ── Option search ─────────────────────────────────────────
   const [searchQuery, setSearchQuery]   = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
   const [customError, setCustomError]   = useState('');
 
   const trimmedQuery = searchQuery.trim();
 
-  const isAlreadyInSelections = trimmedQuery
-    ? selections.some(
+  const isAlreadyInOptions = trimmedQuery
+    ? options.some(
         (id) => allRestaurants[id]?.name?.toLowerCase() === trimmedQuery.toLowerCase()
       )
     : false;
@@ -191,7 +191,7 @@ const HelpMeChoosePage = () => {
     ? Object.entries(allRestaurants)
         .filter(([id, r]) =>
           r.name.toLowerCase().includes(trimmedQuery.toLowerCase()) &&
-          !selections.map(String).includes(String(id))
+          !options.map(String).includes(String(id))
         )
         .slice(0, 7)
     : [];
@@ -260,8 +260,15 @@ const HelpMeChoosePage = () => {
 
   const handleCoinAccept = () => {
     if (!coinWinnerId) return;
-    dispatch(addUserAcceptance({ restaurantId: coinWinnerId }));
-    dispatch(removeUserSelection(coinWinnerId));
+    // Snapshot what was "in the running" at this moment — the flip pool,
+    // which is the user's options minus filter exclusions. Powers
+    // Insights' "competing restaurants" + "often-considered, never-chosen".
+    dispatch(addUserAcceptance({
+      restaurantId: coinWinnerId,
+      optionsSnapshot: flipPool.map(String),
+      chooseMethod: 'flip',
+    }));
+    dispatch(removeUserOption(coinWinnerId));
     setFlipResult(null);
     setFlipComplete(false);
     setSparkles([]);
@@ -270,14 +277,14 @@ const HelpMeChoosePage = () => {
 
   const handleCoinRemove = () => {
     if (!coinWinnerId) return;
-    dispatch(removeUserSelection(coinWinnerId));
+    dispatch(removeUserOption(coinWinnerId));
     setFlipResult(null);
     setFlipComplete(false);
     setSparkles([]);
   };
 
-  const handleRemoveSelection = (id) => {
-    dispatch(removeUserSelection(id));
+  const handleRemoveOption = (id) => {
+    dispatch(removeUserOption(id));
     if (sid(headsId) === sid(id)) setHeadsId(null);
     if (sid(tailsId) === sid(id)) setTailsId(null);
     if (flipComplete) { setFlipResult(null); setFlipComplete(false); }
@@ -300,15 +307,19 @@ const HelpMeChoosePage = () => {
 
   const handleRouletteAccept = () => {
     if (!rouletteWinnerId) return;
-    dispatch(addUserAcceptance({ restaurantId: rouletteWinnerId }));
-    dispatch(removeUserSelection(rouletteWinnerId));
+    dispatch(addUserAcceptance({
+      restaurantId: rouletteWinnerId,
+      optionsSnapshot: flipPool.map(String),
+      chooseMethod: 'spin',
+    }));
+    dispatch(removeUserOption(rouletteWinnerId));
     setAcceptedModalId(rouletteWinnerId);
     setRouletteWinnerId(null);
   };
 
   const handleRouletteRemove = () => {
     if (!rouletteWinnerId) return;
-    dispatch(removeUserSelection(rouletteWinnerId));
+    dispatch(removeUserOption(rouletteWinnerId));
     setRouletteWinnerId(null);
   };
 
@@ -388,10 +399,10 @@ const HelpMeChoosePage = () => {
                     onInfo={() => setDetailId(id)}
                   >
                     <button
-                      onClick={() => dispatch(addUserSelection(id))}
+                      onClick={() => dispatch(addUserOption(id))}
                       className="mt-2 w-full rounded-lg text-xs bg-gradient-to-br from-orange-500 to-red-500 text-white py-1 hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
                     >
-                      + Add to Selections
+                      + Add to Options
                     </button>
                   </RestaurantMiniCard>
                 );
@@ -424,11 +435,18 @@ const HelpMeChoosePage = () => {
             {mode === "coinflip" ? "🎰 Switch to Roulette" : "🪙 Switch to Coin Flip"}
           </button>
 
-          {/* Surprise me */}
+          {/* Surprise me — picks a random restaurant from the flip pool and
+              records it as an acceptance for Insights tracking. */}
           <button
             onClick={() => {
               if (flipPool.length < 1) return;
               const randomId = flipPool[Math.floor(Math.random() * flipPool.length)];
+              dispatch(addUserAcceptance({
+                restaurantId: randomId,
+                optionsSnapshot: flipPool.map(String),
+                chooseMethod: 'surprise',
+              }));
+              dispatch(removeUserOption(randomId));
               setAcceptedModalId(randomId);
             }}
             disabled={flipPool.length < 1}
@@ -447,13 +465,13 @@ const HelpMeChoosePage = () => {
           </button>
         </div>
 
-        {/* ── RIGHT: Selections + game area ────────────────── */}
+        {/* ── RIGHT: Options + game area ────────────────── */}
         <div className="flex-1 flex flex-col gap-8">
 
-          {/* Selections */}
+          {/* Options */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-bold text-gray-900">Selections</h2>
+              <h2 className="text-lg font-bold text-gray-900">Options</h2>
               <button
                 onClick={() => setShowFilters((f) => !f)}
                 className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border transition-colors ${
@@ -463,8 +481,8 @@ const HelpMeChoosePage = () => {
                 }`}
               >
                 {filtersActive ? '⚙ Filters active' : '⚙ Filters'}
-                {filtersActive && flipPool.length !== selections.length && (
-                  <span className="ml-0.5 font-semibold">{flipPool.length}/{selections.length}</span>
+                {filtersActive && flipPool.length !== options.length && (
+                  <span className="ml-0.5 font-semibold">{flipPool.length}/{options.length}</span>
                 )}
               </button>
             </div>
@@ -501,7 +519,7 @@ const HelpMeChoosePage = () => {
                 </div>
 
                 {/* Cuisine */}
-                {selectionCuisines.length > 1 && (
+                {optionCuisines.length > 1 && (
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-medium text-gray-500 w-14 shrink-0">Cuisine</span>
                     <select
@@ -510,7 +528,7 @@ const HelpMeChoosePage = () => {
                       className="text-xs rounded border border-gray-300 pl-2 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
                     >
                       <option value="">All</option>
-                      {selectionCuisines.map((c) => (
+                      {optionCuisines.map((c) => (
                         <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
@@ -547,10 +565,10 @@ const HelpMeChoosePage = () => {
                 {/* Pool summary */}
                 <p className="text-xs text-gray-400">
                   {flipPool.length === 0
-                    ? 'No selections match these filters.'
-                    : flipPool.length === selections.length
-                    ? 'All selections in flip pool.'
-                    : `${flipPool.length} of ${selections.length} selections in flip pool.`}
+                    ? 'No options match these filters.'
+                    : flipPool.length === options.length
+                    ? 'All options in flip pool.'
+                    : `${flipPool.length} of ${options.length} options in flip pool.`}
                 </p>
               </div>
             )}
@@ -565,25 +583,25 @@ const HelpMeChoosePage = () => {
                 onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
                 placeholder="Add a restaurant by name…"
                 className={`w-full rounded-md border-0 py-1.5 px-3 text-sm shadow-sm ring-1 ring-inset placeholder:text-gray-400 focus:ring-2 focus:ring-inset ${
-                  isAlreadyInSelections
+                  isAlreadyInOptions
                     ? 'text-gray-400 bg-gray-50 ring-gray-200 focus:ring-gray-300'
                     : 'text-gray-900 ring-gray-300 focus:ring-orange-500'
                 }`}
               />
-              {isAlreadyInSelections && trimmedQuery && (
-                <p className="mt-1 text-xs text-amber-600">Already in your selections</p>
+              {isAlreadyInOptions && trimmedQuery && (
+                <p className="mt-1 text-xs text-amber-600">Already in your options</p>
               )}
               {customError && (
                 <p className="mt-1 text-xs text-red-600">{customError}</p>
               )}
-              {searchFocused && trimmedQuery && !isAlreadyInSelections && (
+              {searchFocused && trimmedQuery && !isAlreadyInOptions && (
                 <ul className="absolute z-20 mt-1 w-full bg-white rounded-md shadow-lg ring-1 ring-black/5 max-h-52 overflow-y-auto">
                   {searchSuggestions.map(([id, r]) => (
                     <li key={id}>
                       <button
                         type="button"
                         onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => { dispatch(addUserSelection(id)); setSearchQuery(''); }}
+                        onClick={() => { dispatch(addUserOption(id)); setSearchQuery(''); }}
                         className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-orange-50 hover:text-orange-700 flex justify-between items-center"
                       >
                         <span>{r.name}</span>
@@ -608,7 +626,7 @@ const HelpMeChoosePage = () => {
               )}
             </div>
 
-            {mode === "coinflip" && selections.length > 0 && (
+            {mode === "coinflip" && options.length > 0 && (
               isTouchDevice ? (
                 <p className="mb-3 text-xs text-gray-400">Tap H / T on a card to assign heads or tails.</p>
               ) : (
@@ -632,14 +650,14 @@ const HelpMeChoosePage = () => {
               )
             )}
 
-            {selections.length === 0 && (
+            {options.length === 0 && (
               <p className="text-xs text-gray-400 italic">
                 Type a name above or add restaurants from your Favorites or the Search page.
               </p>
             )}
 
             <div className="flex flex-wrap gap-3">
-              {selections.map((id) => {
+              {options.map((id) => {
                 const rating    = getUserRating(reviews, id);
                 const badge     = sid(headsId) === sid(id) ? "heads" : sid(tailsId) === sid(id) ? "tails" : null;
                 const isWinner  =
@@ -649,7 +667,11 @@ const HelpMeChoosePage = () => {
                 return (
                   <div
                     key={id}
+                    // flex column makes the wrapper a flex item with stretched
+                    // height in its row, and h-full on the inner card fills it
+                    // — keeps cards in the same row aligned to the tallest.
                     style={{ minWidth: "140px", maxWidth: "180px" }}
+                    className="flex flex-col"
                     onDragOver={!isTouchDevice ? (e) => handleDragOver(e, id) : undefined}
                     onDragLeave={!isTouchDevice ? handleDragLeave : undefined}
                     onDrop={!isTouchDevice ? (e) => handleDrop(e, id) : undefined}
@@ -662,7 +684,7 @@ const HelpMeChoosePage = () => {
                       isDragOver={!isTouchDevice && sid(dragOverId) === sid(id)}
                       isWinner={isWinner}
                       isExcluded={isExcluded}
-                      onRemove={() => handleRemoveSelection(id)}
+                      onRemove={() => handleRemoveOption(id)}
                       onInfo={() => setDetailId(id)}
                       onAssignHeads={mode === "coinflip" && isTouchDevice ? () => handleTapAssign(id, "heads") : undefined}
                       onAssignTails={mode === "coinflip" && isTouchDevice ? () => handleTapAssign(id, "tails") : undefined}
@@ -679,20 +701,20 @@ const HelpMeChoosePage = () => {
             <div className="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 py-10 px-6 text-center">
               <p className="text-4xl mb-3">🍽️</p>
               <p className="text-lg font-semibold text-gray-800 mb-1">
-                {selections.length === 0
+                {options.length === 0
                   ? "Nothing to flip yet"
-                  : selections.length === 1
+                  : options.length === 1
                   ? "Add one more to start flipping"
                   : "Not enough in your flip pool"}
               </p>
               <p className="text-sm text-gray-500 mb-5 max-w-xs mx-auto">
-                {selections.length === 0
-                  ? "Add at least 2 restaurants to your selections to use the coin flip or roulette."
-                  : selections.length === 1
-                  ? "You have 1 selection — add one more to start flipping."
+                {options.length === 0
+                  ? "Add at least 2 restaurants to your options to use the coin flip or roulette."
+                  : options.length === 1
+                  ? "You have 1 option — add one more to start flipping."
                   : "Your active filters are excluding too many options. Try adjusting them above."}
               </p>
-              {selections.length < 2 && (
+              {options.length < 2 && (
                 <Link
                   to="/"
                   className="inline-block rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-5 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
@@ -776,7 +798,7 @@ const HelpMeChoosePage = () => {
             <div className="flex flex-col items-center gap-5">
               <RouletteWheel
                 ref={wheelRef}
-                selections={flipPool}
+                options={flipPool}
                 restaurants={allRestaurants}
                 onSpinComplete={handleRouletteComplete}
               />

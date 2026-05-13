@@ -1,5 +1,10 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type UserConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// Vite's UserConfig doesn't know about Vitest's `test` block. Augmenting with
+// vitest's module-augmentation has been flaky across versions, so we type the
+// config locally and cast.
+type ViteUserConfigWithTest = UserConfig & { test?: Record<string, unknown> };
 
 export default defineConfig({
   plugins: [react()],
@@ -39,4 +44,4 @@ export default defineConfig({
       exclude: ['src/main.tsx', 'src/test/**'],
     },
   },
-})
+} as ViteUserConfigWithTest)

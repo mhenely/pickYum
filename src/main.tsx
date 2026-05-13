@@ -29,6 +29,7 @@ const AboutPage           = lazy(() => import('./routes/AboutPage'));
 const GroupSessionPage    = lazy(() => import('./routes/GroupSessionPage'));
 const GroupDetailPage     = lazy(() => import('./routes/GroupDetailPage'));
 const SocialsPage         = lazy(() => import('./routes/SocialsPage'));
+const InsightsPage        = lazy(() => import('./routes/InsightsPage'));
 const PrivacyPage         = lazy(() => import('./routes/PrivacyPage'));
 const TermsPage           = lazy(() => import('./routes/TermsPage'));
 
@@ -83,6 +84,7 @@ const router = createBrowserRouter([
           { path: 'userInfo/:userId', element: <Suspense fallback={PageFallback}><UserInfoPage /></Suspense> },
           { path: 'restaurant/:restaurantId?', element: <Suspense fallback={PageFallback}><RestaurantPage /></Suspense> },
           { path: 'socials', element: <Suspense fallback={PageFallback}><SocialsPage /></Suspense> },
+          { path: 'insights', element: <Suspense fallback={PageFallback}><InsightsPage /></Suspense> },
           { path: 'groups/:id', element: <Suspense fallback={PageFallback}><GroupDetailPage /></Suspense> },
         ],
       },

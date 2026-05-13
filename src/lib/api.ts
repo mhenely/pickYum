@@ -107,6 +107,39 @@ export interface CommunityReview {
   user: { id: number; username: string };
 }
 
+export type ChooseMethod = 'flip' | 'spin' | 'vote' | 'surprise' | 'direct';
+
+export interface DecisionInsights {
+  totalDecisions: number;
+  distinctChosen: number;
+  methodCounts: Record<string, number>;
+  cuisineConsidered: Record<string, number>;
+  cuisineChosen: Record<string, number>;
+  topConsidered: Array<{
+    restaurantId: string;
+    name: string;
+    cuisineType: string | null;
+    considered: number;
+    wins: number;
+    winRate: number;
+  }>;
+  oftenSkipped: Array<{
+    restaurantId: string;
+    name: string;
+    cuisineType: string | null;
+    considered: number;
+    wins: number;
+    winRate: number;
+  }>;
+  recent: Array<{
+    restaurantId: string;
+    name: string;
+    acceptedAt: string;
+    chooseMethod: ChooseMethod | null;
+    competing: string[];
+  }>;
+}
+
 export const api = {
   auth: {
     me: () =>
@@ -129,7 +162,9 @@ export const api = {
       request<{ message: string }>('/api/auth/resend-verification', { method: 'POST' }),
   },
   users: {
-    updateProfile: (body: { email?: string; username?: string; password?: string }) =>
+    // Server requires `currentPassword` whenever `email` or `password` is set
+    // (re-auth before sensitive change). Username-only updates don't need it.
+    updateProfile: (body: { email?: string; username?: string; password?: string; currentPassword?: string }) =>
       request<{ user: AuthUser }>('/api/users/me', { method: 'PATCH', body: JSON.stringify(body) }),
     deleteAccount: () =>
       request<{ message: string }>('/api/users/me', { method: 'DELETE' }),
@@ -139,19 +174,24 @@ export const api = {
       request('/api/users/me/favorites/' + id, { method: 'POST' }),
     removeFavorite: (id: number) =>
       request('/api/users/me/favorites/' + id, { method: 'DELETE' }),
-    getSelections: () =>
-      request<{ selections: ApiRestaurant[] }>('/api/users/me/selections'),
-    addSelection: (id: number) =>
-      request('/api/users/me/selections/' + id, { method: 'POST' }),
-    removeSelection: (id: number) =>
-      request('/api/users/me/selections/' + id, { method: 'DELETE' }),
+    getOptions: () =>
+      request<{ options: ApiRestaurant[] }>('/api/users/me/options'),
+    addOption: (id: number) =>
+      request('/api/users/me/options/' + id, { method: 'POST' }),
+    removeOption: (id: number) =>
+      request('/api/users/me/options/' + id, { method: 'DELETE' }),
     getAccepted: () =>
       request<{ accepted: ApiAccepted[] }>('/api/users/me/accepted'),
-    addAccepted: (restaurantId: number) =>
+    addAccepted: (
+      restaurantId: number,
+      opts: { optionsSnapshot?: string[]; chooseMethod?: ChooseMethod } = {},
+    ) =>
       request<{ accepted: ApiAccepted }>('/api/users/me/accepted', {
         method: 'POST',
-        body: JSON.stringify({ restaurantId }),
+        body: JSON.stringify({ restaurantId, ...opts }),
       }),
+    getInsights: () =>
+      request<DecisionInsights>('/api/users/me/insights'),
     getArchived: () =>
       request<{ archived: ApiRestaurant[] }>('/api/users/me/archived'),
     archiveRestaurant: (id: number) =>
@@ -159,7 +199,7 @@ export const api = {
     unarchiveRestaurant: (id: number) =>
       request('/api/users/me/archived/' + id, { method: 'DELETE' }),
     getAll: () =>
-      request<{ favorites: ApiRestaurant[]; selections: ApiRestaurant[]; accepted: ApiAccepted[]; archived: ApiRestaurant[]; reviews: ApiReview[] }>('/api/users/me/all'),
+      request<{ favorites: ApiRestaurant[]; options: ApiRestaurant[]; accepted: ApiAccepted[]; archived: ApiRestaurant[]; reviews: ApiReview[] }>('/api/users/me/all'),
     getReviews: () =>
       request<{ reviews: ApiReview[] }>('/api/users/me/reviews'),
     addReview: (body: { restaurantId: number; rating: number; content?: string }) =>
@@ -187,6 +227,14 @@ export const api = {
       takeout?: boolean;
       delivery?: boolean;
     }) => request<{ restaurant: ApiRestaurant }>('/api/restaurants', { method: 'POST', body: JSON.stringify(body) }),
+    // Public detail fetch — used by the voting page's info modal. Auth-optional
+    // (guest voters can call it), returns only Restaurant-table fields (no
+    // personal reviews, no favorites). The route is already gated this way
+    // server-side via lack of requireAuth on GET /api/restaurants/:id.
+    get: (id: number) =>
+      request<{ restaurant: ApiRestaurant & { address?: string | null; communityRating?: string | null } }>(
+        `/api/restaurants/${id}`,
+      ),
     getReviews: (id: number) =>
       request<{ reviews: CommunityReview[]; averageRating: number | null; communityRating: number | null }>(
         `/api/restaurants/${id}/reviews`,

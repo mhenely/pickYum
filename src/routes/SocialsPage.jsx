@@ -223,27 +223,41 @@ function GroupsTab() {
             </button>
             {showArchived && (
               <div className="flex flex-col gap-3">
-                {archivedGroups.map((g) => (
-                  <div key={g.id} className="rounded-xl border border-gray-200 bg-gray-50 p-4 opacity-70">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-gray-600 truncate">{g.name}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">Archived</p>
-                      </div>
-                    </div>
-                    {g.events?.filter((e) => e.status === 'DONE').map((e) => (
-                      <div key={e.id} className="mt-2 rounded-lg bg-white border border-gray-100 px-3 py-2">
-                        <p className="text-xs font-medium text-gray-700">{e.name}</p>
-                        {e.result && (
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            Winner: <span className="font-semibold text-green-700">{e.result.winnerName}</span>
-                            {e.scheduledFor && ` · ${new Date(e.scheduledFor).toLocaleDateString()}`}
+                {archivedGroups.map((g) => {
+                  const doneEvents = (g.events ?? []).filter((e) => e.status === 'DONE');
+                  return (
+                    // Wraps in a Link so the entire card navigates to the group
+                    // detail page (which shows full event history + ballot detail).
+                    <Link
+                      key={g.id}
+                      to={`/groups/${g.id}`}
+                      className="block rounded-xl border border-gray-200 bg-gray-50 p-4 opacity-80 hover:opacity-100 hover:border-orange-200 hover:bg-white transition-all"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-gray-600 truncate">{g.name}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">
+                            Archived · {doneEvents.length} past vote{doneEvents.length !== 1 ? 's' : ''} · tap to view
                           </p>
-                        )}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                ))}
+                      {doneEvents.slice(0, 3).map((e) => (
+                        <div key={e.id} className="mt-2 rounded-lg bg-white border border-gray-100 px-3 py-2">
+                          <p className="text-xs font-medium text-gray-700">{e.name}</p>
+                          {e.result && (
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Winner: <span className="font-semibold text-green-700">{e.result.winnerName}</span>
+                              {e.scheduledFor && ` · ${new Date(e.scheduledFor).toLocaleDateString()}`}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                      {doneEvents.length > 3 && (
+                        <p className="text-xs text-gray-400 mt-2 italic">+ {doneEvents.length - 3} more inside</p>
+                      )}
+                    </Link>
+                  );
+                })}
               </div>
             )}
           </section>

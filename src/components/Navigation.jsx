@@ -4,7 +4,7 @@ import Footer from "./Footer";
 import { Disclosure, DisclosureButton, DisclosurePanel, Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react'
 import { Bars3Icon, XMarkIcon, BellIcon } from '@heroicons/react/24/outline'
 import { useDispatch, useSelector } from "react-redux";
-import { removeUserSelection } from "../redux/slices/userInfoSlice";
+import { removeUserOption } from "../redux/slices/userInfoSlice";
 import { logoutUser } from "../redux/slices/authSlice";
 import useCurrentUser from "../hooks/useCurrentUser";
 import RestaurantDetailModal from "./RestaurantDetailModal";
@@ -28,7 +28,7 @@ const NavBar = () => {
   const navigate = useNavigate();
   const currentUser = useCurrentUser();
   const [detailId, setDetailId] = useState(null);
-  const currentSelections = currentUser.selections;
+  const currentOptions = currentUser.options;
   const userId = currentUser.id;
   const dispatch = useDispatch();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
@@ -38,7 +38,10 @@ const NavBar = () => {
   // ── Notifications (friend requests + group invites + voting alerts) ─
   const [pendingRequests, setPendingRequests] = useState([]);
   const [pendingGroupInvites, setPendingGroupInvites] = useState([]);
-  const [votingGroups, setVotingGroups] = useState([]);
+  // Active group votes the user can join right now. Flattened from
+  // groups.events[] — one entry per VOTING event with a live sessionId so the
+  // notification link goes straight to the voting page.
+  const [activeVotes, setActiveVotes] = useState([]);
 
   const fetchNotifications = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -49,7 +52,25 @@ const NavBar = () => {
       ]);
       setPendingRequests(requests);
       setPendingGroupInvites(pendingInvites);
-      setVotingGroups((groups ?? []).filter((g) => g.status === 'VOTING'));
+
+      // Walk every group the user is in, surface each event currently in
+      // VOTING status. (The old code filtered `groups` by a non-existent
+      // `Group.status` field — voting state lives on `GroupEvent`, not Group.)
+      const votes = [];
+      for (const g of groups ?? []) {
+        for (const ev of g.events ?? []) {
+          if (ev.status === 'VOTING' && ev.sessionId) {
+            votes.push({
+              groupId:   g.id,
+              groupName: g.name,
+              eventId:   ev.id,
+              eventName: ev.name,
+              sessionId: ev.sessionId,
+            });
+          }
+        }
+      }
+      setActiveVotes(votes);
     } catch { /* non-fatal */ }
   }, [isAuthenticated]);
 
@@ -89,10 +110,11 @@ const NavBar = () => {
   };
 
   const navigation = [
-    { name: 'Search',  link: '/',                active: pathname === '/' },
-    { name: 'Compare', link: '/restaurant',       active: pathname.startsWith('/restaurant') },
-    { name: 'Choose',  link: `/choose/${userId}`, active: pathname.startsWith('/choose') },
-    { name: 'Socials', link: '/socials',          active: pathname.startsWith('/socials') || pathname.startsWith('/groups'), authOnly: true },
+    { name: 'Search',   link: '/',                active: pathname === '/' },
+    { name: 'Compare',  link: '/restaurant',       active: pathname.startsWith('/restaurant') },
+    { name: 'Choose',   link: `/choose/${userId}`, active: pathname.startsWith('/choose') },
+    { name: 'Socials',  link: '/socials',          active: pathname.startsWith('/socials') || pathname.startsWith('/groups'), authOnly: true },
+    { name: 'Insights', link: '/insights',         active: pathname.startsWith('/insights'), authOnly: true },
   ];
 
   const userNavigation = isAuthenticated
@@ -132,9 +154,9 @@ const NavBar = () => {
                         )}
                       >
                         {item.name}
-                        {item.name === 'Groups' && (pendingGroupInvites.length + votingGroups.length) > 0 && (
+                        {item.name === 'Groups' && (pendingGroupInvites.length + activeVotes.length) > 0 && (
                           <span className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
-                            {pendingGroupInvites.length + votingGroups.length}
+                            {pendingGroupInvites.length + activeVotes.length}
                           </span>
                         )}
                       </Link>
@@ -146,7 +168,7 @@ const NavBar = () => {
               {/* Right side: desktop controls + mobile hamburger */}
               <div className="flex items-center gap-2">
 
-                {/* Desktop: Selections dropdown + profile */}
+                {/* Desktop: Options dropdown + profile */}
                 <div className="hidden md:flex items-center gap-2">
 
                   {/* Notifications bell */}
@@ -154,9 +176,9 @@ const NavBar = () => {
                     <Menu as="div" className="relative">
                       <MenuButton className="relative flex items-center rounded-md p-2 text-stone-500 hover:bg-orange-50 hover:text-orange-600 transition-colors">
                         <BellIcon className="h-5 w-5" />
-                        {(pendingRequests.length + pendingGroupInvites.length + votingGroups.length) > 0 && (
+                        {(pendingRequests.length + pendingGroupInvites.length + activeVotes.length) > 0 && (
                           <span className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
-                            {pendingRequests.length + pendingGroupInvites.length + votingGroups.length}
+                            {pendingRequests.length + pendingGroupInvites.length + activeVotes.length}
                           </span>
                         )}
                       </MenuButton>
@@ -245,25 +267,27 @@ const NavBar = () => {
                           </div>
                         )}
 
-                        {/* Voting in progress section */}
-                        {votingGroups.length > 0 && (
+                        {/* Voting in progress section — one entry per live event */}
+                        {activeVotes.length > 0 && (
                           <>
                             <div className="px-4 py-2.5 border-t border-gray-100">
                               <p className="text-xs font-semibold text-orange-500 uppercase tracking-wider">
                                 Voting In Progress
-                                <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-orange-500 text-white text-[9px] font-bold">{votingGroups.length}</span>
+                                <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-orange-500 text-white text-[9px] font-bold">{activeVotes.length}</span>
                               </p>
                             </div>
                             <div className="py-1">
-                              {votingGroups.map((g) => (
-                                <MenuItem key={g.id}>
+                              {activeVotes.map((v) => (
+                                <MenuItem key={`${v.groupId}-${v.eventId}`}>
                                   <Link
-                                    to={g.sessionId ? `/vote/${g.sessionId}` : '/groups'}
+                                    to={`/vote/${v.sessionId}`}
                                     className="flex items-center justify-between px-4 py-2.5 gap-3 hover:bg-orange-50 transition-colors"
                                   >
                                     <div className="min-w-0">
-                                      <p className="text-sm font-medium text-gray-800 truncate">{g.name}</p>
-                                      <p className="text-xs text-orange-500">🗳 Voting is open — join now</p>
+                                      <p className="text-sm font-medium text-gray-800 truncate">{v.eventName}</p>
+                                      <p className="text-xs text-orange-500 truncate">
+                                        🗳 {v.groupName} — voting open
+                                      </p>
                                     </div>
                                     <span className="text-gray-400 text-xs shrink-0">→</span>
                                   </Link>
@@ -350,8 +374,8 @@ const NavBar = () => {
                 >
                   <span className="flex items-center gap-2">
                     {item.name}
-                    {item.name === 'Groups' && (pendingGroupInvites.length + votingGroups.length) > 0 && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingGroupInvites.length + votingGroups.length}</span>
+                    {item.name === 'Groups' && (pendingGroupInvites.length + activeVotes.length) > 0 && (
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingGroupInvites.length + activeVotes.length}</span>
                     )}
                   </span>
                 </DisclosureButton>
@@ -423,6 +447,32 @@ const NavBar = () => {
               </div>
             )}
 
+            {/* Active votes — mobile */}
+            {isAuthenticated && activeVotes.length > 0 && (
+              <div className="border-t border-orange-100 px-4 py-3">
+                <p className="text-xs font-semibold text-orange-500 uppercase tracking-wider mb-2">
+                  Voting In Progress
+                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-orange-500 text-white text-[9px] font-bold">{activeVotes.length}</span>
+                </p>
+                <div className="flex flex-col gap-2">
+                  {activeVotes.map((v) => (
+                    <DisclosureButton
+                      key={`${v.groupId}-${v.eventId}`}
+                      as={Link}
+                      to={`/vote/${v.sessionId}`}
+                      className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-orange-50 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{v.eventName}</p>
+                        <p className="text-xs text-orange-500 truncate">🗳 {v.groupName} — tap to vote</p>
+                      </div>
+                      <span className="text-gray-400 text-xs shrink-0">→</span>
+                    </DisclosureButton>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* User section */}
             <div className="border-t border-orange-100 pt-3 pb-4 px-2">
               {isAuthenticated ? (
@@ -461,12 +511,12 @@ const NavBar = () => {
         {(pathname === '/' || pathname.startsWith('/choose') || pathname.startsWith('/restaurant') || pathname.startsWith('/socials')) && (
         <header className="bg-gradient-to-r from-orange-50 to-amber-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8 flex items-center gap-3 flex-wrap">
-            <h1 className="text-xs font-bold tracking-widest text-orange-800 uppercase shrink-0">Selections</h1>
-            {currentSelections.length === 0 ? (
-              <span className="text-sm text-orange-400 italic">No selections yet — add one from the Search page.</span>
+            <h1 className="text-xs font-bold tracking-widest text-orange-800 uppercase shrink-0">Options</h1>
+            {currentOptions.length === 0 ? (
+              <span className="text-sm text-orange-400 italic">No options yet — add one from the Search page.</span>
             ) : (
               <div className="flex items-center gap-2 flex-wrap">
-                {currentSelections.map((id) => {
+                {currentOptions.map((id) => {
                   const name = allRestaurants[id]?.name ?? 'Custom entry';
                   return (
                     <div
@@ -476,7 +526,7 @@ const NavBar = () => {
                     >
                       <span className="text-sm font-medium text-orange-900">{name}</span>
                       <button
-                        onClick={(e) => { e.stopPropagation(); dispatch(removeUserSelection(id)); }}
+                        onClick={(e) => { e.stopPropagation(); dispatch(removeUserOption(id)); }}
                         className="ml-0.5 text-orange-400 hover:text-red-500 leading-none transition-colors text-xs font-bold"
                         aria-label={`Remove ${name}`}
                       >
@@ -496,7 +546,7 @@ const NavBar = () => {
         <div className="bg-orange-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-2 flex items-center justify-between gap-4">
             <p className="text-xs text-orange-800">
-              You're browsing as a guest — your selections, favorites, and history will be lost when you leave.
+              You're browsing as a guest — your options, favorites, and history will be lost when you leave.
             </p>
             <Link
               to="/authentication"

@@ -10,7 +10,7 @@ export const users = [
     "state":"Virginia",
     "zipcode":"23203",
     "favorites": [1, 2, 3, 10],
-    "selections": [4, 6, 8, 18],
+    "options": [4, 6, 8, 18],
     "accepted": [
       {
         "restaurantId": 1,

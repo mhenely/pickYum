@@ -62,7 +62,7 @@ const CreateSessionModal = ({ flipPool, restaurantMap, defaultHostName = '', onC
               Tonight's candidates ({candidates.length})
             </p>
             {candidates.length === 0 ? (
-              <p className="text-sm text-red-500">No restaurants in your flip pool. Add some selections and remove filters first.</p>
+              <p className="text-sm text-red-500">No restaurants in your flip pool. Add some options and remove filters first.</p>
             ) : (
               <ul className="space-y-1 max-h-40 overflow-y-auto pr-1">
                 {candidates.map((id) => {

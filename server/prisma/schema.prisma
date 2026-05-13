@@ -20,7 +20,7 @@ model User {
   createdAt       DateTime  @default(now()) @map("created_at")
 
   favorites          UserFavorite[]
-  selections         UserSelection[]
+  options            UserOption[]
   accepted           UserAccepted[]
   reviews            Review[]
   archives           UserArchive[]
@@ -34,9 +34,11 @@ model User {
   receivedRequests FriendRequest[] @relation("ReceivedRequests")
   recommendations  Recommendation[] @relation("SentRecommendations")
 
-  hostedGroups              Group[]               @relation("GroupHost")
+  hostedGroups              Group[]            @relation("GroupHost")
   groupMemberships          GroupMember[]
-  groupEventSelectionsAdded GroupEventSelection[] @relation("GroupEventSelectionAddedBy")
+  groupEventOptionsAdded    GroupEventOption[] @relation("GroupEventOptionAddedBy")
+  groupEventsCreated        GroupEvent[]       @relation("GroupEventCreatedBy")
+  groupFavoritesAdded       GroupFavorite[]    @relation("GroupFavoriteAddedBy")
   receivedGroupInvites      GroupInvite[]         @relation("ReceivedGroupInvites")
   sentGroupInvites          GroupInvite[]         @relation("SentGroupInvites")
 
@@ -53,7 +55,15 @@ enum EmailTokenPurpose {
 model EmailToken {
   id         Int               @id @default(autoincrement())
   userId     Int               @map("user_id")
+  // bcrypt hash of the raw token. Kept around for legacy rows during the
+  // tokenLookup rollout; new rows still store it as defense in depth even
+  // though lookup uses sha256.
   tokenHash  String            @unique @map("token_hash")
+  // Deterministic SHA-256 hex of the raw token. Indexed for O(1) lookup so
+  // /verify-email and /reset-password don't have to bcrypt-loop over every
+  // outstanding token to find a match. Nullable for legacy rows issued
+  // before this column existed; those tokens cannot be consumed anymore.
+  tokenLookup String?          @unique @map("token_lookup")
   purpose    EmailTokenPurpose
   expiresAt  DateTime          @map("expires_at")
   usedAt     DateTime?         @map("used_at")
@@ -136,12 +146,13 @@ model Restaurant {
 
   creator    User?          @relation("CreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   favoritedBy          UserFavorite[]
-  selectedBy           UserSelection[]
+  optionedBy           UserOption[]
   acceptedBy           UserAccepted[]
   archivedBy           UserArchive[]
   reviews              Review[]
   recommendations      Recommendation[]
-  groupEventSelections GroupEventSelection[]
+  groupEventOptions    GroupEventOption[]
+  groupFavorites       GroupFavorite[]
 
   @@index([cuisineType])
   @@index([googleDataUpdatedAt])
@@ -162,7 +173,7 @@ model UserFavorite {
   @@map("user_favorites")
 }
 
-model UserSelection {
+model UserOption {
   userId       Int      @map("user_id")
   restaurantId Int      @map("restaurant_id")
   createdAt    DateTime @default(now()) @map("created_at")
@@ -172,7 +183,7 @@ model UserSelection {
 
   @@id([userId, restaurantId])
   @@index([restaurantId])
-  @@map("user_selections")
+  @@map("user_options")
 }
 
 // Append-only — one row per acceptance so history + counts are simple queries
@@ -181,6 +192,14 @@ model UserAccepted {
   userId       Int      @map("user_id")
   restaurantId Int      @map("restaurant_id")
   acceptedAt   DateTime @default(now()) @map("accepted_at")
+  // Snapshot of the "consideration set" at acceptance time. For solo accepts
+  // this is the user's options list; for group accepts it's the group event's
+  // candidate pool. Stored as a JSON array of restaurant IDs (as strings).
+  // Enables insights like "always-considered, never-chosen" and competitor sets.
+  optionsSnapshot Json?   @map("options_snapshot")
+  // How the choice was reached: 'flip' | 'spin' | 'vote' | 'surprise' | 'direct'.
+  // Null on legacy rows. Drives the decision-method breakdown chart on Insights.
+  chooseMethod       String? @map("choose_method")
 
   user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -243,6 +262,15 @@ enum GroupEventStatus {
   DONE
 }
 
+// How votes are tallied. SIMPLE = approval voting (current behavior, highest
+// count wins). RANKED = instant-runoff / ranked-choice (voters order all
+// candidates by preference, lowest first-place vote is eliminated each round
+// until someone reaches majority).
+enum GroupVoteMethod {
+  SIMPLE
+  RANKED
+}
+
 enum GroupInviteStatus {
   PENDING
   ACCEPTED
@@ -257,10 +285,11 @@ model Group {
   archivedAt DateTime? @map("archived_at")
   createdAt  DateTime  @default(now()) @map("created_at")
 
-  host    User          @relation("GroupHost", fields: [hostId], references: [id], onDelete: Cascade)
-  members GroupMember[]
-  events  GroupEvent[]
-  invites GroupInvite[]
+  host      User            @relation("GroupHost", fields: [hostId], references: [id], onDelete: Cascade)
+  members   GroupMember[]
+  events    GroupEvent[]
+  invites   GroupInvite[]
+  favorites GroupFavorite[]
 
   @@index([hostId])
   @@map("groups")
@@ -272,14 +301,21 @@ model GroupEvent {
   groupId        Int              @map("group_id")
   name           String
   status         GroupEventStatus @default(OPEN)
+  voteMethod     GroupVoteMethod  @default(SIMPLE) @map("vote_method")
+  // The member who proposed this event. Nullable: legacy rows from before
+  // any-member event creation rolled out have no recorded creator, and we
+  // SetNull (not Cascade) so deleting a user doesn't wipe their event history
+  // from the group's archive.
+  createdById    Int?             @map("created_by_id")
   sessionId      String?          @map("session_id")
   votingStartsAt DateTime?        @map("voting_starts_at")
   scheduledFor   DateTime?        @map("scheduled_for")
   createdAt      DateTime         @default(now()) @map("created_at")
 
-  group      Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  selections GroupEventSelection[]
-  result     GroupEventResult?
+  group     Group              @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdBy User?              @relation("GroupEventCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  options   GroupEventOption[]
+  result    GroupEventResult?
 
   @@index([groupId])
   @@index([status])
@@ -291,9 +327,16 @@ model GroupEventResult {
   eventId        Int      @unique @map("event_id")
   hostUsername   String   @map("host_username")
   winnerName     String   @map("winner_name")
-  method         String
+  method         String   // 'vote' | 'flip' | 'spin' — how the winner was ultimately picked
+  voteMethod     String?  @map("vote_method") // 'simple' | 'ranked' — null when method ≠ 'vote'
   participants   String[]
-  scores         Json?
+  scores         Json?    // aggregate scores per candidate
+  ballots        Json?    // per-voter ballots ({[name]: {[id]: bool} for simple, {[name]: string[]} for ranked)
+  // Per-voter identity. {[displayName]: {isGuest: boolean; username: string | null}}
+  // — username (when present) is the voter's auth account name, which may differ
+  // from the display name they typed when joining the session.
+  voterMeta      Json?    @map("voter_meta")
+  irvRounds      Json?    @map("irv_rounds") // round-by-round counts for ranked-choice (winner display)
   restaurantPool Json     @map("restaurant_pool")
   createdAt      DateTime @default(now()) @map("created_at")
 
@@ -302,7 +345,7 @@ model GroupEventResult {
   @@map("group_event_results")
 }
 
-model GroupEventSelection {
+model GroupEventOption {
   id           Int      @id @default(autoincrement())
   eventId      Int      @map("event_id")
   restaurantId Int      @map("restaurant_id")
@@ -311,12 +354,12 @@ model GroupEventSelection {
 
   event      GroupEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
   restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
-  addedBy    User       @relation("GroupEventSelectionAddedBy", fields: [addedById], references: [id], onDelete: Cascade)
+  addedBy    User       @relation("GroupEventOptionAddedBy", fields: [addedById], references: [id], onDelete: Cascade)
 
   @@unique([eventId, restaurantId])
   @@index([eventId])
   @@index([restaurantId])
-  @@map("group_event_selections")
+  @@map("group_event_options")
 }
 
 model GroupMember {
@@ -348,4 +391,24 @@ model GroupInvite {
   @@index([invitedId])
   @@index([groupId])
   @@map("group_invites")
+}
+
+// Shared restaurant favorites scoped to a group — separate from each member's
+// personal favorites. Any group member can add or remove (any member, not just
+// the original adder — these are collectively owned). Used as a "quick add"
+// source when creating a new GroupEvent.
+model GroupFavorite {
+  groupId      Int      @map("group_id")
+  restaurantId Int      @map("restaurant_id")
+  addedById    Int      @map("added_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  group      Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  addedBy    User       @relation("GroupFavoriteAddedBy", fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@id([groupId, restaurantId])
+  @@index([groupId])
+  @@index([restaurantId])
+  @@map("group_favorites")
 }

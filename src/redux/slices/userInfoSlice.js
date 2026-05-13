@@ -4,7 +4,16 @@ import { api } from "../../lib/api";
 const loadGuestData = () => {
   try {
     const raw = localStorage.getItem('pickyum_guest');
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // One-shot migration: the field used to be called `selections`. If a guest
+    // has the old shape in localStorage, carry it forward under the new name
+    // so they don't lose their pre-rename list on their next page load.
+    if (parsed && Array.isArray(parsed.selections) && !Array.isArray(parsed.options)) {
+      parsed.options = parsed.selections;
+      delete parsed.selections;
+    }
+    return parsed;
   } catch { return null; }
 };
 
@@ -18,7 +27,7 @@ const initialState = {
       username: '',
       flipCount:  savedGuest?.flipCount  ?? 0,
       favorites:  savedGuest?.favorites  ?? [],
-      selections: savedGuest?.selections ?? [],
+      options:    savedGuest?.options    ?? [],
       accepted:   savedGuest?.accepted   ?? [],
       archived:   savedGuest?.archived   ?? [],
       reviews:    savedGuest?.reviews    ?? {},
@@ -35,7 +44,7 @@ export const userInfoSlice = createSlice({
   reducers: {
     // Hydrates users[0] from API data after login/session restore
     setUserData: (state, action) => {
-      const { id, email, username, flipCount, favorites, selections, accepted, archived, reviews } = action.payload;
+      const { id, email, username, flipCount, favorites, options, accepted, archived, reviews } = action.payload;
       state.users[0] = {
         ...state.users[0],
         id,
@@ -43,7 +52,7 @@ export const userInfoSlice = createSlice({
         username,
         flipCount: flipCount ?? 0,
         favorites: favorites ?? [],
-        selections: selections ?? [],
+        options: options ?? [],
         accepted: accepted ?? [],
         archived: archived ?? [],
         reviews: reviews ?? {},
@@ -102,17 +111,17 @@ export const userInfoSlice = createSlice({
       ];
     },
 
-    removeUserSelection: (state, action) => {
+    removeUserOption: (state, action) => {
       const id = String(action.payload);
-      state.users[0].selections = state.users[0].selections.filter(
+      state.users[0].options = state.users[0].options.filter(
         (s) => String(s) !== id
       );
     },
 
-    addUserSelection: (state, action) => {
+    addUserOption: (state, action) => {
       const id = String(action.payload);
-      if (!state.users[0].selections.find((s) => String(s) === id)) {
-        state.users[0].selections = [...state.users[0].selections, action.payload];
+      if (!state.users[0].options.find((s) => String(s) === id)) {
+        state.users[0].options = [...state.users[0].options, action.payload];
       }
     },
 
@@ -150,7 +159,7 @@ export const userInfoSlice = createSlice({
       delete state.users[0].reviews[id];
       state.users[0].favorites = state.users[0].favorites.filter((f) => String(f) !== id);
       state.users[0].archived = state.users[0].archived.filter((a) => a !== id);
-      state.users[0].selections = state.users[0].selections.filter((s) => String(s) !== id);
+      state.users[0].options = state.users[0].options.filter((s) => String(s) !== id);
       if (state.users[0].notes) delete state.users[0].notes[id];
     },
 
@@ -176,7 +185,7 @@ export const userInfoSlice = createSlice({
     clearUserData: (state) => {
       state.users[0] = {
         id: null, email: '', username: '', flipCount: 0,
-        favorites: [], selections: [], accepted: [], archived: [], reviews: {}, notes: {},
+        favorites: [], options: [], accepted: [], archived: [], reviews: {}, notes: {},
       };
       state.customRestaurants = {};
       state.isDataLoaded = false;
@@ -191,8 +200,8 @@ export const {
   removeUserReview,
   updateUserFavorites,
   addUserAcceptance,
-  removeUserSelection,
-  addUserSelection,
+  removeUserOption,
+  addUserOption,
   archiveRestaurant,
   unarchiveRestaurant,
   removeFromHistory,
@@ -204,16 +213,19 @@ export const {
   clearUserData,
 } = userInfoSlice.actions;
 
-// Fetches all user data from the API and hydrates users[0] in Redux
+/**
+ * Fetches all user data from the API and hydrates users[0] in Redux.
+ * @type {import('@reduxjs/toolkit').AsyncThunk<void, { id: number; email: string; username: string; flipCount?: number }, {}>}
+ */
 export const loadUserData = createAsyncThunk(
   'userInfo/loadUserData',
   async (user, { dispatch }) => {
-  const { favorites, selections, accepted, archived, reviews } = await api.users.getAll();
+  const { favorites, options, accepted, archived, reviews } = await api.users.getAll();
 
   // Collect all unique restaurants from API responses
   const allApiRestaurants = [
     ...favorites,
-    ...selections,
+    ...options,
     ...archived,
     ...accepted.map((a) => a.restaurant),
     ...reviews.map((r) => r.restaurant),
@@ -249,7 +261,7 @@ export const loadUserData = createAsyncThunk(
     username: user.username,
     flipCount: user.flipCount ?? 0,
     favorites: favorites.map((r) => String(r.id)),
-    selections: selections.map((r) => String(r.id)),
+    options: options.map((r) => String(r.id)),
     archived: archived.map((r) => String(r.id)),
     accepted: accepted.map((a) => ({
       restaurantId: String(a.restaurantId),
@@ -310,7 +322,10 @@ export const refreshStaleRestaurants = createAsyncThunk(
   }
 );
 
-// Persists a new review and stores it in Redux with the API id (or a local id for guests)
+/**
+ * Persists a new review and stores it in Redux with the API id (or a local id for guests).
+ * @type {import('@reduxjs/toolkit').AsyncThunk<void, { restaurantId: string | number; userId: number; content: string; rating: number; date: string }, {}>}
+ */
 export const persistAddReview = createAsyncThunk(
   'userInfo/persistAddReview',
   async ({ restaurantId, userId, content, rating, date }, { dispatch, getState }) => {

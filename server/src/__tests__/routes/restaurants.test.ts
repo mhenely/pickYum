@@ -103,7 +103,10 @@ describe('POST /api/restaurants', () => {
     expect(res.body.restaurant.name).toBe('Burger Joint');
   });
 
-  it('returns the existing restaurant when name already exists (case-insensitive)', async () => {
+  it('returns the existing restaurant (200, no create) when name already exists (case-insensitive)', async () => {
+    // The route is now strict find-or-create: existing rows are returned untouched
+    // (no field overwrite). 200 vs 201 lets callers distinguish "found" from
+    // "created" — and importantly, restaurant.create must not be invoked.
     (mockPrisma.restaurant.findFirst as jest.Mock).mockResolvedValue(fakeRestaurant);
 
     const res = await request(buildApp())
@@ -111,7 +114,7 @@ describe('POST /api/restaurants', () => {
       .set('Cookie', authCookie())
       .send({ name: 'burger joint' });
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     expect(mockPrisma.restaurant.create).not.toHaveBeenCalled();
   });
 });

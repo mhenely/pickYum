@@ -1,8 +1,8 @@
 import { createSlice } from "@reduxjs/toolkit";
 
 // Single boolean: whether the "Help me choose" modal is open. The slice used to
-// also export addSelection / removeSelection / changeZeroIndex actions that
-// mutated a non-existent `selections` array — those would crash if dispatched
+// also export addOption / removeOption / changeZeroIndex actions that
+// mutated a non-existent `options` array — those would crash if dispatched
 // and have been removed.
 
 const initialState = {

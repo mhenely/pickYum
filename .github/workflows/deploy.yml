@@ -1,12 +1,21 @@
-name: Deploy
+name: Backend Deploy
 
-# Runs after CI passes on main. Builds and pushes the backend Docker image to
-# GitHub Container Registry, then deploys (Frontend → Vercel via their action,
-# Backend → wherever you host it: Fly.io / Render / Railway / your own VPS).
+# Frontend deployment is handled by AWS Amplify Hosting, which watches the
+# repo directly and builds per amplify.yml — GitHub Actions plays no role
+# in the frontend deploy.
 #
-# This workflow is intentionally explicit about its hosting assumptions and
-# uses GitHub Actions secrets to avoid wiring up a particular vendor here.
-# Replace the deploy steps with the ones your hosting provider documents.
+# This workflow handles only the backend (Express server in /server):
+#   1. Build the Docker image (see server/Dockerfile)
+#   2. Push to Amazon ECR
+#   3. Deploy to AWS (App Runner shown; ECS / Lightsail patterns commented)
+#
+# Auth uses GitHub OIDC — no long-lived AWS keys stored as secrets. You
+# create one IAM role per environment that trusts GitHub's OIDC issuer
+# and grants the actions below. See DEPLOYMENT.md for the IAM trust policy.
+#
+# Triggers:
+#   - workflow_run: auto-deploys to staging after CI passes on main
+#   - workflow_dispatch: manual trigger (required for production promotion)
 
 on:
   workflow_run:
@@ -14,110 +23,123 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
-    # Manual trigger — useful for re-running a deploy without a fresh commit
-    # or for promoting staging → production on demand.
+
+env:
+  ECR_REPOSITORY: pickyum-server
 
 jobs:
-  build-image:
-    name: Build & push backend image
+  build-and-push:
+    name: Build & push backend image to ECR
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    # OIDC requires `id-token: write`. `contents: read` lets us check out code.
     permissions:
+      id-token: write
       contents: read
-      packages: write
     outputs:
-      image: ${{ steps.meta.outputs.tags }}
+      image-uri: ${{ steps.build.outputs.image-uri }}
+      image-tag: ${{ steps.build.outputs.image-tag }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}/server
-          tags: |
-            type=sha,prefix=,format=short
-            type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: ./server
-          file: ./server/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Build, tag, and push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker build -t $IMAGE_URI ./server
+          docker tag $IMAGE_URI $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $IMAGE_URI
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
   deploy-staging:
-    name: Deploy to staging
-    needs: build-image
+    name: Deploy backend to staging
+    needs: build-and-push
     runs-on: ubuntu-latest
     environment:
       name: staging
-      url: ${{ vars.STAGING_URL }}
+      url: ${{ vars.STAGING_BACKEND_URL }}
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      # ── Frontend → Vercel (preview/staging via Vercel CLI) ──
-      # Replace this step with your actual frontend hosting if not Vercel.
-      - name: Deploy frontend to Vercel staging
-        if: ${{ vars.VERCEL_ENABLED == 'true' }}
-        uses: amondnet/vercel-action@v25
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          # No --prod flag = preview / staging deploy
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      # ── Backend → Fly.io (or your provider) ──
-      # The cleanest pattern is a release command on the host that pulls the
-      # image we just pushed. Replace with your provider's deploy command.
-      - name: Deploy backend to staging
-        if: ${{ vars.FLY_ENABLED == 'true' }}
-        uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Run flyctl deploy
-        if: ${{ vars.FLY_ENABLED == 'true' }}
-        run: flyctl deploy --config server/fly.staging.toml --image ${{ needs.build-image.outputs.image }}
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
+      # ── AWS App Runner (recommended starting point) ──
+      # App Runner pulls the :latest tag we just pushed. start-deployment
+      # tells the service to redeploy with the current source config.
+      - name: Deploy to App Runner (staging)
+        if: ${{ vars.APP_RUNNER_ENABLED == 'true' }}
+        run: |
+          aws apprunner start-deployment \
+            --service-arn ${{ secrets.APP_RUNNER_SERVICE_ARN_STAGING }}
+
+      # ── Alternative: AWS ECS / Fargate ──
+      # Uncomment if you're running ECS instead of App Runner. ECS doesn't have
+      # a "deploy latest tag" command — you force a service redeploy and ECS
+      # pulls the new image on next task placement.
+      #
+      # - name: Deploy to ECS (staging)
+      #   if: ${{ vars.ECS_ENABLED == 'true' }}
+      #   run: |
+      #     aws ecs update-service \
+      #       --cluster ${{ vars.ECS_CLUSTER_STAGING }} \
+      #       --service ${{ vars.ECS_SERVICE_STAGING }} \
+      #       --force-new-deployment
+
+      # ── Alternative: AWS Lightsail Container Service ──
+      # - name: Deploy to Lightsail (staging)
+      #   if: ${{ vars.LIGHTSAIL_ENABLED == 'true' }}
+      #   run: |
+      #     aws lightsail create-container-service-deployment \
+      #       --service-name ${{ vars.LIGHTSAIL_SERVICE_STAGING }} \
+      #       --containers '{"app": {"image": "${{ needs.build-and-push.outputs.image-uri }}", "ports": {"3000": "HTTP"}}}' \
+      #       --public-endpoint '{"containerName": "app", "containerPort": 3000}'
 
   deploy-production:
-    name: Deploy to production
-    needs: [build-image, deploy-staging]
-    # Manual approval gate — production is only promoted by hand.
-    # Configure this in the GitHub repo settings → Environments → production.
+    name: Deploy backend to production
+    needs: [build-and-push, deploy-staging]
+    runs-on: ubuntu-latest
+    # Manual approval gate. Configure required reviewers in
+    # GitHub → Settings → Environments → production.
     environment:
       name: production
-      url: ${{ vars.PRODUCTION_URL }}
-    runs-on: ubuntu-latest
+      url: ${{ vars.PRODUCTION_BACKEND_URL }}
     if: ${{ github.event_name == 'workflow_dispatch' }}
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy frontend to Vercel production
-        if: ${{ vars.VERCEL_ENABLED == 'true' }}
-        uses: amondnet/vercel-action@v25
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_PRODUCTION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Deploy backend to production
-        if: ${{ vars.FLY_ENABLED == 'true' }}
-        uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Run flyctl deploy (production)
-        if: ${{ vars.FLY_ENABLED == 'true' }}
-        run: flyctl deploy --config server/fly.toml --image ${{ needs.build-image.outputs.image }}
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
+      - name: Deploy to App Runner (production)
+        if: ${{ vars.APP_RUNNER_ENABLED == 'true' }}
+        run: |
+          aws apprunner start-deployment \
+            --service-arn ${{ secrets.APP_RUNNER_SERVICE_ARN_PRODUCTION }}

@@ -77,7 +77,20 @@ No API calls are made. All data is loaded from `src/tempData/` and lives in Redu
 | `/userInfo/:userId` | User Profile | Working |
 | `/authentication` | Login/Sign Up | Placeholder — not implemented |
 
+## Documentation
+
+| Doc | Purpose |
+|---|---|
+| [CLAUDE.md](CLAUDE.md) | Codebase guide — file conventions, Redux slices, server routes, auth flow. Start here when working in the code. |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Step-by-step for hosting on AWS Amplify (frontend) and ECR + App Runner (backend). |
+| [MONETIZATION.md](MONETIZATION.md) | Forward-looking revenue strategy: premium subscription, affiliate links, restaurant claim & promote, sponsored placements. Technical requirements and recommended sequencing per path. |
+| [TODO.md](TODO.md) | Open feature/cleanup items. |
+
 ## Known Limitations
+
+> Note: this section is significantly out of date. The codebase now has a full
+> Express/Prisma backend, tests on both ends, and authentication. See CLAUDE.md
+> for current state.
 
 - No backend — all data is mock/hardcoded and resets on refresh
 - Only supports a single hardcoded user (`users[0]`)

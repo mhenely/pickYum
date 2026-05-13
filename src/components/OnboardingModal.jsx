@@ -15,8 +15,8 @@ const STEPS = [
   },
   {
     icon: '📋',
-    title: 'Build your selections',
-    body: 'Add restaurants to your selections — these are the contenders for tonight. You can filter or individually check which ones go into the flip pool.',
+    title: 'Build your options',
+    body: 'Add restaurants to your options — these are the contenders for tonight. You can filter or individually check which ones go into the flip pool.',
   },
   {
     icon: '🪙',

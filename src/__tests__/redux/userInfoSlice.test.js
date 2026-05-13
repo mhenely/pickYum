@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import reducer, {
-  addUserSelection,
-  removeUserSelection,
+  addUserOption,
+  removeUserOption,
   updateUserFavorites,
   addUserAcceptance,
   archiveRestaurant,
@@ -16,29 +16,29 @@ import reducer, {
 const baseState = reducer(undefined, { type: '@@INIT' });
 
 describe('userInfoSlice', () => {
-  describe('addUserSelection', () => {
-    it('adds a new restaurant id to selections', () => {
-      const state = reducer(baseState, addUserSelection('42'));
-      expect(state.users[0].selections).toContain('42');
+  describe('addUserOption', () => {
+    it('adds a new restaurant id to options', () => {
+      const state = reducer(baseState, addUserOption('42'));
+      expect(state.users[0].options).toContain('42');
     });
 
     it('is a no-op when the id is already present', () => {
-      const first = reducer(baseState, addUserSelection('42'));
-      const second = reducer(first, addUserSelection('42'));
-      expect(second.users[0].selections.filter((id) => id == '42').length).toBe(1);
+      const first = reducer(baseState, addUserOption('42'));
+      const second = reducer(first, addUserOption('42'));
+      expect(second.users[0].options.filter((id) => id == '42').length).toBe(1);
     });
   });
 
-  describe('removeUserSelection', () => {
+  describe('removeUserOption', () => {
     it('removes an existing id', () => {
-      const withSel = reducer(baseState, addUserSelection('7'));
-      const removed = reducer(withSel, removeUserSelection('7'));
-      expect(removed.users[0].selections).not.toContain('7');
+      const withSel = reducer(baseState, addUserOption('7'));
+      const removed = reducer(withSel, removeUserOption('7'));
+      expect(removed.users[0].options).not.toContain('7');
     });
 
     it('is a no-op when id is not present', () => {
-      const state = reducer(baseState, removeUserSelection('999'));
-      expect(state.users[0].selections).toEqual(baseState.users[0].selections);
+      const state = reducer(baseState, removeUserOption('999'));
+      expect(state.users[0].options).toEqual(baseState.users[0].options);
     });
   });
 
@@ -106,7 +106,7 @@ describe('userInfoSlice', () => {
         username: 'testuser',
         flipCount: 7,
         favorites: ['1', '2'],
-        selections: ['3'],
+        options: ['3'],
         accepted: [{ restaurantId: '1', date: '2024-01-01' }],
         archived: [],
         reviews: { '1': [{ content: 'Great', rating: 5, date: '2024-01-01' }] },
@@ -117,7 +117,7 @@ describe('userInfoSlice', () => {
       expect(state.users[0].username).toBe('testuser');
       expect(state.users[0].flipCount).toBe(7);
       expect(state.users[0].favorites).toEqual(['1', '2']);
-      expect(state.users[0].selections).toEqual(['3']);
+      expect(state.users[0].options).toEqual(['3']);
     });
 
     it('defaults flipCount to 0 when not provided', () => {

@@ -46,74 +46,97 @@ router.get('/:id', async (req: Request, res: Response) => {
   res.json({ restaurant });
 });
 
-// POST /api/restaurants — upsert by googlePlaceId; falls back to create for custom entries
-// Requires auth so we can record who created custom entries
-router.post('/', requireAuth, async (req: Request, res: Response) => {
-  const {
-    googlePlaceId,
-    name,
-    cuisineType,
-    priceLevel,
-    hours,
-    phone,
-    website,
-    address,
-    yelpUrl,
-    takeout,
-    delivery,
-    googleRating,
-  } = req.body as {
-    googlePlaceId?: string;
-    name: string;
-    cuisineType?: string;
-    priceLevel?: number;
-    hours?: string;
-    phone?: string;
-    website?: string;
-    address?: string;
-    yelpUrl?: string;
-    takeout?: boolean;
-    delivery?: boolean;
-    googleRating?: number;
-  };
+// POST /api/restaurants — find-or-create (never update). Any logged-in user can
+// materialize a Google Place or a custom name into a Restaurant row, but they
+// cannot overwrite fields on a row that already exists. Stale Google data is
+// refreshed only via the authenticated `refreshPlaces` flow, which calls Google
+// server-side rather than trusting client payloads.
+//
+// Caps text fields at conservative lengths so a hostile client can't push
+// megabytes into a shared row that other users see.
+const MAX_NAME       = 200;
+const MAX_TEXT_FIELD = 500;
 
-  if (!name) {
-    res.status(400).json({ error: 'name is required' });
-    return;
+function clipString(v: unknown, max: number): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  if (!trimmed) return undefined;
+  return trimmed.slice(0, max);
+}
+
+// URL fields go to <a href> on the frontend. Reject anything that isn't a
+// plain http(s) URL or a bare host string (we prepend https:// when missing).
+// Blocks `javascript:`, `data:`, `vbscript:`, etc. at the storage boundary so
+// no client-side `href` is ever asked to render a hostile scheme.
+function clipUrl(v: unknown, max: number): string | undefined {
+  const s = clipString(v, max);
+  if (!s) return undefined;
+  if (/^[a-z][a-z0-9+\-.]*:/i.test(s) && !/^https?:\/\//i.test(s)) {
+    // Has a scheme, but it's not http/https — reject. We don't try to
+    // sanitize; refusing is the only safe option.
+    return undefined;
   }
+  return s;
+}
 
-  const data = {
-    name,
-    cuisineType,
-    priceLevel,
-    hours,
-    phone,
-    website,
-    address,
-    yelpUrl,
-    takeout: takeout ?? false,
-    delivery: delivery ?? false,
-    googleRating: googleRating ?? null,
-    createdBy: req.userId,
+router.post('/', requireAuth, async (req: Request, res: Response) => {
+  const body = req.body as {
+    googlePlaceId?: unknown;
+    name?: unknown;
+    cuisineType?: unknown;
+    priceLevel?: unknown;
+    hours?: unknown;
+    phone?: unknown;
+    website?: unknown;
+    address?: unknown;
+    yelpUrl?: unknown;
+    takeout?: unknown;
+    delivery?: unknown;
+    googleRating?: unknown;
   };
 
-  // If a Google Place ID was supplied, upsert so we never duplicate a real place.
-  // For custom entries (no googlePlaceId), find-or-create by name (case-insensitive) so
-  // the same restaurant name always maps to the same DB row across sessions.
-  let restaurant;
+  const name = clipString(body.name, MAX_NAME);
+  if (!name) { res.status(400).json({ error: 'name is required' }); return; }
+
+  const googlePlaceId = clipString(body.googlePlaceId, 200);
+
+  // Find first — if the row already exists, return it untouched. This is the
+  // security-relevant change: previously the upsert's `update` path let any
+  // caller overwrite name/phone/website/etc. on shared Place rows.
   if (googlePlaceId) {
-    restaurant = await prisma.restaurant.upsert({
-      where: { googlePlaceId },
-      create: { googlePlaceId, ...data },
-      update: { name, cuisineType, priceLevel, hours, phone, website, address, yelpUrl, takeout, delivery, googleRating },
-    });
+    const existing = await prisma.restaurant.findUnique({ where: { googlePlaceId } });
+    if (existing) { res.status(200).json({ restaurant: existing }); return; }
   } else {
     const existing = await prisma.restaurant.findFirst({
-      where: { name: { equals: name.trim(), mode: 'insensitive' }, googlePlaceId: null },
+      where: { name: { equals: name, mode: 'insensitive' }, googlePlaceId: null },
     });
-    restaurant = existing ?? await prisma.restaurant.create({ data });
+    if (existing) { res.status(200).json({ restaurant: existing }); return; }
   }
 
+  // Validate numeric fields cleanly — Prisma will reject NaN/Infinity but the
+  // error surface is worse than an early 400.
+  const priceLevel = (typeof body.priceLevel === 'number' && Number.isInteger(body.priceLevel) && body.priceLevel >= 1 && body.priceLevel <= 4)
+    ? body.priceLevel : undefined;
+  const googleRating = (typeof body.googleRating === 'number' && Number.isFinite(body.googleRating) && body.googleRating >= 0 && body.googleRating <= 5)
+    ? body.googleRating : null;
+
+  const restaurant = await prisma.restaurant.create({
+    data: {
+      googlePlaceId: googlePlaceId ?? null,
+      name,
+      cuisineType: clipString(body.cuisineType, MAX_TEXT_FIELD),
+      priceLevel,
+      hours:       clipString(body.hours,    MAX_TEXT_FIELD),
+      phone:       clipString(body.phone,    MAX_TEXT_FIELD),
+      website:     clipUrl(body.website,    MAX_TEXT_FIELD),
+      address:     clipString(body.address, MAX_TEXT_FIELD),
+      yelpUrl:     clipUrl(body.yelpUrl,    MAX_TEXT_FIELD),
+      takeout:  body.takeout  === true,
+      delivery: body.delivery === true,
+      googleRating,
+      createdBy: req.userId,
+    },
+  });
   res.status(201).json({ restaurant });
 });
 

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -66,8 +67,11 @@ export function validatePassword(pw: unknown): string | null {
 async function generateUniqueUsername(base: string): Promise<string> {
   const slug = base.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'user';
   let candidate = slug;
+  // 6-digit crypto-random suffix — wider than the original 4-digit space (1e6
+  // vs 9e3) so collision retries are rare, and using the CSPRNG over Math.random
+  // means an attacker probing for OAuth-account-name patterns can't predict them.
   while (await prisma.user.findFirst({ where: { username: { equals: candidate, mode: 'insensitive' } } })) {
-    candidate = `${slug}${Math.floor(1000 + Math.random() * 9000)}`;
+    candidate = `${slug}${100000 + crypto.randomInt(900000)}`;
   }
   return candidate;
 }
@@ -80,6 +84,13 @@ async function findOrCreateOAuthUser(
   email: string | undefined,
   displayName: string,
   avatarUrl?: string,
+  // The provider must vouch that this email is verified before we'll link the
+  // OAuth login to an existing email-password account with the same address.
+  // Without this guard, an OAuth provider that returns unverified emails would
+  // become an account-takeover vector: attacker registers OAuth under a
+  // victim's email, gets logged in as the victim. Google and Supabase mark
+  // verified addresses explicitly; Facebook never passes an email through here.
+  emailVerified: boolean = false,
 ) {
   // 1. Existing OAuth link — update avatar if it changed
   const linked = await prisma.oAuthAccount.findUnique({
@@ -96,13 +107,21 @@ async function findOrCreateOAuthUser(
     return linked.user;
   }
 
-  // 2. Existing user with same email — link the OAuth account to it
-  let user = email ? await prisma.user.findUnique({ where: { email } }) : null;
+  // 2. Existing user with same email — link only if the provider confirmed
+  //    the email is verified. An unverified address creates a fresh account
+  //    under a synthetic email so the legit account isn't silently joined.
+  let user = email && emailVerified
+    ? await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
+    : null;
 
   if (!user) {
     const username = await generateUniqueUsername(displayName);
+    // Synthetic fallback email is used when we can't safely link by email
+    // (no email at all, or email present but unverified). Keeps the User row's
+    // unique email constraint satisfied without colliding with real addresses.
+    const safeEmail = email && emailVerified ? email : `${providerId}@oauth.pickyum`;
     user = await prisma.user.create({
-      data: { email: email ?? `${providerId}@oauth.pickyum`, username, avatarUrl },
+      data: { email: safeEmail, username, avatarUrl, emailVerified, emailVerifiedAt: emailVerified ? new Date() : null },
     });
   } else if (avatarUrl && !user.avatarUrl) {
     user = await prisma.user.update({ where: { id: user.id }, data: { avatarUrl } });
@@ -127,8 +146,13 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     },
     async (_accessToken, _refreshToken, profile, done) => {
       try {
-        const email = profile.emails?.[0]?.value;
-        const user = await findOrCreateOAuthUser('google', profile.id, email, profile.displayName);
+        const emailEntry = profile.emails?.[0];
+        const email = emailEntry?.value;
+        // Google sets `verified: true` (string or boolean depending on version)
+        // on the primary email when the user has confirmed it. Coerce broadly —
+        // anything truthy counts as verified, anything else does not.
+        const verified = Boolean((emailEntry as { verified?: unknown } | undefined)?.verified);
+        const user = await findOrCreateOAuthUser('google', profile.id, email, profile.displayName, undefined, verified);
         done(null, user);
       } catch (err) {
         done(err as Error);
@@ -148,7 +172,8 @@ if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET) {
     async (_accessToken, _refreshToken, profile, done) => {
       try {
         // Facebook doesn't expose email without extra app review — use provider ID as fallback
-        const user = await findOrCreateOAuthUser('facebook', profile.id, undefined, profile.displayName);
+        // (and so emailVerified stays false — there's no email to verify).
+        const user = await findOrCreateOAuthUser('facebook', profile.id, undefined, profile.displayName, undefined, false);
         done(null, user);
       } catch (err) {
         done(err as Error);
@@ -171,6 +196,12 @@ function issueTokenAndRedirect(req: Request, res: Response) {
 
 // ── Email / password routes ───────────────────────────────────
 
+// Input caps for register — keep in lockstep with users.ts MAX_USERNAME_LEN /
+// MAX_EMAIL_LEN. Duplicated rather than imported because auth.ts loads before
+// users.ts in some test setups and we want auth.ts standalone.
+const MAX_USERNAME_LEN = 32;
+const MAX_EMAIL_LEN    = 254;
+
 // POST /api/auth/register
 router.post('/register', authLimiter, async (req: Request, res: Response) => {
   const { email, username, password } = req.body as {
@@ -181,6 +212,14 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
 
   if (!email || !username || !password) {
     res.status(400).json({ error: 'Email, username, and password are required' });
+    return;
+  }
+  if (typeof email !== 'string' || email.length > MAX_EMAIL_LEN) {
+    res.status(400).json({ error: `email must be ${MAX_EMAIL_LEN} characters or fewer` });
+    return;
+  }
+  if (typeof username !== 'string' || username.length === 0 || username.length > MAX_USERNAME_LEN) {
+    res.status(400).json({ error: `username must be 1-${MAX_USERNAME_LEN} characters` });
     return;
   }
   const pwError = validatePassword(password);
@@ -265,6 +304,10 @@ router.post('/resend-verification', emailLimiter, requireAuth, async (req: Reque
 // POST /api/auth/forgot-password — always returns 200 to avoid leaking which
 // emails exist. Sends a reset email only if the address matches a real account
 // with a password (OAuth-only accounts get nothing).
+//
+// Lookup is case-insensitive because the registration uniqueness check is too —
+// a case-sensitive lookup here would silently drop reset emails for any user
+// whose stored email differs in case from what they typed.
 router.post('/forgot-password', emailLimiter, async (req: Request, res: Response) => {
   const { email } = req.body as { email?: string };
   if (typeof email !== 'string' || !email.trim()) {
@@ -272,8 +315,8 @@ router.post('/forgot-password', emailLimiter, async (req: Request, res: Response
     return;
   }
 
-  const user = await prisma.user.findUnique({
-    where: { email },
+  const user = await prisma.user.findFirst({
+    where: { email: { equals: email, mode: 'insensitive' } },
     select: { id: true, email: true, passwordHash: true },
   });
 
@@ -327,7 +370,11 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
     return;
   }
 
-  const user = await prisma.user.findUnique({ where: { email } });
+  // Case-insensitive — the uniqueness check at registration is too. A user who
+  // registered "Alice@x.com" can sign in as "alice@x.com" (or any case).
+  const user = await prisma.user.findFirst({
+    where: { email: { equals: email, mode: 'insensitive' } },
+  });
   // Always run bcrypt regardless of whether the user exists to prevent timing-based email enumeration
   const passwordMatch = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
 
@@ -351,8 +398,16 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
 });
 
 // POST /api/auth/logout
+// clearCookie must match the options the cookie was set with — otherwise the
+// browser ignores the clear and the session JWT lives on until expiry. The
+// fields below mirror COOKIE_OPTIONS exactly (maxAge/expires are excluded per
+// Express's contract — clear sends Expires=epoch automatically).
 router.post('/logout', (_req: Request, res: Response) => {
-  res.clearCookie('token').json({ message: 'Logged out' });
+  res.clearCookie('token', {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: process.env.NODE_ENV === 'production',
+  }).json({ message: 'Logged out' });
 });
 
 // GET /api/auth/me
@@ -416,6 +471,10 @@ router.post('/supabase', async (req: Request, res: Response) => {
     return;
   }
   const email = asString(raw.email);
+  // Supabase's /auth/v1/user sets `email_confirmed_at` to an ISO string when
+  // the email is verified, or null/missing otherwise. Treat any non-empty
+  // string as verified — the verification flow is owned by Supabase, not us.
+  const emailVerified = typeof raw.email_confirmed_at === 'string' && raw.email_confirmed_at.length > 0;
   const appMeta = (raw.app_metadata && typeof raw.app_metadata === 'object') ? raw.app_metadata as Record<string, unknown> : {};
   const userMeta = (raw.user_metadata && typeof raw.user_metadata === 'object') ? raw.user_metadata as Record<string, unknown> : {};
 
@@ -424,7 +483,7 @@ router.post('/supabase', async (req: Request, res: Response) => {
   const avatarUrl   = asString(userMeta.avatar_url) ?? asString(userMeta.picture);
 
   try {
-    const user = await findOrCreateOAuthUser(provider, supabaseId, email, displayName, avatarUrl);
+    const user = await findOrCreateOAuthUser(provider, supabaseId, email, displayName, avatarUrl, emailVerified);
     const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, { expiresIn: SESSION_DURATION });
     res.cookie('token', token, COOKIE_OPTIONS).json({
       user: { id: user.id, email: user.email, username: user.username, flipCount: user.flipCount, avatarUrl: user.avatarUrl },

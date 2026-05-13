@@ -3,8 +3,8 @@ import { api } from '../lib/api';
 import type { RootState, AppDispatch } from './store';
 import {
   updateUserFavorites,
-  addUserSelection,
-  removeUserSelection,
+  addUserOption,
+  removeUserOption,
   addUserAcceptance,
   removeUserReview,
   removeFromHistory,
@@ -37,7 +37,7 @@ const emptyUserData = (user: { id: number; email: string; username: string; flip
   username: user.username,
   flipCount: user.flipCount ?? 0,
   favorites: [] as string[],
-  selections: [] as string[],
+  options: [] as string[],
   accepted: [] as never[],
   archived: [] as string[],
   reviews: {} as Record<string, never[]>,
@@ -106,42 +106,48 @@ listen({
   },
 });
 
-// Selections
+// Options
 listen({
-  actionCreator: addUserSelection,
+  actionCreator: addUserOption,
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
     if (!isDbId(action.payload)) return;
     const state = listenerApi.getState();
     if (!state.userInfo.customRestaurants[String(action.payload)]) return;
     try {
-      await api.users.addSelection(Number(action.payload));
+      await api.users.addOption(Number(action.payload));
     } catch (err) {
-      console.error('Failed to sync selection add:', err);
+      console.error('Failed to sync option add:', err);
     }
   },
 });
 listen({
-  actionCreator: removeUserSelection,
+  actionCreator: removeUserOption,
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
     if (!isDbId(action.payload)) return;
     try {
-      await api.users.removeSelection(Number(action.payload));
+      await api.users.removeOption(Number(action.payload));
     } catch (err) {
-      console.error('Failed to sync selection remove:', err);
+      console.error('Failed to sync option remove:', err);
     }
   },
 });
 
-// Accepted history
+// Accepted history. For solo accepts, the listener writes to the API. For
+// group accepts the server's accept-result endpoint already creates the row
+// (with optionsSnapshot + chooseMethod), so the dispatch site sets
+// `_serverHandled: true` and we skip the API write to avoid a duplicate. Local
+// Redux state still updates either way so the UI feels instant.
 listen({
   actionCreator: addUserAcceptance,
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
-    if (!isDbId(action.payload.restaurantId)) return;
+    const { restaurantId, optionsSnapshot, chooseMethod, _serverHandled } = action.payload;
+    if (_serverHandled) return;
+    if (!isDbId(restaurantId)) return;
     try {
-      await api.users.addAccepted(Number(action.payload.restaurantId));
+      await api.users.addAccepted(Number(restaurantId), { optionsSnapshot, chooseMethod });
     } catch (err) {
       console.error('Failed to sync accepted:', err);
     }
@@ -164,7 +170,7 @@ listen({
   },
 });
 
-// History wipe — server endpoint atomically removes favorites/selections/archived/accepted/reviews
+// History wipe — server endpoint atomically removes favorites/options/archived/accepted/reviews
 listen({
   actionCreator: removeFromHistory,
   effect: async (action, listenerApi) => {

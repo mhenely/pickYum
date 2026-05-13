@@ -42,7 +42,7 @@ describe('loadUserData thunk', () => {
       favorites: [
         { id: 10, name: 'Pho 99', cuisineType: 'Vietnamese', priceLevel: 1, googleRating: '4.6', hours: '11 AM' },
       ],
-      selections: [
+      options: [
         { id: 11, name: 'Sushi Bar', cuisineType: 'Japanese', priceLevel: 3, googleRating: null },
       ],
       accepted: [
@@ -59,7 +59,7 @@ describe('loadUserData thunk', () => {
 
     const state = store.getState().userInfo;
     expect(state.users[0].favorites).toEqual(['10']);
-    expect(state.users[0].selections).toEqual(['11']);
+    expect(state.users[0].options).toEqual(['11']);
     expect(state.users[0].accepted).toEqual([{ restaurantId: '10', date: '2024-05-01T12:00:00Z' }]);
 
     // Reviews are keyed by restaurantId, with id (server-issued integer) preserved
@@ -79,7 +79,7 @@ describe('loadUserData thunk', () => {
 
   it('is guarded by isDataLoaded — second call is a no-op', async () => {
     (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
-      favorites: [], selections: [], accepted: [], archived: [], reviews: [],
+      favorites: [], options: [], accepted: [], archived: [], reviews: [],
     });
 
     const store = buildStore();
@@ -94,7 +94,7 @@ describe('loadUserData thunk', () => {
   it('coerces restaurant ids to strings to match string-keyed Redux collections', async () => {
     (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
       favorites: [{ id: 42, name: 'X', cuisineType: null, priceLevel: null, googleRating: null }],
-      selections: [], accepted: [], archived: [], reviews: [],
+      options: [], accepted: [], archived: [], reviews: [],
     });
 
     const store = buildStore();
@@ -116,7 +116,7 @@ describe('persistAddReview thunk', () => {
     // Pre-hydrate users[0] so addUserReview can find user.id === 1
     store.dispatch({
       type: 'userInfo/setUserData',
-      payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], selections: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
+      payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], options: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
     });
 
     await store.dispatch(persistAddReview({
@@ -139,7 +139,7 @@ describe('persistAddReview thunk', () => {
     const store = buildStore('unauthenticated');
     store.dispatch({
       type: 'userInfo/setUserData',
-      payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], selections: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
+      payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], options: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
     });
 
     await store.dispatch(persistAddReview({
@@ -162,7 +162,7 @@ describe('persistAddReview thunk', () => {
     const store = buildStore();
     store.dispatch({
       type: 'userInfo/setUserData',
-      payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], selections: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
+      payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], options: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
     });
 
     await store.dispatch(persistAddReview({ restaurantId: '5', userId: 1, content: 'Same', rating: 4, date: '2024-05-01' }) as never);

@@ -1,5 +1,5 @@
 import { useDispatch, useSelector } from "react-redux";
-import { removeUserSelection } from "../../redux/slices/userInfoSlice";
+import { removeUserOption } from "../../redux/slices/userInfoSlice";
 
 const HelpMeChooseModal = ({ selectedList }) => {
   const dispatch = useDispatch();
@@ -13,7 +13,7 @@ const HelpMeChooseModal = ({ selectedList }) => {
           return (
             <div key={selection}>
               {name}
-              <button onClick={() => dispatch(removeUserSelection(selection))}>X</button>
+              <button onClick={() => dispatch(removeUserOption(selection))}>X</button>
             </div>
           )
         })

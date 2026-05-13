@@ -98,8 +98,10 @@ describe('POST /api/auth/register', () => {
 });
 
 describe('POST /api/auth/login', () => {
+  // Login looks up the email case-insensitively via findFirst (not findUnique)
+  // so users can sign in with any capitalization of their registered address.
   beforeEach(() => {
-    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(fakeUser);
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue(fakeUser);
   });
 
   it('returns 200 with user and token cookie on valid credentials', async () => {
@@ -125,7 +127,7 @@ describe('POST /api/auth/login', () => {
   });
 
   it('returns 401 when email is not found', async () => {
-    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue(null);
 
     const res = await request(buildApp())
       .post('/api/auth/login')
@@ -143,7 +145,7 @@ describe('POST /api/auth/login', () => {
   });
 
   it('returns 401 when account has no password (OAuth account)', async () => {
-    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ ...fakeUser, passwordHash: null });
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, passwordHash: null });
 
     const res = await request(buildApp())
       .post('/api/auth/login')

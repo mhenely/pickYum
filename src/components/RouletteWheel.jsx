@@ -115,8 +115,8 @@ function drawPointer(ctx, wiggle = 0) {
   ctx.stroke();
 }
 
-function paint(ctx, angle, selections, restaurants, pointerWiggle = 0, pulseSector = -1, pulseAlpha = 0) {
-  const n = selections.length;
+function paint(ctx, angle, options, restaurants, pointerWiggle = 0, pulseSector = -1, pulseAlpha = 0) {
+  const n = options.length;
   ctx.clearRect(0, 0, W, H);
 
   // ── Outer drop-shadow ring ──────────────────────────────────
@@ -153,7 +153,7 @@ function paint(ctx, angle, selections, restaurants, pointerWiggle = 0, pulseSect
     ctx.font = 'bold 13px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('Add selections to spin', CX, CY);
+    ctx.fillText('Add options to spin', CX, CY);
   } else {
     const s        = (2 * Math.PI) / n;
     const hi       = highlightedAt(angle, n);
@@ -215,10 +215,10 @@ function paint(ctx, angle, selections, restaurants, pointerWiggle = 0, pulseSect
       ctx.font         = `bold ${fontSize}px 'Segoe UI', system-ui, sans-serif`;
       // Drop shadow
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillText(trunc(restaurants[selections[i]]?.name ?? '?', maxChars), 1, 1);
+      ctx.fillText(trunc(restaurants[options[i]]?.name ?? '?', maxChars), 1, 1);
       // Label
       ctx.fillStyle = 'rgba(255,255,255,0.97)';
-      ctx.fillText(trunc(restaurants[selections[i]]?.name ?? '?', maxChars), 0, 0);
+      ctx.fillText(trunc(restaurants[options[i]]?.name ?? '?', maxChars), 0, 0);
       ctx.restore();
     }
 
@@ -290,7 +290,7 @@ function computeWiggle(now, wiggleStart) {
 // ── Component ─────────────────────────────────────────────────
 
 const RouletteWheel = forwardRef(function RouletteWheel(
-  { selections, restaurants, onSpinComplete },
+  { options, restaurants, onSpinComplete },
   ref
 ) {
   const canvasRef = useRef(null);
@@ -300,15 +300,15 @@ const RouletteWheel = forwardRef(function RouletteWheel(
   const wiggleAtRef   = useRef(-Infinity);
 
   // Always-current props snapshot so the animation loop never reads stale data
-  const live = useRef({ selections, restaurants, onSpinComplete });
-  live.current = { selections, restaurants, onSpinComplete };
+  const live = useRef({ options, restaurants, onSpinComplete });
+  live.current = { options, restaurants, onSpinComplete };
 
-  // Redraw when selections change (outside of an active spin)
+  // Redraw when options change (outside of an active spin)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    paint(canvas.getContext('2d'), angleRef.current, selections, restaurants);
-  }, [selections]); // eslint-disable-line react-hooks/exhaustive-deps
+    paint(canvas.getContext('2d'), angleRef.current, options, restaurants);
+  }, [options]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cancel any running animation on unmount
   useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
@@ -339,7 +339,7 @@ const RouletteWheel = forwardRef(function RouletteWheel(
     // is predetermined server-side. Accepts the winning restaurant ID and the
     // ordered candidates array so it can locate the right sector.
     spinTo(winnerId, candidates) {
-      const { selections: sels, restaurants: rests, onSpinComplete: onDone } = live.current;
+      const { options: sels, restaurants: rests, onSpinComplete: onDone } = live.current;
       const pool = candidates ?? sels;
       const n = pool.length;
       if (n < 2) return;
@@ -407,7 +407,7 @@ const RouletteWheel = forwardRef(function RouletteWheel(
     },
 
     spin() {
-      const { selections: sels, restaurants: rests, onSpinComplete: onDone } = live.current;
+      const { options: sels, restaurants: rests, onSpinComplete: onDone } = live.current;
       const n = sels.length;
       if (n < 2) return;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);

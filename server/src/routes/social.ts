@@ -14,11 +14,23 @@ const publicUser = (u: { id: number; username: string; avatarUrl: string | null 
   avatarUrl: u.avatarUrl,
 });
 
+// Parse a positive-integer path param. Returns null when the value is missing,
+// non-numeric, fractional, or zero/negative. Used to reject silly inputs like
+// `/follow/abc` cleanly instead of running a no-op deleteMany on `NaN`.
+function parsePositiveInt(raw: string): number | null {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 // ── User search ───────────────────────────────────────────────
 
 // GET /api/social/search?q=...
-// Returns up to 10 users matching username or email prefix, annotated with
+// Returns up to 10 users whose username matches the query, annotated with
 // the current user's relationship to each result.
+//
+// Username only — searching by email substring lets anyone probe for partial
+// email addresses (e.g. `q=@gmail.com` returns every Gmail user) and pair
+// emails to usernames in the response. Removed for that reason.
 router.get('/search', async (req: Request, res: Response) => {
   const q = String(req.query.q ?? '').trim();
   if (q.length < 1) {
@@ -30,10 +42,7 @@ router.get('/search', async (req: Request, res: Response) => {
     take: 10,
     where: {
       id: { not: req.userId },
-      OR: [
-        { username: { contains: q, mode: 'insensitive' } },
-        { email:    { contains: q, mode: 'insensitive' } },
-      ],
+      username: { contains: q, mode: 'insensitive' },
     },
     select: { id: true, username: true, avatarUrl: true },
   });
@@ -125,7 +134,8 @@ router.post('/follow/:userId', async (req: Request, res: Response) => {
 
 // DELETE /api/social/follow/:userId
 router.delete('/follow/:userId', async (req: Request, res: Response) => {
-  const targetId = Number(req.params.userId);
+  const targetId = parsePositiveInt(req.params.userId);
+  if (!targetId) { res.status(400).json({ error: 'Invalid user ID' }); return; }
   await prisma.follow.deleteMany({
     where: { followerId: req.userId, followingId: targetId },
   });
@@ -242,7 +252,8 @@ router.patch('/friend-request/:requestId', async (req: Request, res: Response) =
 
 // DELETE /api/social/friend-request/:userId — cancel outgoing request
 router.delete('/friend-request/:userId', async (req: Request, res: Response) => {
-  const targetId = Number(req.params.userId);
+  const targetId = parsePositiveInt(req.params.userId);
+  if (!targetId) { res.status(400).json({ error: 'Invalid user ID' }); return; }
   await prisma.friendRequest.deleteMany({
     where: { senderId: req.userId, receiverId: targetId, status: 'PENDING' },
   });
@@ -251,7 +262,8 @@ router.delete('/friend-request/:userId', async (req: Request, res: Response) => 
 
 // DELETE /api/social/friends/:userId — unfriend
 router.delete('/friends/:userId', async (req: Request, res: Response) => {
-  const targetId = Number(req.params.userId);
+  const targetId = parsePositiveInt(req.params.userId);
+  if (!targetId) { res.status(400).json({ error: 'Invalid user ID' }); return; }
   await prisma.friendRequest.deleteMany({
     where: {
       status: 'ACCEPTED',

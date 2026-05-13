@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
-import { addUserSelection, addCustomRestaurant } from '../redux/slices/userInfoSlice';
+import { addUserOption, addCustomRestaurant } from '../redux/slices/userInfoSlice';
 import { groupsApi } from '../lib/groupsApi';
 import { socialApi } from '../lib/socialApi';
 import { api } from '../lib/api';
+import { normalizeUrl } from '../utils/normalizeUrl';
+import BallotDetailModal from '../components/BallotDetailModal';
 
 const STATUS_BADGE = {
   OPEN:   { label: 'Open',             cls: 'bg-green-100 text-green-700' },
@@ -94,27 +96,202 @@ function InvitePanel({ groupId, existingMemberIds, existingInviteIds, onInvited 
   );
 }
 
+// ── Host exit dialog ──────────────────────────────────────────
+// Shown when the current host clicks "Disband group". Offers two paths:
+//   1. Transfer ownership to another member (group keeps running)
+//   2. Archive the group entirely (read-only history preserved)
+// Auto-collapses to option 2 when there are no other members to hand off to.
+
+function HostExitDialog({ group, onClose, onTransferred, onDisbanded }) {
+  const members = group.members ?? [];
+  const [selectedId, setSelectedId] = useState(members[0]?.userId ?? '');
+  const [mode, setMode] = useState(members.length > 0 ? 'transfer' : 'disband');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async () => {
+    setLoading(true); setError('');
+    try {
+      if (mode === 'transfer') {
+        await groupsApi.transferHost(group.id, Number(selectedId));
+        onTransferred();
+      } else {
+        await groupsApi.disband(group.id);
+        onDisbanded();
+      }
+    } catch (err) {
+      setError(err.message);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
+        <div>
+          <h2 className="text-lg font-bold text-gray-900">Leave or disband group</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            You're the host of <span className="font-medium text-gray-700">{group.name}</span>.
+            Pick what happens next.
+          </p>
+        </div>
+
+        {/* Mode selector */}
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setMode('transfer')}
+            disabled={members.length === 0}
+            className={`rounded-lg border p-3 text-left transition-colors ${
+              mode === 'transfer'
+                ? 'border-orange-500 bg-orange-50 ring-1 ring-orange-300'
+                : 'border-gray-200 hover:border-gray-300'
+            } disabled:opacity-40 disabled:cursor-not-allowed`}
+          >
+            <p className="text-sm font-semibold text-gray-900">Transfer & leave</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {members.length === 0 ? 'No other members' : 'Group keeps running'}
+            </p>
+          </button>
+          <button
+            onClick={() => setMode('disband')}
+            className={`rounded-lg border p-3 text-left transition-colors ${
+              mode === 'disband'
+                ? 'border-red-400 bg-red-50 ring-1 ring-red-300'
+                : 'border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            <p className="text-sm font-semibold text-gray-900">Disband group</p>
+            <p className="text-xs text-gray-500 mt-0.5">Archive for everyone</p>
+          </button>
+        </div>
+
+        {/* Transfer target picker */}
+        {mode === 'transfer' && members.length > 0 && (
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">New host</label>
+            <select
+              value={selectedId}
+              onChange={(e) => setSelectedId(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+            >
+              {members.map((m) => (
+                <option key={m.userId} value={m.userId}>{m.user?.username}</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-400 mt-1.5">
+              You'll stay in the group as a regular member. {members[0]?.user?.username && `${members.find((m) => String(m.userId) === String(selectedId))?.user?.username ?? ''} will get full host privileges immediately.`}
+            </p>
+          </div>
+        )}
+
+        {mode === 'disband' && (
+          <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+            ⚠️ The group will be archived for everyone. Members lose active access; past events are preserved as read-only history.
+          </p>
+        )}
+
+        {error && <p className="text-sm text-red-600">{error}</p>}
+
+        <div className="flex gap-2 justify-end pt-2">
+          <button
+            onClick={onClose}
+            disabled={loading}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={loading || (mode === 'transfer' && !selectedId)}
+            className={`rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-brand-sm transition-all disabled:opacity-50 ${
+              mode === 'disband'
+                ? 'bg-red-500 hover:bg-red-400'
+                : 'bg-gradient-to-br from-orange-500 to-red-500 hover:from-orange-400 hover:to-red-400'
+            }`}
+          >
+            {loading ? '…' : mode === 'transfer' ? 'Transfer & leave' : 'Disband group'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Create event modal ────────────────────────────────────────
 
 function CreateEventModal({ groupId, onClose, onCreate }) {
-  const [name, setName] = useState('');
+  const [name, setName]       = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError]     = useState('');
+
+  // Group favorites pulled in for the quick-add panel. Loaded once on mount.
+  // Pre-selecting all of them is the "quick" affordance — common case is
+  // "yes, all the usual spots are candidates again." User unchecks anything
+  // they want to exclude this round.
+  const [favorites, setFavorites]             = useState([]);
+  const [favoritesLoading, setFavoritesLoading] = useState(true);
+  const [selectedIds, setSelectedIds]         = useState(() => new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    groupsApi.listFavorites(groupId)
+      .then(({ favorites: list }) => {
+        if (cancelled) return;
+        setFavorites(list);
+        setSelectedIds(new Set(list.map((f) => f.restaurantId)));
+      })
+      .catch(() => { /* favorites are optional — silent fail keeps the modal usable */ })
+      .finally(() => { if (!cancelled) setFavoritesLoading(false); });
+    return () => { cancelled = true; };
+  }, [groupId]);
+
+  const toggleFavorite = (restaurantId) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(restaurantId)) next.delete(restaurantId);
+      else next.add(restaurantId);
+      return next;
+    });
+  };
+  const selectAll  = () => setSelectedIds(new Set(favorites.map((f) => f.restaurantId)));
+  const selectNone = () => setSelectedIds(new Set());
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!name.trim()) return;
     setLoading(true); setError('');
-    try { const { event } = await groupsApi.createEvent(groupId, name.trim()); onCreate(event); }
-    catch (err) { setError(err.message); }
-    finally { setLoading(false); }
+    try {
+      const { event } = await groupsApi.createEvent(groupId, name.trim());
+
+      // Quick-add the checked favorites as event options. Best effort —
+      // a favorite restaurant could have been deleted upstream, but we don't
+      // want one failure to roll back the event itself. allSettled swallows
+      // per-item rejections; the parent does a load() afterwards to pick up
+      // whatever made it in.
+      if (selectedIds.size > 0) {
+        await Promise.allSettled(
+          [...selectedIds].map((restaurantId) =>
+            groupsApi.addOption(groupId, event.id, restaurantId),
+          ),
+        );
+      }
+
+      onCreate(event);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const hasFavorites = favorites.length > 0;
+  const selectedCount = selectedIds.size;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
-        <h2 className="text-lg font-bold text-gray-900 mb-4">New vote event</h2>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 max-h-[90vh] flex flex-col">
+        <h2 className="text-lg font-bold text-gray-900 mb-4 shrink-0">New vote event</h2>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3 min-h-0 flex-1">
           <input
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
             placeholder="e.g. Friday Dinner, Movie Night…"
@@ -122,15 +299,63 @@ function CreateEventModal({ groupId, onClose, onCreate }) {
             onChange={(e) => setName(e.target.value)}
             autoFocus
           />
+
+          {/* Quick-add from group favorites — only rendered when the group has
+              at least one favorite. The list is scrollable so a group with
+              30 favorites doesn't blow up the modal. */}
+          {favoritesLoading ? (
+            <p className="text-xs text-gray-400">Loading group favorites…</p>
+          ) : hasFavorites ? (
+            <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col min-h-0">
+              <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200 shrink-0">
+                <p className="text-xs font-semibold text-gray-600">
+                  Quick-add from group favorites
+                  <span className="ml-1.5 text-gray-400">({selectedCount}/{favorites.length})</span>
+                </p>
+                <div className="flex gap-2 text-[11px]">
+                  <button type="button" onClick={selectAll}  className="text-orange-600 hover:underline">All</button>
+                  <span className="text-gray-300">·</span>
+                  <button type="button" onClick={selectNone} className="text-gray-500  hover:underline">None</button>
+                </div>
+              </div>
+              <ul className="overflow-y-auto max-h-48 divide-y divide-gray-100">
+                {favorites.map((f) => (
+                  <li key={f.restaurantId}>
+                    <label className="flex items-center gap-2 px-3 py-2 hover:bg-orange-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(f.restaurantId)}
+                        onChange={() => toggleFavorite(f.restaurantId)}
+                        className="rounded border-gray-300 text-orange-500 focus:ring-orange-500"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-gray-800 truncate">
+                          {f.restaurant?.name ?? `Restaurant #${f.restaurantId}`}
+                        </p>
+                        {f.restaurant?.cuisineType && (
+                          <p className="text-xs text-gray-400 truncate">{f.restaurant.cuisineType}</p>
+                        )}
+                      </div>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           {error && <p className="text-xs text-red-500">{error}</p>}
-          <div className="flex gap-2 mt-1">
+          <div className="flex gap-2 mt-1 shrink-0">
             <button type="button" onClick={onClose}
               className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
               Cancel
             </button>
             <button type="submit" disabled={loading || !name.trim()}
               className="flex-1 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all shadow-brand-sm">
-              {loading ? 'Creating…' : 'Create'}
+              {loading
+                ? 'Creating…'
+                : selectedCount > 0
+                  ? `Create + add ${selectedCount}`
+                  : 'Create'}
             </button>
           </div>
         </form>
@@ -164,7 +389,7 @@ function SchedulePicker({ groupId, event, onUpdated }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <h4 className="text-sm font-semibold text-gray-700 mb-1">Schedule voting</h4>
-      <p className="text-xs text-gray-500 mb-3">Set a date &amp; time when selections lock and voting begins automatically.</p>
+      <p className="text-xs text-gray-500 mb-3">Set a date &amp; time when options lock and voting begins automatically.</p>
       <div className="flex items-center gap-2 flex-wrap">
         <input type="datetime-local" min={now} value={value} onChange={(e) => setValue(e.target.value)}
           className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
@@ -186,6 +411,73 @@ function SchedulePicker({ groupId, event, onUpdated }) {
 }
 
 // ── Event date picker ─────────────────────────────────────────
+
+// Host-only voting method picker. Locked once event status leaves OPEN — the
+// server enforces this too. For non-hosts (or non-OPEN events) we display a
+// read-only badge so everyone knows what kind of vote they're walking into.
+function VoteMethodPicker({ groupId, event, isHost, onUpdated }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState('');
+  const current = event.voteMethod ?? 'SIMPLE';
+
+  const handleChange = async (next) => {
+    if (next === current) return;
+    setSaving(true); setError('');
+    try {
+      await groupsApi.setVoteMethod(groupId, event.id, next);
+      onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const label = current === 'RANKED' ? 'Ranked-choice' : 'Simple approval';
+  const isOpen = event.status === 'OPEN';
+
+  // Don't bother rendering for non-hosts on locked events — the badge appears
+  // inline in the event header instead. We DO render for non-hosts on OPEN
+  // events so they can see the host's choice ahead of time.
+  if (!isHost && !isOpen) return null;
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4">
+      <h4 className="text-sm font-semibold text-gray-700 mb-1">Voting method</h4>
+      <p className="text-xs text-gray-500 mb-3">
+        {current === 'RANKED'
+          ? 'Each voter ranks every restaurant by preference. Lowest first-place vote is eliminated each round until one has a majority.'
+          : 'Each voter approves any number of restaurants. Highest total wins.'}
+      </p>
+      {isHost && isOpen ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          {[
+            { value: 'SIMPLE', label: 'Simple approval' },
+            { value: 'RANKED', label: 'Ranked-choice' },
+          ].map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => handleChange(opt.value)}
+              disabled={saving}
+              className={[
+                'rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors',
+                current === opt.value
+                  ? 'bg-orange-500 border-orange-500 text-white'
+                  : 'bg-white border-gray-300 text-gray-600 hover:border-orange-400',
+              ].join(' ')}
+            >
+              {opt.label}
+            </button>
+          ))}
+          {saving && <span className="text-xs text-gray-400">Saving…</span>}
+        </div>
+      ) : (
+        <p className="text-sm font-medium text-gray-800">{label}</p>
+      )}
+      {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+    </div>
+  );
+}
 
 function EventDatePicker({ groupId, event, isHost, onUpdated }) {
   const [value, setValue] = useState(
@@ -242,7 +534,7 @@ function EventDatePicker({ groupId, event, isHost, onUpdated }) {
 
 function ResultDisplay({ result, scheduledFor }) {
   const dispatch = useDispatch();
-  const userSelections    = useSelector((s) => s.userInfo.users[0]?.selections ?? []);
+  const userOptions    = useSelector((s) => s.userInfo.users[0]?.options ?? []);
   const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? {});
 
   const [shared, setShared] = useState(false);
@@ -301,9 +593,9 @@ function ResultDisplay({ result, scheduledFor }) {
     } catch { /* user cancelled or not supported */ }
   };
 
-  const isWinnerInSelections = winner ? userSelections.some((s) => String(s) === String(winner.id)) : false;
+  const isWinnerInOptions = winner ? userOptions.some((s) => String(s) === String(winner.id)) : false;
 
-  const handleAddToSelections = () => {
+  const handleAddToOptions = () => {
     if (!winner) return;
     const id = String(winner.id);
     if (!customRestaurants[id]) {
@@ -324,7 +616,7 @@ function ResultDisplay({ result, scheduledFor }) {
         },
       }));
     }
-    dispatch(addUserSelection(id));
+    dispatch(addUserOption(id));
   };
 
   const handleGoogleCalendar = () => window.open(buildGCalUrl(), '_blank');
@@ -362,8 +654,8 @@ function ResultDisplay({ result, scheduledFor }) {
         <div className="min-w-0">
           <p className="text-lg font-bold text-gray-900">{result.winnerName}</p>
           {winnerAddress && <p className="text-xs text-gray-500 mt-0.5">{winnerAddress}</p>}
-          {winnerWebsite && (
-            <a href={/^https?:\/\//i.test(winnerWebsite) ? winnerWebsite : `https://${winnerWebsite}`}
+          {winnerWebsite && normalizeUrl(winnerWebsite) && (
+            <a href={normalizeUrl(winnerWebsite)}
               target="_blank" rel="noopener noreferrer"
               className="text-xs text-orange-600 hover:text-orange-500 transition-colors">
               {winnerWebsite}
@@ -439,11 +731,11 @@ function ResultDisplay({ result, scheduledFor }) {
         <div className="flex flex-wrap gap-2">
           {winner && (
             <button
-              onClick={handleAddToSelections}
-              disabled={isWinnerInSelections}
+              onClick={handleAddToOptions}
+              disabled={isWinnerInOptions}
               className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-medium text-orange-700 hover:bg-orange-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isWinnerInSelections ? '✓ In Selections' : '+ Add to Selections'}
+              {isWinnerInOptions ? '✓ In Options' : '+ Add to Options'}
             </button>
           )}
           <button onClick={handleShare}
@@ -466,12 +758,30 @@ function ResultDisplay({ result, scheduledFor }) {
 
 // ── Event card ────────────────────────────────────────────────
 
-function EventCard({ event, group, isHost, authUserId, userSelections, allRestaurants, onRefresh, onConfirm }) {
+function EventCard({ event, group, isHost, authUserId, userOptions, allRestaurants, onRefresh, onConfirm }) {
   const [expanded, setExpanded] = useState(event.status !== 'DONE');
   const [startingVote, setStartingVote] = useState(false);
   const [voteError, setVoteError] = useState('');
   const [sessionLinkCopied, setSessionLinkCopied] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // EventCard renders BallotDetailModal as a child so closing it doesn't
+  // collapse the card. State is scoped per-event-card; only one modal can be
+  // open across the page since each card has its own.
+  const [ballotEventId, setBallotEventId] = useState(null);
+
+  // Archived groups are read-only — past events still expand to show ballots
+  // but mutating buttons (delete, start-voting, etc.) drop out.
+  const isArchived = !!group?.archivedAt;
+  const canHostAct = isHost && !isArchived;
+
+  // Current membership set — used to detect "orphaned" options (whose
+  // original adder has since left). Mirrors the server-side logic in
+  // DELETE /events/:eventId/options/:restaurantId so the Remove button
+  // surfaces when it'll actually succeed.
+  const allMemberIds = new Set([
+    group?.hostId,
+    ...(group?.members ?? []).map((m) => m.userId),
+  ].filter((id) => id != null));
 
   const [addQuery, setAddQuery] = useState('');
   const [addDbResults, setAddDbResults] = useState(null);
@@ -483,8 +793,8 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
 
   const isOpen   = event.status === 'OPEN';
   const badge    = STATUS_BADGE[event.status] ?? STATUS_BADGE.OPEN;
-  const existingIds = new Set((event.selections ?? []).map((s) => String(s.restaurantId)));
-  const mySelectionsNotInPool = userSelections.filter(
+  const existingIds = new Set((event.options ?? []).map((s) => String(s.restaurantId)));
+  const myOptionsNotInPool = userOptions.filter(
     (id) => allRestaurants[id] && !existingIds.has(String(id))
   );
 
@@ -529,8 +839,8 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
     });
   };
 
-  const handleRemoveSelection = async (restaurantId) => {
-    try { await groupsApi.removeSelection(group.id, event.id, restaurantId); await onRefresh(); } catch { /* ignore */ }
+  const handleRemoveOption = async (restaurantId) => {
+    try { await groupsApi.removeOption(group.id, event.id, restaurantId); await onRefresh(); } catch { /* ignore */ }
   };
 
   const handleSearchAdd = async (e) => {
@@ -548,16 +858,16 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
     } catch (err) { setAddError(err.message); } finally { setAddLoading(false); }
   };
 
-  const handleAddSelection = async (restaurantId) => {
+  const handleAddOption = async (restaurantId) => {
     setAddingId(restaurantId);
     try {
-      await groupsApi.addSelection(group.id, event.id, restaurantId);
+      await groupsApi.addOption(group.id, event.id, restaurantId);
       await onRefresh();
       setAddDbResults(null); setAddPlacesResults(null); setAddQuery('');
     } catch (err) { setAddError(err.message); } finally { setAddingId(null); }
   };
 
-  const handleAddPlacesSelection = async (place) => {
+  const handleAddPlacesOption = async (place) => {
     setAddingPlacesId(place.googlePlaceId); setAddError('');
     try {
       const { restaurant } = await api.restaurants.create({
@@ -571,7 +881,7 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
         takeout: place.takeout,
         delivery: place.delivery,
       });
-      await groupsApi.addSelection(group.id, event.id, restaurant.id);
+      await groupsApi.addOption(group.id, event.id, restaurant.id);
       await onRefresh();
       setAddDbResults(null); setAddPlacesResults(null); setAddQuery('');
     } catch (err) { setAddError(err.message); } finally { setAddingPlacesId(null); }
@@ -584,13 +894,23 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
         onClick={() => setExpanded((v) => !v)}
         className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors text-left"
       >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="font-semibold text-gray-900 truncate">{event.name}</span>
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${badge.cls}`}>{badge.label}</span>
-          {event.status === 'OPEN' && (
-            <span className="text-xs text-gray-400">
-              {event.selections?.length ?? 0} restaurant{(event.selections?.length ?? 0) !== 1 ? 's' : ''}
-            </span>
+        <div className="flex flex-col min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-semibold text-gray-900 truncate">{event.name}</span>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${badge.cls}`}>{badge.label}</span>
+            {event.status === 'OPEN' && (
+              <span className="text-xs text-gray-400">
+                {event.options?.length ?? 0} restaurant{(event.options?.length ?? 0) !== 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+          {/* Attribution — present on any event created after any-member
+              creation rolled out. Legacy events render this as null and the
+              line collapses to nothing. */}
+          {event.createdBy?.username && (
+            <p className="text-xs text-gray-400 mt-0.5 text-left">
+              Proposed by <span className="font-medium text-gray-500">{event.createdBy.username}</span>
+            </p>
           )}
         </div>
         <svg className={`w-4 h-4 text-gray-400 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -601,8 +921,18 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
       {expanded && (
         <div className="border-t border-gray-100 p-4 flex flex-col gap-5">
 
-          {/* DONE — show archived result */}
-          {event.status === 'DONE' && event.result && <ResultDisplay result={event.result} scheduledFor={event.scheduledFor} />}
+          {/* DONE — show archived result + button to inspect full ballot detail */}
+          {event.status === 'DONE' && event.result && (
+            <>
+              <ResultDisplay result={event.result} scheduledFor={event.scheduledFor} />
+              <button
+                onClick={() => setBallotEventId(event.id)}
+                className="self-start text-xs font-semibold text-orange-600 hover:text-orange-700 hover:underline"
+              >
+                View per-voter ballots →
+              </button>
+            </>
+          )}
           {event.status === 'DONE' && !event.result && (
             <p className="text-sm text-gray-400 italic">No result recorded for this event.</p>
           )}
@@ -643,7 +973,7 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
           {/* OPEN — scheduled voting banner */}
           {isOpen && event.votingStartsAt && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              Voting scheduled for <strong>{new Date(event.votingStartsAt).toLocaleString()}</strong> — selections lock then.
+              Voting scheduled for <strong>{new Date(event.votingStartsAt).toLocaleString()}</strong> — options lock then.
             </div>
           )}
 
@@ -651,19 +981,19 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
           {isOpen && (
             <section>
               <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                Restaurant pool ({event.selections?.length ?? 0})
+                Restaurant pool ({event.options?.length ?? 0})
               </h4>
 
               {/* Add panel */}
               <div className="rounded-xl border border-gray-200 bg-white p-4 mb-3">
                 <p className="text-xs text-gray-500 mb-3">Add a restaurant to this event's pool</p>
 
-                {/* Quick-add from user's own selections */}
-                {mySelectionsNotInPool.length > 0 && (
+                {/* Quick-add from user's own options */}
+                {myOptionsNotInPool.length > 0 && (
                   <div className="mb-4">
-                    <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">From your selections</p>
+                    <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">From your options</p>
                     <div className="rounded-lg border border-gray-200 divide-y divide-gray-100 overflow-hidden">
-                      {mySelectionsNotInPool.map((id) => {
+                      {myOptionsNotInPool.map((id) => {
                         const r = allRestaurants[id];
                         return (
                           <div key={id} className="flex items-center justify-between px-3 py-2.5 hover:bg-gray-50 transition-colors">
@@ -671,7 +1001,7 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
                               <span className="text-sm font-medium text-gray-800">{r.name}</span>
                               {r.type && <span className="text-xs text-gray-400 ml-1.5">{r.type}</span>}
                             </div>
-                            <button disabled={addingId === Number(id)} onClick={() => handleAddSelection(Number(id))}
+                            <button disabled={addingId === Number(id)} onClick={() => handleAddOption(Number(id))}
                               className="shrink-0 ml-3 rounded-lg bg-orange-500 px-3 py-1 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-50 transition-colors">
                               {addingId === Number(id) ? '…' : '+ Add'}
                             </button>
@@ -683,7 +1013,7 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
                 )}
 
                 <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">
-                  {mySelectionsNotInPool.length > 0 ? 'Or search by name' : 'Search by name'}
+                  {myOptionsNotInPool.length > 0 ? 'Or search by name' : 'Search by name'}
                 </p>
                 <form onSubmit={handleSearchAdd} className="flex gap-2 mb-2">
                   <input
@@ -711,7 +1041,7 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
                           </div>
                           {already ? <span className="text-xs text-gray-400 shrink-0 ml-3">Added</span>
                           : (
-                            <button disabled={addingId === r.id} onClick={() => handleAddSelection(r.id)}
+                            <button disabled={addingId === r.id} onClick={() => handleAddOption(r.id)}
                               className="shrink-0 ml-3 rounded-lg bg-orange-500 px-3 py-1 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-50 transition-colors">
                               {addingId === r.id ? '…' : '+ Add'}
                             </button>
@@ -733,7 +1063,7 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
                             {place.cuisineType && <span className="text-xs text-gray-400 ml-1.5">{place.cuisineType}</span>}
                             {place.address && <p className="text-xs text-gray-400 truncate">{place.address}</p>}
                           </div>
-                          <button disabled={!!addingPlacesId} onClick={() => handleAddPlacesSelection(place)}
+                          <button disabled={!!addingPlacesId} onClick={() => handleAddPlacesOption(place)}
                             className="shrink-0 ml-3 rounded-lg bg-orange-500 px-3 py-1 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-50 transition-colors">
                             {addingPlacesId === place.googlePlaceId ? '…' : '+ Add'}
                           </button>
@@ -750,57 +1080,70 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
               </div>
 
               {/* Pool list */}
-              {(event.selections ?? []).length === 0 ? (
+              {(event.options ?? []).length === 0 ? (
                 <p className="text-sm text-gray-400 italic">No restaurants added yet.</p>
               ) : (
                 <div className="rounded-xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
-                  {(event.selections ?? []).map((s) => (
-                    <div key={s.id} className="flex items-center justify-between px-4 py-3 gap-2">
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">{s.restaurant?.name}</p>
-                        <p className="text-xs text-gray-400">Added by {s.addedBy?.username}</p>
+                  {(event.options ?? []).map((s) => {
+                    // Removable by the host, by the member who originally added
+                    // it, or — if the adder has left the group — by any current
+                    // member. The server enforces the same rule; the UI just
+                    // mirrors it so members don't see buttons that 403.
+                    const isOwnOption  = s.addedBy?.id === authUserId;
+                    const adderLeftGroup  = s.addedBy?.id != null && !allMemberIds.has(s.addedBy.id);
+                    const canRemove = isHost || isOwnOption || adderLeftGroup;
+                    return (
+                      <div key={s.id} className="flex items-center justify-between px-4 py-3 gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{s.restaurant?.name}</p>
+                          <p className="text-xs text-gray-400">
+                            Added by {s.addedBy?.username ?? 'a former member'}
+                            {adderLeftGroup && ' (no longer in group)'}
+                          </p>
+                        </div>
+                        {canRemove && (
+                          <button onClick={() => handleRemoveOption(s.restaurantId)}
+                            className="shrink-0 text-xs text-gray-400 hover:text-red-500 transition-colors">
+                            Remove
+                          </button>
+                        )}
                       </div>
-                      {isHost && (
-                        <button onClick={() => handleRemoveSelection(s.restaurantId)}
-                          className="shrink-0 text-xs text-gray-400 hover:text-red-500 transition-colors">
-                          Remove
-                        </button>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </section>
           )}
 
-          {/* OPEN — voting controls (host only) */}
-          {isHost && isOpen && (
+          {/* OPEN — voting controls (host only; suppressed for archived groups) */}
+          {canHostAct && isOpen && (
             <section className="flex flex-col gap-3">
+              <VoteMethodPicker groupId={group.id} event={event} isHost={canHostAct} onUpdated={onRefresh} />
               <EventDatePicker groupId={group.id} event={event} isHost={isHost} onUpdated={onRefresh} />
               <SchedulePicker groupId={group.id} event={event} onUpdated={onRefresh} />
               <div className="rounded-xl border border-gray-200 bg-white p-4">
                 <h4 className="text-sm font-semibold text-gray-700 mb-2">Start voting now</h4>
-                <p className="text-xs text-gray-500 mb-3">Locks selections immediately and opens a live voting session.</p>
+                <p className="text-xs text-gray-500 mb-3">Locks options immediately and opens a live voting session.</p>
                 {voteError && <p className="text-xs text-red-500 mb-2">{voteError}</p>}
                 <button
-                  disabled={startingVote || (event.selections?.length ?? 0) < 2}
+                  disabled={startingVote || (event.options?.length ?? 0) < 2}
                   onClick={() => onConfirm({
-                    message: 'This will lock selections and open a live voting session. Continue?',
+                    message: 'This will lock options and open a live voting session. Continue?',
                     onConfirm: () => handleStartVoting(),
                   })}
                   className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-500 disabled:opacity-50 transition-colors"
                 >
                   {startingVote ? 'Starting…' : 'Start voting now'}
                 </button>
-                {(event.selections?.length ?? 0) < 2 && (
+                {(event.options?.length ?? 0) < 2 && (
                   <p className="text-xs text-gray-400 mt-2">Add at least 2 restaurants to start.</p>
                 )}
               </div>
             </section>
           )}
 
-          {/* Delete event (host; any status except VOTING) */}
-          {isHost && event.status !== 'VOTING' && (
+          {/* Delete event (host; any status except VOTING). Hidden on archived groups. */}
+          {canHostAct && event.status !== 'VOTING' && (
             <button onClick={handleDeleteEvent} disabled={deleting}
               className="text-xs text-red-400 hover:text-red-600 transition-colors text-left disabled:opacity-50">
               Delete this event
@@ -809,17 +1152,302 @@ function EventCard({ event, group, isHost, authUserId, userSelections, allRestau
 
         </div>
       )}
+
+      {ballotEventId === event.id && (
+        <BallotDetailModal
+          groupId={group.id}
+          eventId={event.id}
+          onClose={() => setBallotEventId(null)}
+        />
+      )}
     </div>
   );
 }
 
 // ── Main page ─────────────────────────────────────────────────
 
+// ── Group favorites section ───────────────────────────────────
+// Shared restaurant list for the group, separate from each member's personal
+// favorites. Any member can add/remove. Loads on its own (one extra request)
+// rather than expanding the group payload — keeps the existing list/detail
+// endpoints small.
+
+function GroupFavoritesSection({ groupId, isArchived, allRestaurants }) {
+  const [favorites, setFavorites] = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState('');
+  const [adding, setAdding]       = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const { favorites: list } = await groupsApi.listFavorites(groupId);
+      setFavorites(list);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [groupId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleRemove = async (restaurantId) => {
+    try {
+      await groupsApi.removeFavorite(groupId, restaurantId);
+      await load();
+    } catch { /* ignore */ }
+  };
+
+  // Suggestions come from the user's known restaurants (customRestaurants) —
+  // restaurants the user has interacted with anywhere in the app. Filtered to
+  // names that match the query and aren't already in group favorites.
+  const [query, setQuery] = useState('');
+  const trimmedQuery = query.trim();
+  const favSet = new Set(favorites.map((f) => String(f.restaurantId)));
+  const suggestions = trimmedQuery
+    ? Object.entries(allRestaurants)
+        .filter(([id, r]) =>
+          r?.name?.toLowerCase().includes(trimmedQuery.toLowerCase()) &&
+          !favSet.has(String(id))
+        )
+        .slice(0, 6)
+    : [];
+
+  const handleAdd = async (restaurantId) => {
+    setAdding(true);
+    try {
+      await groupsApi.addFavorite(groupId, restaurantId);
+      setQuery('');
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
+          Group favorites {favorites.length > 0 && <span className="text-gray-400">({favorites.length})</span>}
+        </h2>
+      </div>
+
+      {!isArchived && (
+        <div className="relative mb-3">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Add a restaurant to group favorites…"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+          />
+          {suggestions.length > 0 && (
+            <ul className="absolute z-20 mt-1 w-full bg-white rounded-lg shadow-lg ring-1 ring-black/5 max-h-60 overflow-y-auto">
+              {suggestions.map(([id, r]) => (
+                <li key={id}>
+                  <button
+                    type="button"
+                    onClick={() => handleAdd(Number(id))}
+                    disabled={adding}
+                    className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-orange-50 hover:text-orange-700 flex justify-between items-center disabled:opacity-50"
+                  >
+                    <span>{r.name}</span>
+                    {r.type && <span className="text-xs text-gray-400 ml-2 shrink-0">{r.type}</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-sm text-gray-400">Loading…</p>
+      ) : error ? (
+        <p className="text-sm text-red-500">{error}</p>
+      ) : favorites.length === 0 ? (
+        <p className="text-sm text-gray-400 italic">
+          No group favorites yet.{!isArchived && ' Type above to add restaurants this group ends up at.'}
+        </p>
+      ) : (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
+          {favorites.map((f) => (
+            <div key={f.restaurantId} className="flex items-center justify-between px-4 py-2.5 gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-900 truncate">{f.restaurant?.name}</p>
+                <p className="text-xs text-gray-400 truncate">
+                  {f.restaurant?.cuisineType ?? 'Restaurant'} · added by {f.addedBy?.username}
+                </p>
+              </div>
+              {!isArchived && (
+                <button
+                  onClick={() => handleRemove(f.restaurantId)}
+                  className="shrink-0 text-xs text-gray-400 hover:text-red-500 transition-colors"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ── Group insights panel ──────────────────────────────────────
+// Aggregates over the group's completed events — most-considered, most-won,
+// member appearances, decision-method breakdown. Lazy-loaded on first expand
+// so groups that never look at it don't pay the API cost.
+
+function GroupInsightsPanel({ groupId }) {
+  const [open, setOpen]       = useState(false);
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState('');
+
+  const handleToggle = async () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    if (data) return; // already loaded
+    setLoading(true); setError('');
+    try {
+      setData(await groupsApi.getInsights(groupId));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const METHOD_LABELS = { vote: '🗳 Vote', flip: '🪙 Flip', spin: '🎰 Spin' };
+
+  return (
+    <section>
+      <button
+        onClick={handleToggle}
+        className="w-full flex items-center justify-between text-left rounded-xl border border-gray-200 bg-white px-4 py-3 hover:bg-gray-50 transition-colors"
+      >
+        <span className="text-sm font-semibold text-gray-700">📊 Group insights</span>
+        <svg className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="mt-2 rounded-xl border border-gray-200 bg-white p-4">
+          {loading && <p className="text-sm text-gray-400">Loading insights…</p>}
+          {error && <p className="text-sm text-red-500">{error}</p>}
+          {data && !loading && !error && (
+            data.totalEvents === 0 ? (
+              <p className="text-sm text-gray-500 text-center py-4">
+                No completed events yet. Come back after the group makes a few decisions.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-5">
+                {/* Stat tiles */}
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-lg bg-gray-50 p-3 text-center">
+                    <p className="text-2xl font-black text-orange-600">{data.totalEvents}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">decisions</p>
+                  </div>
+                  <div className="rounded-lg bg-gray-50 p-3 text-center">
+                    <p className="text-2xl font-black text-orange-600">{data.distinctWinners}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">different winners</p>
+                  </div>
+                  <div className="rounded-lg bg-gray-50 p-3 text-center">
+                    <p className="text-2xl font-black text-orange-600">{Object.keys(data.memberAppearances ?? {}).length}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">members participated</p>
+                  </div>
+                </div>
+
+                {/* Method breakdown */}
+                {Object.keys(data.methodCounts ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">How decisions are made</p>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(data.methodCounts).map(([m, c]) => (
+                        <span key={m} className="rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-700">
+                          {METHOD_LABELS[m] ?? m} · <span className="font-semibold">{c}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Top winners */}
+                {data.topWinners?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Group favorites in practice</p>
+                    <ul className="space-y-1.5">
+                      {data.topWinners.map((r) => (
+                        <li key={r.restaurantId} className="flex items-center justify-between rounded-lg bg-green-50 border border-green-100 px-3 py-1.5">
+                          <span className="text-sm font-medium text-green-800 truncate">🏆 {r.name}</span>
+                          <span className="text-xs text-green-700 shrink-0">
+                            won {r.wins}× · {Math.round(r.winRate * 100)}%
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Often considered, never chosen */}
+                {data.oftenSkipped?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Always added, never chosen</p>
+                    <ul className="space-y-1.5">
+                      {data.oftenSkipped.map((r) => (
+                        <li key={r.restaurantId} className="flex items-center justify-between rounded-lg bg-amber-50 border border-amber-100 px-3 py-1.5">
+                          <span className="text-sm font-medium text-amber-900 truncate">{r.name}</span>
+                          <span className="text-xs text-amber-700 shrink-0">
+                            considered {r.considered}× · 0 wins
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Member appearances */}
+                {Object.keys(data.memberAppearances ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Who shows up</p>
+                    <ul className="space-y-1.5">
+                      {Object.entries(data.memberAppearances)
+                        .sort(([, a], [, b]) => b - a)
+                        .slice(0, 8)
+                        .map(([name, count]) => (
+                          <li key={name} className="flex items-center justify-between text-sm">
+                            <span className="text-gray-700">{name}</span>
+                            <span className="text-xs text-gray-500">
+                              {count} of {data.totalEvents}
+                              {data.memberWinAccuracy?.[name] && data.memberWinAccuracy[name].picks > 0 && (
+                                <span className="ml-2 text-orange-600">· picked winner {Math.round(data.memberWinAccuracy[name].rate * 100)}%</span>
+                              )}
+                            </span>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 const GroupDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const authUserId        = useSelector((state) => state.auth.user?.id);
-  const userSelections    = useSelector((state) => state.userInfo.users[0]?.selections ?? []);
+  const userOptions    = useSelector((state) => state.userInfo.users[0]?.options ?? []);
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants ?? {});
 
   const [group, setGroup] = useState(null);
@@ -845,7 +1473,11 @@ const GroupDetailPage = () => {
   if (error)   return <p className="text-center text-sm text-red-500 py-20">{error}</p>;
   if (!group)  return null;
 
-  const isHost = group.hostId === authUserId;
+  const isHost     = group.hostId === authUserId;
+  const isArchived = !!group.archivedAt;
+  // While archived, the page is read-only — no host actions, no event mutations.
+  // We still surface every past event for ballot inspection (the user's whole reason for navigating here).
+  const canHostAct = isHost && !isArchived;
   const allMemberIds = new Set([group.hostId, ...(group.members ?? []).map((m) => m.userId)]);
   const pendingInviteIds = new Set(
     (group.invites ?? []).filter((i) => i.status === 'PENDING').map((i) => i.invitedId)
@@ -871,15 +1503,12 @@ const GroupDetailPage = () => {
     });
   };
 
-  const handleDisband = () => {
-    setConfirm({
-      message: 'Disband this group? All events and results will be deleted. This cannot be undone.',
-      onConfirm: async () => {
-        setConfirm(null);
-        try { await groupsApi.disband(group.id); navigate('/socials'); } catch { /* ignore */ }
-      },
-    });
-  };
+  // Host's exit dialog. If the group has members, offer to transfer ownership
+  // to one of them so the group keeps running. Disband (archive) is the
+  // fallback when there's nobody to hand off to — or when the host explicitly
+  // wants to wind down the group.
+  const [showHostExit, setShowHostExit] = useState(false);
+  const handleDisband = () => setShowHostExit(true);
 
   const activeEvents = (group.events ?? []).filter((e) => e.status !== 'DONE');
   const doneEvents   = (group.events ?? []).filter((e) => e.status === 'DONE');
@@ -898,13 +1527,27 @@ const GroupDetailPage = () => {
           <p className="text-sm text-gray-500 mt-0.5">Hosted by {group.host?.username}</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {activeEvents.length > 0 && (
+          {isArchived && (
+            <span className="rounded-full px-3 py-1 text-xs font-semibold bg-gray-200 text-gray-600">
+              Archived
+            </span>
+          )}
+          {!isArchived && activeEvents.length > 0 && (
             <span className="rounded-full px-3 py-1 text-xs font-semibold bg-orange-100 text-orange-700">
               {activeEvents.length} active
             </span>
           )}
         </div>
       </div>
+
+      {isArchived && (
+        <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 mb-6">
+          <p className="text-sm text-gray-700 font-medium">This group is archived</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Read-only — past votes are preserved for history. Click an event below to see ballots.
+          </p>
+        </div>
+      )}
 
       <div className="flex flex-col gap-6">
 
@@ -970,13 +1613,22 @@ const GroupDetailPage = () => {
           </section>
         )}
 
+        {/* Shared favorites — any member can curate the group's go-to list */}
+        <GroupFavoritesSection
+          groupId={group.id}
+          isArchived={isArchived}
+          allRestaurants={customRestaurants}
+        />
+
         {/* Events */}
         <section>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">
               Vote events ({(group.events ?? []).length})
             </h2>
-            {isHost && (
+            {/* Any group member can propose a vote — the host retains delete
+                authority on individual events to clean up if anyone abuses it. */}
+            {!isArchived && (
               <button onClick={() => setShowCreateEvent(true)}
                 className="rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-3 py-1.5 text-xs font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm">
                 + New event
@@ -1000,7 +1652,7 @@ const GroupDetailPage = () => {
                   group={group}
                   isHost={isHost}
                   authUserId={authUserId}
-                  userSelections={userSelections}
+                  userOptions={userOptions}
                   allRestaurants={customRestaurants}
                   onRefresh={load}
                   onConfirm={setConfirm}
@@ -1019,7 +1671,7 @@ const GroupDetailPage = () => {
                       group={group}
                       isHost={isHost}
                       authUserId={authUserId}
-                      userSelections={userSelections}
+                      userOptions={userOptions}
                       allRestaurants={customRestaurants}
                       onRefresh={load}
                       onConfirm={setConfirm}
@@ -1031,18 +1683,23 @@ const GroupDetailPage = () => {
           )}
         </section>
 
-        {/* Danger zone */}
-        <section className="border-t border-gray-200 pt-6">
-          {isHost ? (
-            <button onClick={handleDisband} className="text-sm text-red-500 hover:text-red-700 transition-colors">
-              Disband group
-            </button>
-          ) : (
-            <button onClick={handleLeave} className="text-sm text-red-500 hover:text-red-700 transition-colors">
-              Leave group
-            </button>
-          )}
-        </section>
+        {/* Insights — collapsible. Only fetches the API on first expand. */}
+        <GroupInsightsPanel groupId={group.id} />
+
+        {/* Danger zone — archived groups have nothing left to act on. */}
+        {!isArchived && (
+          <section className="border-t border-gray-200 pt-6">
+            {isHost ? (
+              <button onClick={handleDisband} className="text-sm text-red-500 hover:text-red-700 transition-colors">
+                Leave or disband group
+              </button>
+            ) : (
+              <button onClick={handleLeave} className="text-sm text-red-500 hover:text-red-700 transition-colors">
+                Leave group
+              </button>
+            )}
+          </section>
+        )}
       </div>
 
       {confirm && (
@@ -1059,8 +1716,22 @@ const GroupDetailPage = () => {
           onClose={() => setShowCreateEvent(false)}
           onCreate={(event) => {
             setShowCreateEvent(false);
+            // Optimistic insert so the event appears immediately even before
+            // the refresh below resolves.
             setGroup((g) => ({ ...g, events: [event, ...(g.events ?? [])] }));
+            // Refresh so any quick-added options come back attached to
+            // the event — the optimistic insert above has empty options.
+            load();
           }}
+        />
+      )}
+
+      {showHostExit && (
+        <HostExitDialog
+          group={group}
+          onClose={() => setShowHostExit(false)}
+          onTransferred={() => { setShowHostExit(false); navigate('/socials'); }}
+          onDisbanded={() => { setShowHostExit(false); navigate('/socials'); }}
         />
       )}
     </div>

@@ -1,0 +1,31 @@
+# AWS Amplify Hosting build spec.
+#
+# Amplify Console reads this on every push to a tracked branch and runs the
+# phases below. Output from `baseDirectory` is what gets served by Amplify's CDN.
+#
+# Env vars (VITE_API_BASE_URL, VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY,
+# VITE_SENTRY_DSN, etc.) are injected by Amplify Console — see DEPLOYMENT.md
+# for where to set them. Anything VITE_-prefixed gets baked into the bundle
+# at build time.
+
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        # --prefer-offline + --no-audit shave 20-40s off a cold build on Amplify.
+        # `npm ci` rather than `install` so the lockfile is authoritative.
+        - npm ci --prefer-offline --no-audit
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    # `vite build` outputs to dist/. Amplify serves everything in this directory.
+    baseDirectory: dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      # Caching node_modules + npm cache cuts a typical build from ~3min to ~45s.
+      - node_modules/**/*
+      - ~/.npm/**/*

@@ -10,7 +10,9 @@ import { groupsApi } from '../lib/groupsApi';
 import RouletteWheel from '../components/RouletteWheel';
 import InfoRow from '../components/InfoRow';
 import ScheduleModal from '../components/ScheduleModal';
+import PublicRestaurantInfoModal from '../components/PublicRestaurantInfoModal';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
+import { normalizeUrl } from '../utils/normalizeUrl';
 import { buildGoogleCalendarUrl } from '../utils/calendarUtils';
 
 const SSE_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
@@ -37,9 +39,15 @@ const JoinView = ({ sessionId, session, onJoined, joinError, defaultName = '' })
     setLoading(true);
     setErr('');
     try {
-      const { session: s } = await sessionApi.join(sessionId, trimmed);
+      // If we have a stored token for this exact (session, name) — e.g. after a
+      // refresh — replay it to re-attach. Without it, a new token is minted.
+      const stored = sessionStorage.getItem(`py_voter_token_${sessionId}_${trimmed}`) ?? undefined;
+      const { session: s, voterToken } = await sessionApi.join(sessionId, trimmed, stored);
       sessionStorage.setItem(`py_voter_${sessionId}`, trimmed);
-      onJoined(trimmed, s);
+      if (voterToken) {
+        sessionStorage.setItem(`py_voter_token_${sessionId}_${trimmed}`, voterToken);
+      }
+      onJoined(trimmed, s, voterToken ?? stored ?? null);
     } catch (ex) {
       setErr(ex.message);
     } finally {
@@ -83,7 +91,7 @@ const JoinView = ({ sessionId, session, onJoined, joinError, defaultName = '' })
 
 // ── Lobby ─────────────────────────────────────────────────────
 
-const LobbyView = ({ session, myName, isHost, onStart, onFlip, onSpin, actionError }) => {
+const LobbyView = ({ session, myName, isHost, onStart, onFlip, onSpin, onShowInfo, actionError }) => {
   const [copied, setCopied] = useState(false);
   const inviteUrl = `${window.location.origin}/vote/${session.id}`;
 
@@ -121,9 +129,18 @@ const LobbyView = ({ session, myName, isHost, onStart, onFlip, onSpin, actionErr
             return (
               <li key={id} className="flex items-center gap-2 text-sm text-gray-700 bg-gray-50 rounded-lg px-3 py-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-orange-400 shrink-0" />
-                <span className="font-medium">{r?.name ?? id}</span>
-                {r?.type && <span className="text-xs text-gray-400">· {r.type}</span>}
-                {r?.price && <span className="text-xs text-gray-400">· {PRICE_LABELS[r.price]}</span>}
+                <span className="font-medium truncate min-w-0">{r?.name ?? id}</span>
+                {r?.type && <span className="text-xs text-gray-400 shrink-0">· {r.type}</span>}
+                {r?.price && <span className="text-xs text-gray-400 shrink-0">· {PRICE_LABELS[r.price]}</span>}
+                {onShowInfo && (
+                  <button
+                    onClick={() => onShowInfo(id)}
+                    aria-label="View restaurant details"
+                    className="ml-auto shrink-0 w-6 h-6 rounded-full text-gray-400 hover:text-orange-600 hover:bg-orange-50 transition-colors flex items-center justify-center text-xs font-bold"
+                  >
+                    ℹ
+                  </button>
+                )}
               </li>
             );
           })}
@@ -188,18 +205,37 @@ const LobbyView = ({ session, myName, isHost, onStart, onFlip, onSpin, actionErr
 
 // ── Voting ────────────────────────────────────────────────────
 
-const VotingView = ({ session, myName, isHost, onSubmitVotes, onClose, actionError }) => {
+const VotingView = ({ session, myName, isHost, onSubmitVotes, onSubmitRanking, onClose, onShowInfo, actionError }) => {
+  const isRanked = session.voteMethod === 'ranked';
+
+  // SIMPLE ballot — approve/reject per candidate, default all-yes.
   const [ballot, setBallot] = useState(() => {
     const init = {};
     for (const id of session.candidates) init[id] = true;
     return init;
   });
+  // RANKED ballot — ordered candidate IDs, default to the existing pool order.
+  // Voter reorders via up/down buttons (more accessible than drag-and-drop and
+  // works on mobile without extra dependencies).
+  const [ranking, setRanking] = useState(() => [...session.candidates]);
+
   const [submitted, setSubmitted] = useState(session.submitted.includes(myName));
 
   const toggle = (id) => setBallot((prev) => ({ ...prev, [id]: !prev[id] }));
 
+  const moveRank = (idx, delta) => {
+    setRanking((prev) => {
+      const target = idx + delta;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next;
+    });
+  };
+
   const handleSubmit = async () => {
-    await onSubmitVotes(ballot);
+    if (isRanked) await onSubmitRanking(ranking);
+    else          await onSubmitVotes(ballot);
     setSubmitted(true);
   };
 
@@ -255,7 +291,11 @@ const VotingView = ({ session, myName, isHost, onSubmitVotes, onClose, actionErr
     <div className="space-y-5">
       <div>
         <p className="text-lg font-bold text-gray-900">Cast your vote</p>
-        <p className="text-sm text-gray-500">Approve the restaurants you're happy with.</p>
+        <p className="text-sm text-gray-500">
+          {isRanked
+            ? 'Rank every restaurant from your favorite (top) to least preferred (bottom).'
+            : "Approve the restaurants you're happy with."}
+        </p>
       </div>
 
       {/* Live vote progress */}
@@ -272,38 +312,95 @@ const VotingView = ({ session, myName, isHost, onSubmitVotes, onClose, actionErr
         </div>
       </div>
 
-      <ul className="space-y-2">
-        {session.candidates.map((id) => {
-          const r = session.restaurants[id];
-          const approved = ballot[id];
-          return (
-            <li key={id}>
-              <button
-                onClick={() => toggle(id)}
-                className={`w-full flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-all ${
-                  approved
-                    ? 'border-green-300 bg-green-50'
-                    : 'border-gray-200 bg-white opacity-60'
-                }`}
-              >
-                <div>
-                  <p className="font-semibold text-sm text-gray-900">{r?.name ?? id}</p>
+      {isRanked ? (
+        <ol className="space-y-2">
+          {ranking.map((id, idx) => {
+            const r = session.restaurants[id];
+            return (
+              <li key={id} className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 flex items-center gap-3">
+                <span className="text-lg font-black text-orange-600 w-7 shrink-0">#{idx + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="font-semibold text-sm text-gray-900 truncate">{r?.name ?? id}</p>
                   {r?.type && <p className="text-xs text-gray-400">{r.type}{r.price ? ` · ${PRICE_LABELS[r.price]}` : ''}</p>}
                 </div>
-                <span className={`text-xl ${approved ? 'text-green-500' : 'text-gray-300'}`}>
-                  {approved ? '✓' : '✗'}
-                </span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+                {onShowInfo && (
+                  <button
+                    onClick={() => onShowInfo(id)}
+                    aria-label="View restaurant details"
+                    className="shrink-0 w-7 h-7 rounded-full text-gray-400 hover:text-orange-600 hover:bg-white transition-colors flex items-center justify-center text-sm font-bold"
+                  >
+                    ℹ
+                  </button>
+                )}
+                <div className="flex flex-col gap-1 shrink-0">
+                  <button
+                    onClick={() => moveRank(idx, -1)}
+                    disabled={idx === 0}
+                    aria-label="Move up"
+                    className="rounded bg-white border border-orange-300 w-7 h-6 text-xs text-orange-600 hover:bg-orange-100 disabled:opacity-30"
+                  >▲</button>
+                  <button
+                    onClick={() => moveRank(idx, 1)}
+                    disabled={idx === ranking.length - 1}
+                    aria-label="Move down"
+                    className="rounded bg-white border border-orange-300 w-7 h-6 text-xs text-orange-600 hover:bg-orange-100 disabled:opacity-30"
+                  >▼</button>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <ul className="space-y-2">
+          {session.candidates.map((id) => {
+            const r = session.restaurants[id];
+            const approved = ballot[id];
+            // div+role rather than nested <button> so the inner ℹ︎ button is
+            // semantically valid (HTML doesn't allow button-in-button) and the
+            // info click doesn't fire the approve/reject toggle.
+            return (
+              <li key={id}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggle(id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(id); } }}
+                  className={`w-full flex items-center justify-between rounded-xl border px-4 py-3 text-left cursor-pointer transition-all ${
+                    approved
+                      ? 'border-green-300 bg-green-50'
+                      : 'border-gray-200 bg-white opacity-60'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="font-semibold text-sm text-gray-900 truncate">{r?.name ?? id}</p>
+                    {r?.type && <p className="text-xs text-gray-400 truncate">{r.type}{r.price ? ` · ${PRICE_LABELS[r.price]}` : ''}</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onShowInfo && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onShowInfo(id); }}
+                        aria-label="View restaurant details"
+                        className="w-7 h-7 rounded-full text-gray-400 hover:text-orange-600 hover:bg-white transition-colors flex items-center justify-center text-sm font-bold"
+                      >
+                        ℹ
+                      </button>
+                    )}
+                    <span className={`text-xl ${approved ? 'text-green-500' : 'text-gray-300'}`}>
+                      {approved ? '✓' : '✗'}
+                    </span>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       <button
         onClick={handleSubmit}
         className="w-full rounded-lg bg-orange-500 py-2.5 text-sm font-semibold text-white hover:bg-orange-500 transition-colors"
       >
-        Submit votes
+        Submit {isRanked ? 'ranking' : 'votes'}
       </button>
     </div>
   );
@@ -311,7 +408,7 @@ const VotingView = ({ session, myName, isHost, onSubmitVotes, onClose, actionErr
 
 // ── Tie break ─────────────────────────────────────────────────
 
-const TieBreakView = ({ session, isHost, onFlip, onSpin, actionError }) => {
+const TieBreakView = ({ session, isHost, onFlip, onSpin, onShowInfo, actionError }) => {
   const totalVoters = Object.keys(session.voters).length;
   const maxScore = session.scores ? Math.max(...Object.values(session.scores)) : 0;
 
@@ -337,13 +434,24 @@ const TieBreakView = ({ session, isHost, onFlip, onSpin, actionError }) => {
               const pct = totalVoters > 0 ? (score / totalVoters) * 100 : 0;
               return (
                 <li key={id} className={`rounded-xl border px-4 py-3 ${isTied ? 'border-amber-300 bg-amber-50' : 'border-gray-100 bg-gray-50'}`}>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="font-semibold text-sm text-gray-900">
+                  <div className="flex justify-between items-center mb-1.5 gap-2">
+                    <span className="font-semibold text-sm text-gray-900 truncate min-w-0">
                       {isTied && '🏅 '}{r?.name ?? id}
                     </span>
-                    <span className={`text-xs font-bold ${isTied ? 'text-amber-700' : 'text-gray-500'}`}>
-                      {score}/{totalVoters}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {onShowInfo && (
+                        <button
+                          onClick={() => onShowInfo(id)}
+                          aria-label="View restaurant details"
+                          className="w-6 h-6 rounded-full text-gray-400 hover:text-orange-600 hover:bg-white transition-colors flex items-center justify-center text-xs font-bold"
+                        >
+                          ℹ
+                        </button>
+                      )}
+                      <span className={`text-xs font-bold ${isTied ? 'text-amber-700' : 'text-gray-500'}`}>
+                        {score}/{totalVoters}
+                      </span>
+                    </div>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-1.5">
                     <div
@@ -389,11 +497,22 @@ const TieBreakView = ({ session, isHost, onFlip, onSpin, actionError }) => {
 
 // ── Result ────────────────────────────────────────────────────
 
-const ResultView = ({ session, isHost, onAccept, onRedo }) => {
+const ResultView = ({ session, isHost, onAccept, onRedo, onReject }) => {
   const [copied, setCopied] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const winner = session.result ? session.restaurants[session.result] : null;
   const totalVoters = Object.keys(session.voters).length;
+
+  // Host can reject the current winner and retry with the remaining pool.
+  // Disabled when removing one would leave only 1 candidate left.
+  const canReject = session.candidates.length > 2;
+  const handleReject = () => {
+    if (!onReject) return;
+    const winnerName = winner?.name ?? 'this option';
+    if (window.confirm(`Reject ${winnerName} and retry with the remaining ${session.candidates.length - 1} restaurants?`)) {
+      onReject();
+    }
+  };
 
   const scheduledDefaults = (() => {
     if (!session.scheduledFor) return { defaultDate: undefined, defaultTime: undefined };
@@ -478,18 +597,28 @@ const ResultView = ({ session, isHost, onAccept, onRedo }) => {
       )}
 
       {isHost ? (
-        <div className="flex gap-3">
+        <div className="space-y-2">
+          <div className="flex gap-3">
+            <button
+              onClick={onAccept}
+              className="flex-1 rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-500 transition-colors"
+            >
+              Accept — Let's go!
+            </button>
+            <button
+              onClick={onRedo}
+              className="flex-1 rounded-lg border border-gray-300 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              Redo
+            </button>
+          </div>
           <button
-            onClick={onAccept}
-            className="flex-1 rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-500 transition-colors"
+            onClick={handleReject}
+            disabled={!canReject}
+            title={canReject ? '' : 'Need at least 3 candidates to reject and retry'}
+            className="w-full rounded-lg border border-red-200 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            Accept — Let's go!
-          </button>
-          <button
-            onClick={onRedo}
-            className="flex-1 rounded-lg border border-gray-300 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
-          >
-            Redo
+            ✕ Reject &amp; remove this restaurant
           </button>
         </div>
       ) : (
@@ -613,8 +742,8 @@ const GroupWinnerModal = ({ session, onClose, onAccept }) => {
               {r.price && <InfoRow label="Price" value={PRICE_LABELS[r.price]} />}
               {full?.hours && <InfoRow label="Opens" value={full.hours} />}
               {full?.phone && <InfoRow label="Phone" value={full.phone} href={`tel:${full.phone}`} />}
-              {full?.website && <InfoRow label="Website" value={full.website} href={`https://${full.website}`} external />}
-              {full?.yelp && <InfoRow label="Yelp" value={full.yelp} href={`https://${full.yelp}`} external />}
+              {full?.website && <InfoRow label="Website" value={full.website} href={normalizeUrl(full.website)} external />}
+              {full?.yelp && <InfoRow label="Yelp" value={full.yelp} href={normalizeUrl(full.yelp)} external />}
             </div>
 
             {(full?.takeout != null || full?.delivery != null) && (
@@ -709,7 +838,7 @@ const RouletteOverlay = ({ winnerId, pool, restaurants, onComplete }) => {
       <p className="text-white font-bold text-lg">{done ? '🎉 We have a winner!' : '🎰 Spinning…'}</p>
       <RouletteWheel
         ref={wheelRef}
-        selections={pool}
+        options={pool}
         restaurants={restaurants}
         onSpinComplete={handleComplete}
       />
@@ -758,6 +887,14 @@ const GroupSessionPage = () => {
 
   const [session, setSession]   = useState(null);
   const [myName, setMyName]     = useState(() => sessionStorage.getItem(`py_voter_${sessionId}`) ?? '');
+  // Per-voter capability minted at /join. Required on every /vote call for
+  // non-host voters; the host bypasses by virtue of their JWT cookie. Restored
+  // from sessionStorage on mount so a refresh doesn't kick the user back to
+  // the join screen with a name nobody owns the token for.
+  const [myVoterToken, setMyVoterToken] = useState(() => {
+    const name = sessionStorage.getItem(`py_voter_${sessionId}`);
+    return name ? sessionStorage.getItem(`py_voter_token_${sessionId}_${name}`) : null;
+  });
   const [fetchError, setFetchError] = useState('');
   const [actionError, setActionError] = useState('');
 
@@ -770,6 +907,11 @@ const GroupSessionPage = () => {
 
   // Winner modal (host accept flow)
   const [showWinnerModal, setShowWinnerModal] = useState(false);
+
+  // Restaurant-info modal — set to a restaurantId to open it, null to close.
+  // Lives at the page level so any view (lobby / voting / tiebreak / result)
+  // can open it via the same handler passed down as a prop.
+  const [infoForId, setInfoForId] = useState(null);
 
   // Track previous session + overlay state via refs so applySession can stay
   // dep-free (otherwise it would re-create on every overlay toggle and tear
@@ -811,11 +953,19 @@ const GroupSessionPage = () => {
     if (authUsername === session.hostName) {
       sessionStorage.setItem(`py_voter_${sessionId}`, authUsername);
       setMyName(authUsername);
+      // Host doesn't need a voter token — their JWT cookie auths the /vote.
       return;
     }
-    sessionApi.join(sessionId, authUsername)
-      .then(({ session: s }) => {
+    const stored = sessionStorage.getItem(`py_voter_token_${sessionId}_${authUsername}`) ?? undefined;
+    sessionApi.join(sessionId, authUsername, stored)
+      .then(({ session: s, voterToken }) => {
         sessionStorage.setItem(`py_voter_${sessionId}`, authUsername);
+        if (voterToken) {
+          sessionStorage.setItem(`py_voter_token_${sessionId}_${authUsername}`, voterToken);
+          setMyVoterToken(voterToken);
+        } else if (stored) {
+          setMyVoterToken(stored);
+        }
         setMyName(authUsername);
         applySession(s);
       })
@@ -863,7 +1013,14 @@ const GroupSessionPage = () => {
       !authUserId || !session.result || acceptedDispatchedRef.current
     ) return;
     acceptedDispatchedRef.current = true;
-    dispatch(addUserAcceptance({ restaurantId: Number(session.result) }));
+    // _serverHandled tells the listener not to POST to /me/accepted — the
+    // host's accept-result endpoint will (or already did) write the row with
+    // optionsSnapshot + chooseMethod. We still dispatch so local Redux
+    // state shows the acceptance immediately for the non-host UX.
+    dispatch(addUserAcceptance({
+      restaurantId: Number(session.result),
+      _serverHandled: true,
+    }));
   }, [session?.status, isHost, authUserId, session?.result, dispatch]);
 
   // ── Actions ──────────────────────────────────────────────────
@@ -910,16 +1067,27 @@ const GroupSessionPage = () => {
       try { await groupsApi.acceptResult(session.groupId, session.eventId); } catch { /* non-fatal */ }
     }
     if (session?.result && authUserId) {
-      dispatch(addUserAcceptance({ restaurantId: Number(session.result) }));
+      // accept-result on the server already wrote the host's UserAccepted row
+      // with optionsSnapshot + chooseMethod — _serverHandled tells the
+      // listener to skip the duplicate POST. Local Redux state still updates
+      // immediately so the user sees their acceptance in history right away.
+      dispatch(addUserAcceptance({
+        restaurantId: Number(session.result),
+        _serverHandled: true,
+      }));
     }
     navigate('/socials');
   };
 
-  const handleSubmitVotes = withAction((ballot) => sessionApi.vote(sessionId, myName, ballot));
-  const handleCloseVoting = withAction(() => sessionApi.close(sessionId));
+  const handleSubmitVotes   = withAction((ballot)  => sessionApi.vote(sessionId, myName, ballot, myVoterToken));
+  const handleSubmitRanking = withAction((ranking) => sessionApi.voteRanked(sessionId, myName, ranking, myVoterToken));
+  const handleCloseVoting   = withAction(() => sessionApi.close(sessionId));
 
   const handleAccept = () => setShowWinnerModal(true);
   const handleRedo   = withAction(() => sessionApi.redo(sessionId));
+  // Host rejects the current winner — server drops the restaurant from
+  // candidates and resets to lobby. Caller picks the next vote/flip/spin.
+  const handleReject = withAction(() => sessionApi.reject(sessionId));
 
   // ── Render ────────────────────────────────────────────────────
   if (!myName) {
@@ -927,7 +1095,11 @@ const GroupSessionPage = () => {
       <JoinView
         sessionId={sessionId}
         session={session}
-        onJoined={(name, s) => { setMyName(name); applySession(s); }}
+        onJoined={(name, s, token) => {
+          setMyName(name);
+          if (token) setMyVoterToken(token);
+          applySession(s);
+        }}
         joinError={fetchError}
         defaultName={authUsername}
       />
@@ -968,6 +1140,7 @@ const GroupSessionPage = () => {
             onStart={handleStart}
             onFlip={handleFlip}
             onSpin={handleSpin}
+            onShowInfo={setInfoForId}
             actionError={actionError}
           />
         );
@@ -978,7 +1151,9 @@ const GroupSessionPage = () => {
             myName={myName}
             isHost={isHost}
             onSubmitVotes={handleSubmitVotes}
+            onSubmitRanking={handleSubmitRanking}
             onClose={handleCloseVoting}
+            onShowInfo={setInfoForId}
             actionError={actionError}
           />
         );
@@ -989,6 +1164,7 @@ const GroupSessionPage = () => {
             isHost={isHost}
             onFlip={handleFlip}
             onSpin={handleSpin}
+            onShowInfo={setInfoForId}
             actionError={actionError}
           />
         );
@@ -999,6 +1175,7 @@ const GroupSessionPage = () => {
             isHost={isHost}
             onAccept={handleAccept}
             onRedo={handleRedo}
+            onReject={handleReject}
           />
         );
       default:
@@ -1040,6 +1217,16 @@ const GroupSessionPage = () => {
           session={session}
           onClose={() => setShowWinnerModal(false)}
           onAccept={handleAcceptResult}
+        />
+      )}
+
+      {infoForId && (
+        <PublicRestaurantInfoModal
+          restaurantId={Number(infoForId)}
+          // Pass the session snapshot so the modal shows name/type/price
+          // immediately while it fetches the full restaurant detail.
+          fallback={session.restaurants[infoForId]}
+          onClose={() => setInfoForId(null)}
         />
       )}
 

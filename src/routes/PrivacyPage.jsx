@@ -39,7 +39,7 @@ const PrivacyPage = () => (
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Your rights</h2>
     <ul className="text-sm text-gray-700 space-y-1.5 list-disc pl-5">
       <li><strong>Access / export</strong>: contact us and we'll send you a copy of your data.</li>
-      <li><strong>Deletion</strong>: delete your account from your profile page. This is permanent — favorites, selections, history, reviews, and group memberships are removed. Group <em>events</em> you participated in remain (with your username) so other participants' history stays consistent.</li>
+      <li><strong>Deletion</strong>: delete your account from your profile page. This is permanent — favorites, options, history, reviews, and group memberships are removed. Group <em>events</em> you participated in remain (with your username) so other participants' history stays consistent.</li>
       <li><strong>Correction</strong>: edit your profile from the settings page.</li>
       <li><strong>EU/UK residents (GDPR)</strong>: you have the right to portability, erasure, and to object. Email us to exercise them.</li>
       <li><strong>California residents (CCPA)</strong>: same rights as above. We don't sell your data.</li>

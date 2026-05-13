@@ -77,24 +77,24 @@ describe('DELETE /api/users/me/favorites/:restaurantId', () => {
   });
 });
 
-describe('POST /api/users/me/selections/:restaurantId', () => {
-  it('returns 201 when selection is added', async () => {
-    (mockPrisma.userSelection.upsert as jest.Mock).mockResolvedValue({});
+describe('POST /api/users/me/options/:restaurantId', () => {
+  it('returns 201 when option is added', async () => {
+    (mockPrisma.userOption.upsert as jest.Mock).mockResolvedValue({});
 
     const res = await request(buildApp())
-      .post('/api/users/me/selections/7')
+      .post('/api/users/me/options/7')
       .set('Cookie', authCookie());
 
     expect(res.status).toBe(201);
   });
 });
 
-describe('DELETE /api/users/me/selections/:restaurantId', () => {
-  it('returns 200 and removes the selection', async () => {
-    (mockPrisma.userSelection.deleteMany as jest.Mock).mockResolvedValue({ count: 1 });
+describe('DELETE /api/users/me/options/:restaurantId', () => {
+  it('returns 200 and removes the option', async () => {
+    (mockPrisma.userOption.deleteMany as jest.Mock).mockResolvedValue({ count: 1 });
 
     const res = await request(buildApp())
-      .delete('/api/users/me/selections/7')
+      .delete('/api/users/me/options/7')
       .set('Cookie', authCookie());
 
     expect(res.status).toBe(200);
@@ -155,7 +155,7 @@ describe('DELETE /api/users/me/history/:restaurantId', () => {
     expect(res.body.message).toBe('Removed from history');
     expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
     expect(mockPrisma.userFavorite.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
-    expect(mockPrisma.userSelection.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
+    expect(mockPrisma.userOption.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
     expect(mockPrisma.userArchive.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
     expect(mockPrisma.userAccepted.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
     expect(mockPrisma.review.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
@@ -272,7 +272,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('returns empty when the user has no linked restaurants', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [], selections: [], accepted: [],
+      favorites: [], options: [], accepted: [],
     });
     const res = await request(buildApp())
       .post('/api/users/me/refresh-places')
@@ -285,7 +285,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('returns empty when no linked restaurants are stale', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [{ restaurantId: 1 }], selections: [], accepted: [],
+      favorites: [{ restaurantId: 1 }], options: [], accepted: [],
     });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([]);
     const res = await request(buildApp())
@@ -298,7 +298,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('refreshes a stale restaurant by fetching Place Details and merging fields', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [{ restaurantId: 1 }], selections: [], accepted: [],
+      favorites: [{ restaurantId: 1 }], options: [], accepted: [],
     });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([
       { id: 1, googlePlaceId: 'gp-1', name: 'Old Name' },
@@ -336,7 +336,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('continues past a failed Place Details lookup without aborting the batch', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [{ restaurantId: 1 }, { restaurantId: 2 }], selections: [], accepted: [],
+      favorites: [{ restaurantId: 1 }, { restaurantId: 2 }], options: [], accepted: [],
     });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([
       { id: 1, googlePlaceId: 'gp-1', name: 'A' },
@@ -360,6 +360,8 @@ describe('POST /api/users/me/refresh-places', () => {
 });
 
 describe('POST /api/users/me/accepted', () => {
+  beforeEach(() => jest.clearAllMocks());
+
   it('returns 400 when restaurantId is missing', async () => {
     const res = await request(buildApp())
       .post('/api/users/me/accepted')
@@ -386,5 +388,169 @@ describe('POST /api/users/me/accepted', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.accepted.restaurantId).toBe(5);
+  });
+
+  it('persists optionsSnapshot + chooseMethod when provided', async () => {
+    (mockPrisma.userAccepted.create as jest.Mock).mockResolvedValue({
+      id: 2, userId: 1, restaurantId: 5, acceptedAt: new Date(), restaurant: {},
+    });
+
+    const res = await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({
+        restaurantId: 5,
+        optionsSnapshot: ['5', '6', '7'],
+        chooseMethod: 'flip',
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.userAccepted.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          userId: 1,
+          restaurantId: 5,
+          optionsSnapshot: ['5', '6', '7'],
+          chooseMethod: 'flip',
+        }),
+      }),
+    );
+  });
+
+  it('rejects an invalid chooseMethod value', async () => {
+    const res = await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5, chooseMethod: 'nonsense' });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a optionsSnapshot that exceeds the size cap', async () => {
+    const oversized = Array.from({ length: 101 }, (_, i) => String(i));
+    const res = await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5, optionsSnapshot: oversized });
+    expect(res.status).toBe(400);
+  });
+
+  it('coerces non-string snapshot entries to strings and drops empties', async () => {
+    (mockPrisma.userAccepted.create as jest.Mock).mockResolvedValue({
+      id: 3, userId: 1, restaurantId: 5, acceptedAt: new Date(), restaurant: {},
+    });
+
+    const res = await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5, optionsSnapshot: [5, '6', '', 7] });
+
+    expect(res.status).toBe(201);
+    const args = (mockPrisma.userAccepted.create as jest.Mock).mock.calls[0][0];
+    expect(args.data.optionsSnapshot).toEqual(['5', '6', '7']);
+  });
+
+  it('leaves optionsSnapshot unset when caller omits it (legacy clients)', async () => {
+    (mockPrisma.userAccepted.create as jest.Mock).mockResolvedValue({
+      id: 4, userId: 1, restaurantId: 5, acceptedAt: new Date(), restaurant: {},
+    });
+
+    await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5 });
+
+    const args = (mockPrisma.userAccepted.create as jest.Mock).mock.calls[0][0];
+    expect(args.data.optionsSnapshot).toBeUndefined();
+    expect(args.data.chooseMethod).toBeNull();
+  });
+});
+
+describe('GET /api/users/me/insights', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).get('/api/users/me/insights');
+    expect(res.status).toBe(401);
+  });
+
+  it('aggregates considerations, wins, and method counts across acceptances', async () => {
+    // 3 acceptances: pizza (winner) considered alongside sushi+pho twice,
+    // sushi (winner) once. Pho is in two consideration sets but never wins.
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      {
+        restaurantId: 1, acceptedAt: new Date('2026-05-01'),
+        optionsSnapshot: ['1', '2', '3'], chooseMethod: 'flip',
+        restaurant: { id: 1, name: 'Pizza Place', cuisineType: 'Italian' },
+      },
+      {
+        restaurantId: 1, acceptedAt: new Date('2026-05-02'),
+        optionsSnapshot: ['1', '3'], chooseMethod: 'spin',
+        restaurant: { id: 1, name: 'Pizza Place', cuisineType: 'Italian' },
+      },
+      {
+        restaurantId: 2, acceptedAt: new Date('2026-05-03'),
+        optionsSnapshot: ['1', '2'], chooseMethod: 'vote',
+        restaurant: { id: 2, name: 'Sushi Bar', cuisineType: 'Japanese' },
+      },
+    ]);
+    // Pho (id 3) appears only in snapshots — never as a winner. Mock its name lookup.
+    (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([
+      { id: 3, name: 'Pho 99', cuisineType: 'Vietnamese' },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalDecisions).toBe(3);
+    expect(res.body.distinctChosen).toBe(2); // pizza + sushi
+    expect(res.body.methodCounts).toEqual({ flip: 1, spin: 1, vote: 1 });
+
+    // Pizza was considered 3 times (in all 3 snapshots) and won twice
+    const pizza = res.body.topConsidered.find((r: { restaurantId: string }) => r.restaurantId === '1');
+    expect(pizza).toMatchObject({ name: 'Pizza Place', considered: 3, wins: 2 });
+
+    // Pho appears in 2 snapshots, 0 wins — should show in "oftenSkipped"
+    const skipped = res.body.oftenSkipped.find((r: { restaurantId: string }) => r.restaurantId === '3');
+    expect(skipped).toMatchObject({ name: 'Pho 99', considered: 2, wins: 0 });
+  });
+
+  it('returns empty rollups for a user with no acceptance history', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      totalDecisions: 0,
+      distinctChosen: 0,
+      methodCounts: {},
+      topConsidered: [],
+      oftenSkipped: [],
+      recent: [],
+    });
+  });
+
+  it('treats null optionsSnapshot as no considerations (legacy rows)', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      {
+        restaurantId: 5, acceptedAt: new Date(),
+        optionsSnapshot: null, chooseMethod: null,
+        restaurant: { id: 5, name: 'Pizza Place', cuisineType: 'Italian' },
+      },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    // Pizza is in topConsidered with 0 considerations + 1 win (the only winner)
+    expect(res.body.topConsidered).toEqual([]);  // considered=0 filtered out
+    expect(res.body.distinctChosen).toBe(1);
+    expect(res.body.methodCounts).toEqual({ unknown: 1 });
   });
 });
