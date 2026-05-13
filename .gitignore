@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .env
+server/.env
 
 # Server build output
 server/dist
