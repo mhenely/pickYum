@@ -1,0 +1,123 @@
+name: Deploy
+
+# Runs after CI passes on main. Builds and pushes the backend Docker image to
+# GitHub Container Registry, then deploys (Frontend → Vercel via their action,
+# Backend → wherever you host it: Fly.io / Render / Railway / your own VPS).
+#
+# This workflow is intentionally explicit about its hosting assumptions and
+# uses GitHub Actions secrets to avoid wiring up a particular vendor here.
+# Replace the deploy steps with the ones your hosting provider documents.
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    # Manual trigger — useful for re-running a deploy without a fresh commit
+    # or for promoting staging → production on demand.
+
+jobs:
+  build-image:
+    name: Build & push backend image
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/server
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: build-image
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Frontend → Vercel (preview/staging via Vercel CLI) ──
+      # Replace this step with your actual frontend hosting if not Vercel.
+      - name: Deploy frontend to Vercel staging
+        if: ${{ vars.VERCEL_ENABLED == 'true' }}
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          # No --prod flag = preview / staging deploy
+
+      # ── Backend → Fly.io (or your provider) ──
+      # The cleanest pattern is a release command on the host that pulls the
+      # image we just pushed. Replace with your provider's deploy command.
+      - name: Deploy backend to staging
+        if: ${{ vars.FLY_ENABLED == 'true' }}
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Run flyctl deploy
+        if: ${{ vars.FLY_ENABLED == 'true' }}
+        run: flyctl deploy --config server/fly.staging.toml --image ${{ needs.build-image.outputs.image }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
+
+  deploy-production:
+    name: Deploy to production
+    needs: [build-image, deploy-staging]
+    # Manual approval gate — production is only promoted by hand.
+    # Configure this in the GitHub repo settings → Environments → production.
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy frontend to Vercel production
+        if: ${{ vars.VERCEL_ENABLED == 'true' }}
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'
+
+      - name: Deploy backend to production
+        if: ${{ vars.FLY_ENABLED == 'true' }}
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Run flyctl deploy (production)
+        if: ${{ vars.FLY_ENABLED == 'true' }}
+        run: flyctl deploy --config server/fly.toml --image ${{ needs.build-image.outputs.image }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}

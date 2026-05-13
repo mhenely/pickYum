@@ -1,0 +1,351 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id              Int       @id @default(autoincrement())
+  email           String    @unique
+  username        String    @unique
+  passwordHash    String?   @map("password_hash")
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  flipCount       Int       @default(0) @map("flip_count")
+  avatarUrl       String?   @map("avatar_url")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  favorites          UserFavorite[]
+  selections         UserSelection[]
+  accepted           UserAccepted[]
+  reviews            Review[]
+  archives           UserArchive[]
+  createdRestaurants Restaurant[]   @relation("CreatedBy")
+  oauthAccounts      OAuthAccount[]
+  emailTokens        EmailToken[]
+
+  following        Follow[]        @relation("Follower")
+  followers        Follow[]        @relation("Following")
+  sentRequests     FriendRequest[] @relation("SentRequests")
+  receivedRequests FriendRequest[] @relation("ReceivedRequests")
+  recommendations  Recommendation[] @relation("SentRecommendations")
+
+  hostedGroups              Group[]               @relation("GroupHost")
+  groupMemberships          GroupMember[]
+  groupEventSelectionsAdded GroupEventSelection[] @relation("GroupEventSelectionAddedBy")
+  receivedGroupInvites      GroupInvite[]         @relation("ReceivedGroupInvites")
+  sentGroupInvites          GroupInvite[]         @relation("SentGroupInvites")
+
+  @@map("users")
+}
+
+// Single-use tokens for email verification and password reset.
+// We store the bcrypt hash, never the raw token, so a DB leak is non-exploitable.
+enum EmailTokenPurpose {
+  VERIFY_EMAIL
+  PASSWORD_RESET
+}
+
+model EmailToken {
+  id         Int               @id @default(autoincrement())
+  userId     Int               @map("user_id")
+  tokenHash  String            @unique @map("token_hash")
+  purpose    EmailTokenPurpose
+  expiresAt  DateTime          @map("expires_at")
+  usedAt     DateTime?         @map("used_at")
+  createdAt  DateTime          @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+  @@map("email_tokens")
+}
+
+model Follow {
+  followerId  Int      @map("follower_id")
+  followingId Int      @map("following_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  follower  User @relation("Follower",  fields: [followerId],  references: [id], onDelete: Cascade)
+  following User @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+model FriendRequest {
+  id         Int                 @id @default(autoincrement())
+  senderId   Int                 @map("sender_id")
+  receiverId Int                 @map("receiver_id")
+  status     FriendRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now()) @map("created_at")
+  updatedAt  DateTime            @updatedAt @map("updated_at")
+
+  sender   User @relation("SentRequests",     fields: [senderId],   references: [id], onDelete: Cascade)
+  receiver User @relation("ReceivedRequests", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId])
+  @@map("friend_requests")
+}
+
+model OAuthAccount {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  provider   String
+  providerId String   @map("provider_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@index([userId])
+  @@map("oauth_accounts")
+}
+
+model Restaurant {
+  id            Int      @id @default(autoincrement())
+  googlePlaceId String?  @unique @map("google_place_id")
+  name          String
+  cuisineType   String?  @map("cuisine_type")
+  priceLevel    Int?     @map("price_level")
+  hours         String?
+  phone         String?
+  website       String?
+  address       String?
+  yelpUrl       String?  @map("yelp_url")
+  takeout       Boolean  @default(false)
+  delivery      Boolean  @default(false)
+  googleRating         Decimal?  @map("google_rating") @db.Decimal(2, 1)
+  communityRating      Decimal?  @map("community_rating") @db.Decimal(4, 2)
+  googleDataUpdatedAt  DateTime? @map("google_data_updated_at")
+  createdBy            Int?      @map("created_by")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  creator    User?          @relation("CreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  favoritedBy          UserFavorite[]
+  selectedBy           UserSelection[]
+  acceptedBy           UserAccepted[]
+  archivedBy           UserArchive[]
+  reviews              Review[]
+  recommendations      Recommendation[]
+  groupEventSelections GroupEventSelection[]
+
+  @@index([cuisineType])
+  @@index([googleDataUpdatedAt])
+  @@index([name])
+  @@map("restaurants")
+}
+
+model UserFavorite {
+  userId       Int      @map("user_id")
+  restaurantId Int      @map("restaurant_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@id([userId, restaurantId])
+  @@index([restaurantId])
+  @@map("user_favorites")
+}
+
+model UserSelection {
+  userId       Int      @map("user_id")
+  restaurantId Int      @map("restaurant_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@id([userId, restaurantId])
+  @@index([restaurantId])
+  @@map("user_selections")
+}
+
+// Append-only — one row per acceptance so history + counts are simple queries
+model UserAccepted {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  restaurantId Int      @map("restaurant_id")
+  acceptedAt   DateTime @default(now()) @map("accepted_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@index([userId, acceptedAt])
+  @@index([restaurantId])
+  @@map("user_accepted")
+}
+
+model UserArchive {
+  userId       Int      @map("user_id")
+  restaurantId Int      @map("restaurant_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@id([userId, restaurantId])
+  @@index([restaurantId])
+  @@map("user_archives")
+}
+
+model Review {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  restaurantId Int      @map("restaurant_id")
+  rating       Decimal  @db.Decimal(2, 1)
+  content      String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([restaurantId])
+  @@map("reviews")
+}
+
+model Recommendation {
+  id           Int      @id @default(autoincrement())
+  fromUserId   Int      @map("from_user_id")
+  restaurantId Int      @map("restaurant_id")
+  tip          String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  fromUser   User       @relation("SentRecommendations", fields: [fromUserId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, restaurantId])
+  @@index([restaurantId])
+  @@map("recommendations")
+}
+
+// ── Persistent groups ─────────────────────────────────────────
+
+enum GroupEventStatus {
+  OPEN
+  VOTING
+  DONE
+}
+
+enum GroupInviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+// A group is a permanent team of members. Voting happens through GroupEvents.
+model Group {
+  id         Int       @id @default(autoincrement())
+  name       String
+  hostId     Int       @map("host_id")
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  host    User          @relation("GroupHost", fields: [hostId], references: [id], onDelete: Cascade)
+  members GroupMember[]
+  events  GroupEvent[]
+  invites GroupInvite[]
+
+  @@index([hostId])
+  @@map("groups")
+}
+
+// A single vote event within a group. Each event has its own pool and result.
+model GroupEvent {
+  id             Int              @id @default(autoincrement())
+  groupId        Int              @map("group_id")
+  name           String
+  status         GroupEventStatus @default(OPEN)
+  sessionId      String?          @map("session_id")
+  votingStartsAt DateTime?        @map("voting_starts_at")
+  scheduledFor   DateTime?        @map("scheduled_for")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  group      Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  selections GroupEventSelection[]
+  result     GroupEventResult?
+
+  @@index([groupId])
+  @@index([status])
+  @@map("group_events")
+}
+
+model GroupEventResult {
+  id             Int      @id @default(autoincrement())
+  eventId        Int      @unique @map("event_id")
+  hostUsername   String   @map("host_username")
+  winnerName     String   @map("winner_name")
+  method         String
+  participants   String[]
+  scores         Json?
+  restaurantPool Json     @map("restaurant_pool")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  event GroupEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("group_event_results")
+}
+
+model GroupEventSelection {
+  id           Int      @id @default(autoincrement())
+  eventId      Int      @map("event_id")
+  restaurantId Int      @map("restaurant_id")
+  addedById    Int      @map("added_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  event      GroupEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  addedBy    User       @relation("GroupEventSelectionAddedBy", fields: [addedById], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, restaurantId])
+  @@index([eventId])
+  @@index([restaurantId])
+  @@map("group_event_selections")
+}
+
+model GroupMember {
+  groupId  Int      @map("group_id")
+  userId   Int      @map("user_id")
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+  @@map("group_members")
+}
+
+model GroupInvite {
+  id          Int               @id @default(autoincrement())
+  groupId     Int               @map("group_id")
+  invitedId   Int               @map("invited_id")
+  invitedById Int               @map("invited_by_id")
+  status      GroupInviteStatus @default(PENDING)
+  createdAt   DateTime          @default(now()) @map("created_at")
+
+  group     Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  invited   User  @relation("ReceivedGroupInvites", fields: [invitedId],   references: [id], onDelete: Cascade)
+  invitedBy User  @relation("SentGroupInvites",     fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, invitedId])
+  @@index([invitedId])
+  @@index([groupId])
+  @@map("group_invites")
+}

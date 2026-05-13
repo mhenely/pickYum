@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./node_modules/.bin/prisma --version)",
+      "Bash(npx jest *)",
+      "Bash(npx vitest *)"
+    ]
+  }
+}

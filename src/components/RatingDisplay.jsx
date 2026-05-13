@@ -1,0 +1,125 @@
+import { useState, useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { fetchCommunityRating } from '../redux/slices/ratingSlice';
+import StarRating from './star-rating/star-rating.component';
+import ReviewsModal from './ReviewsModal';
+
+const MODES = [
+  { key: 'personal',  label: 'Yours' },
+  { key: 'google',    label: 'Google' },
+  { key: 'community', label: 'Community' },
+];
+
+const MODE_CYCLE = { personal: 'google', google: 'community', community: 'personal' };
+const MODE_INITIAL = { personal: 'P', google: 'G', community: 'C' };
+
+const RatingDisplay = ({ restaurantId, googleRating, personalRating, personalReviews, restaurantName, compact = false }) => {
+  const dispatch = useDispatch();
+  const [mode, setMode] = useState('personal');
+  const [reviewsOpen, setReviewsOpen] = useState(false);
+  const communityRatings = useSelector((s) => s.rating.communityRatings);
+  const pendingIds = useSelector((s) => s.rating.pendingIds);
+
+  const idStr = String(restaurantId);
+  const hasFetched = idStr in communityRatings;
+  const isPending = pendingIds.includes(idStr);
+  const communityRating = communityRatings[idStr] ?? null;
+
+  useEffect(() => {
+    if (mode === 'community' && !hasFetched && !isPending) {
+      dispatch(fetchCommunityRating(restaurantId));
+    }
+  }, [mode, idStr, hasFetched, isPending, dispatch, restaurantId]);
+
+  const ratingByMode = {
+    personal:  personalRating  != null ? Number(personalRating)  : null,
+    google:    googleRating    != null ? Number(googleRating)     : null,
+    community: hasFetched ? communityRating : undefined,
+  };
+
+  const activeRating = ratingByMode[mode];
+  const displayValue = activeRating != null ? activeRating : null;
+
+  if (compact) {
+    const label = displayValue != null
+      ? displayValue.toFixed(1)
+      : (mode === 'community' && isPending ? '…' : '—');
+    return (
+      <button
+        type="button"
+        title={`Rating source: ${mode} — click to cycle`}
+        onClick={(e) => { e.stopPropagation(); setMode(MODE_CYCLE[mode]); }}
+        className="flex items-center gap-0.5 text-xs font-bold text-amber-500 hover:text-orange-500 transition-colors whitespace-nowrap"
+      >
+        ★ {label}
+        <span className="text-[9px] font-normal text-gray-400 uppercase ml-0.5">
+          {MODE_INITIAL[mode]}
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5">
+        <StarRating rating={displayValue ?? 0} />
+        {displayValue != null ? (
+          <span className="text-xs text-gray-500 font-medium tabular-nums">
+            {displayValue.toFixed(1)}
+          </span>
+        ) : (
+          <span className="text-xs text-gray-400 italic">
+            {mode === 'community' && isPending ? '…' : 'N/A'}
+          </span>
+        )}
+      </div>
+
+      <div className="flex gap-1">
+        {MODES.map(({ key, label }) => {
+          const hasData =
+            key === 'personal'  ? personalRating  != null :
+            key === 'google'    ? googleRating    != null :
+            hasFetched          ? communityRating != null : true;
+
+          const isActive = mode === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setMode(key); }}
+              className={`text-[10px] px-1.5 py-0.5 rounded-full border transition-colors ${
+                isActive
+                  ? 'bg-orange-500 border-orange-500 text-white font-semibold'
+                  : hasData
+                  ? 'bg-white border-gray-300 text-gray-500 hover:border-orange-400 hover:text-orange-600'
+                  : 'bg-white border-gray-200 text-gray-300'
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+      {personalReviews !== undefined && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setReviewsOpen(true); }}
+          className="text-[10px] text-orange-500 hover:text-orange-700 underline underline-offset-2 transition-colors self-start mt-0.5"
+        >
+          See reviews
+        </button>
+      )}
+      {reviewsOpen && (
+        <ReviewsModal
+          restaurantId={restaurantId}
+          restaurantName={restaurantName ?? 'Reviews'}
+          googleRating={googleRating}
+          personalReviews={personalReviews ?? []}
+          onClose={() => setReviewsOpen(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+export default RatingDisplay;

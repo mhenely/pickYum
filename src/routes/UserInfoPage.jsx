@@ -1,21 +1,21 @@
 import { useDispatch, useSelector } from "react-redux";
 import { useState } from "react";
 
-import { updateUserInfo, updateUserFavorites } from "../redux/slices/userInfoSlice";
+import { setUserData, updateUserFavorites } from "../redux/slices/userInfoSlice";
+import { logoutUser } from "../redux/slices/authSlice";
+import { useNavigate } from "react-router-dom";
+import { api } from "../lib/api";
 import getMostRecentDate from "../utils/getMostRecentDate";
 import useCurrentUser from "../hooks/useCurrentUser";
-import { users } from "../tempData/users";
-import { restaurants } from "../tempData/restaurants";
 import RestaurantReviewModal from "../components/RestaurantReviewModal";
-import StarRating from "../components/star-rating/star-rating.component";
-
-const PRICE_LABELS = { 1: '$', 2: '$$', 3: '$$$', 4: '$$$$' };
+import RatingDisplay from "../components/RatingDisplay";
+import { PRICE_LABELS } from "../utils/restaurantConstants";
 
 const RANK_STYLES = [
-  'bg-yellow-400 text-yellow-900',   // 1st — gold
-  'bg-gray-300 text-gray-700',       // 2nd — silver
-  'bg-orange-300 text-orange-900',   // 3rd — bronze
-  'bg-gray-100 text-gray-500',       // 4th — plain
+  'bg-yellow-400 text-yellow-900',
+  'bg-gray-300 text-gray-700',
+  'bg-orange-300 text-orange-900',
+  'bg-gray-100 text-gray-500',
 ];
 
 const RANK_LABELS = ['1st', '2nd', '3rd', '4th'];
@@ -37,173 +37,150 @@ const getTop4MostChosen = (accepted) => {
     .map(([id, { count }], index) => ({ id, count, rank: index + 1 }));
 };
 
+const StatCard = ({ label, value, sub }) => (
+  <div className="rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm text-center">
+    <p className="text-3xl font-bold text-orange-600">{value}</p>
+    <p className="text-sm font-medium text-gray-700 mt-1">{label}</p>
+    {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
+  </div>
+);
+
 const UserInfoPage = () => {
   const userInfo = useCurrentUser();
   const dispatch = useDispatch();
+  const navigate = useNavigate();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
-  const allRestaurants = { ...restaurants, ...customRestaurants };
+  const allRestaurants = customRestaurants;
 
   const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [errors, setErrors] = useState({});
+  const [usernameError, setUsernameError] = useState('');
   const [selectedRestaurantId, setSelectedRestaurantId] = useState(null);
 
-  const validate = () => {
-    const errs = {};
+  const isAuthenticated = useSelector((state) => state.auth.status === 'authenticated');
 
-    if (username.trim()) {
-      const taken = users.some(
-        (u) => u.id !== userInfo.id && u.username.toLowerCase() === username.trim().toLowerCase()
-      );
-      if (taken) errs.username = 'That username is already taken.';
+  const [usernameSaving, setUsernameSaving] = useState(false);
+  const [usernameSuccess, setUsernameSuccess] = useState(false);
+
+  // ── Account deletion ──────────────────────────────────────
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
+  const handleDeleteAccount = async () => {
+    if (deleteConfirmText !== userInfo.username) return;
+    setDeleteLoading(true);
+    setDeleteError('');
+    try {
+      await api.users.deleteAccount();
+      dispatch(logoutUser());
+      navigate('/');
+    } catch (err) {
+      setDeleteError(err.message ?? 'Could not delete account.');
+      setDeleteLoading(false);
     }
-
-    if (email.trim()) {
-      const taken = users.some(
-        (u) => u.id !== userInfo.id && u.email.toLowerCase() === email.trim().toLowerCase()
-      );
-      if (taken) errs.email = 'That email address is already in use.';
-    }
-
-    if (password) {
-      if (password !== confirmPassword) errs.password = 'Passwords do not match.';
-    }
-
-    return errs;
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length > 0) {
-      setErrors(errs);
-      return;
+    const trimmed = username.trim();
+    if (!trimmed) return;
+    setUsernameError('');
+    setUsernameSuccess(false);
+    setUsernameSaving(true);
+    try {
+      const { user } = await api.users.updateProfile({ username: trimmed });
+      dispatch(setUserData({ ...userInfo, id: user.id, email: user.email, username: user.username }));
+      setUsername('');
+      setUsernameSuccess(true);
+      setTimeout(() => setUsernameSuccess(false), 3000);
+    } catch (err) {
+      setUsernameError(err.message ?? 'Could not update username.');
+    } finally {
+      setUsernameSaving(false);
     }
-    setErrors({});
-    dispatch(updateUserInfo({
-      id: userInfo.id,
-      ...(username.trim() && { username: username.trim() }),
-      ...(email.trim() && { email: email.trim() }),
-      ...(password && { password }),
-    }));
-    setUsername('');
-    setEmail('');
-    setPassword('');
-    setConfirmPassword('');
   };
+
+  const flipCount = userInfo.flipCount ?? 0;
+  const acceptanceCount = userInfo.accepted.length;
+  const acceptanceRate = flipCount > 0
+    ? `${Math.round((acceptanceCount / flipCount) * 100)}%`
+    : '—';
 
   const top4 = getTop4MostChosen(userInfo.accepted);
 
-  const field = (label, id, inputProps, error) => (
-    <div>
-      <label htmlFor={id} className="block text-sm font-medium leading-6 text-gray-900 mb-1">
-        {label}
-      </label>
-      <div className={`flex rounded-md shadow-sm ring-1 ring-inset transition-colors ${
-        error ? 'ring-red-400 focus-within:ring-red-500' : 'ring-gray-300 focus-within:ring-2 focus-within:ring-indigo-600'
-      }`}>
-        <input
-          id={id}
-          className="block flex-1 border-0 bg-transparent py-1.5 pl-3 text-gray-900 placeholder:text-gray-400 focus:ring-0 sm:text-sm sm:leading-6"
-          {...inputProps}
-        />
-      </div>
-      {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
-    </div>
-  );
-
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-      <div className="grid grid-cols-2 gap-10 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 items-start">
 
-        {/* ── LEFT: Profile form ────────────────────────────────── */}
-        <form onSubmit={handleSubmit} className="min-w-0">
-          <div className="border-b border-gray-900/10 pb-10">
-            <h2 className="text-base font-semibold leading-7 text-gray-900">Profile</h2>
-            <p className="mt-1 text-sm leading-6 text-gray-600">
-              Update your account information. Leave a field blank to keep its current value.
-            </p>
+        {/* ── LEFT: Profile + Stats ────────────────────────────── */}
+        <div className="min-w-0 flex flex-col gap-8">
 
-            <div className="mt-8 flex flex-col gap-6">
+          {/* Profile form */}
+          <form onSubmit={handleSubmit}>
+            <div className="border-b border-gray-900/10 pb-8">
+              <h2 className="text-base font-semibold leading-7 text-gray-900">Profile</h2>
+              <p className="mt-1 text-sm leading-6 text-gray-600">
+                Update your username. Leave blank to keep the current value.
+              </p>
 
-              {/* Username */}
-              {field(
-                'Username',
-                'username',
-                {
-                  type: 'text',
-                  autoComplete: 'username',
-                  placeholder: userInfo.username,
-                  value: username,
-                  onChange: (e) => { setUsername(e.target.value); setErrors((p) => ({ ...p, username: '' })); },
-                },
-                errors.username
-              )}
+              <div className="mt-6">
+                <label htmlFor="username" className="block text-sm font-medium leading-6 text-gray-900 mb-1">
+                  Username
+                </label>
+                <div className={`flex rounded-md shadow-sm ring-1 ring-inset transition-colors ${
+                  usernameError ? 'ring-red-400 focus-within:ring-red-500' : 'ring-gray-300 focus-within:ring-2 focus-within:ring-orange-500'
+                }`}>
+                  <input
+                    id="username"
+                    type="text"
+                    autoComplete="username"
+                    placeholder={userInfo.username}
+                    value={username}
+                    onChange={(e) => { setUsername(e.target.value); setUsernameError(''); }}
+                    className="block flex-1 border-0 bg-transparent py-1.5 pl-3 text-gray-900 placeholder:text-gray-400 focus:ring-0 sm:text-sm sm:leading-6"
+                  />
+                </div>
+                {usernameError   && <p className="mt-1 text-xs text-red-500">{usernameError}</p>}
+                {usernameSuccess && <p className="mt-1 text-xs text-green-600">Username updated!</p>}
+              </div>
+            </div>
 
-              {/* Email */}
-              {field(
-                'Email address',
-                'email',
-                {
-                  type: 'email',
-                  autoComplete: 'email',
-                  placeholder: userInfo.email,
-                  value: email,
-                  onChange: (e) => { setEmail(e.target.value); setErrors((p) => ({ ...p, email: '' })); },
-                },
-                errors.email
-              )}
+            <div className="mt-5 flex items-center gap-x-4">
+              <button
+                type="button"
+                onClick={() => { setUsername(''); setUsernameError(''); }}
+                className="text-sm font-semibold leading-6 text-gray-900 hover:text-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!username.trim() || usernameSaving}
+                className="rounded-md bg-orange-500 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500"
+              >
+                {usernameSaving ? 'Saving…' : 'Save Changes'}
+              </button>
+            </div>
+          </form>
 
-              {/* New Password */}
-              {field(
-                'New Password',
-                'password',
-                {
-                  type: 'password',
-                  autoComplete: 'new-password',
-                  placeholder: '••••••••',
-                  value: password,
-                  onChange: (e) => { setPassword(e.target.value); setErrors((p) => ({ ...p, password: '' })); },
-                },
-                null
-              )}
-
-              {/* Confirm Password */}
-              {field(
-                'Confirm Password',
-                'confirm-password',
-                {
-                  type: 'password',
-                  autoComplete: 'new-password',
-                  placeholder: '••••••••',
-                  value: confirmPassword,
-                  onChange: (e) => { setConfirmPassword(e.target.value); setErrors((p) => ({ ...p, password: '' })); },
-                },
-                errors.password
-              )}
+          {/* Stats */}
+          <div>
+            <h2 className="text-base font-semibold leading-7 text-gray-900 mb-1">Your Stats</h2>
+            <p className="text-sm text-gray-500 mb-4">How indecisive are you?</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <StatCard label="Total Flips & Spins" value={flipCount} />
+              <StatCard label="Times Accepted" value={acceptanceCount} />
+              <StatCard
+                label="Acceptance Rate"
+                value={acceptanceRate}
+                sub={flipCount > 0 ? `${acceptanceCount} of ${flipCount}` : 'No flips yet'}
+              />
             </div>
           </div>
+        </div>
 
-          <div className="mt-6 flex items-center gap-x-4">
-            <button
-              type="button"
-              onClick={() => { setUsername(''); setEmail(''); setPassword(''); setConfirmPassword(''); setErrors({}); }}
-              className="text-sm font-semibold leading-6 text-gray-900 hover:text-gray-700"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
-            >
-              Save Changes
-            </button>
-          </div>
-        </form>
-
-        {/* ── RIGHT: Top 4 most chosen ──────────────────────────── */}
+        {/* ── RIGHT: Top 4 most chosen ─────────────────────────── */}
         <div>
           <h2 className="text-2xl font-bold text-gray-900 mb-1">Top Picks</h2>
           <p className="text-sm text-gray-500 mb-4">Your 4 most chosen restaurants</p>
@@ -213,31 +190,31 @@ const UserInfoPage = () => {
               No history yet. Accept a restaurant from the coin flip to get started.
             </p>
           ) : (
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {top4.map(({ id, count, rank }) => {
                 const restaurant = allRestaurants[id];
                 if (!restaurant) return null;
 
                 const reviews = userInfo.reviews[id] || [];
-                const avgRating =
+                const personalRating =
                   reviews.length > 0
                     ? reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length
-                    : restaurant.rating ?? 0;
+                    : null;
                 const isFavorited = userInfo.favorites.map(String).includes(String(id));
 
                 return (
                   <div
                     key={id}
-                    className="relative rounded-lg border border-gray-200 p-4 shadow-sm bg-white transition-all duration-150 hover:shadow-md hover:border-indigo-300 hover:bg-indigo-50"
+                    className="relative rounded-lg border border-gray-200 p-4 shadow-sm bg-white transition-all duration-150 hover:shadow-md hover:border-orange-300 hover:bg-orange-50"
                   >
                     <span className={`absolute -top-2.5 -left-2.5 w-10 h-6 rounded-full text-[11px] font-black flex items-center justify-center shadow-sm ${RANK_STYLES[rank - 1]}`}>
                       {RANK_LABELS[rank - 1]}
                     </span>
-                    <div className="flex justify-between items-start">
+                    <div className="flex justify-between items-start gap-2">
                       <div className="min-w-0">
-                        <span className="text-indigo-600 font-semibold">{restaurant.name}</span>
+                        <span className="text-orange-600 font-semibold block truncate">{restaurant.name}</span>
                         {getMostRecentDate(userInfo.accepted, id) && (
-                          <span className="ml-2 text-xs text-gray-400 whitespace-nowrap">
+                          <span className="text-xs text-gray-400">
                             Last chosen {getMostRecentDate(userInfo.accepted, id)}
                           </span>
                         )}
@@ -257,8 +234,14 @@ const UserInfoPage = () => {
                       {restaurant.type} · {PRICE_LABELS[restaurant.price]} · Opens {restaurant.hours}
                     </p>
 
-                    <div className="flex items-center gap-1 mt-1">
-                      <StarRating rating={avgRating} />
+                    <div className="mt-1">
+                      <RatingDisplay
+                        restaurantId={id}
+                        googleRating={restaurant.rating ?? null}
+                        personalRating={personalRating}
+                        personalReviews={reviews}
+                        restaurantName={restaurant.name}
+                      />
                       {reviews.length > 0 && (
                         <span className="text-xs text-gray-400 ml-1">
                           ({reviews.length} review{reviews.length !== 1 ? 's' : ''})
@@ -283,7 +266,7 @@ const UserInfoPage = () => {
                     <button
                       type="button"
                       onClick={() => setSelectedRestaurantId(id)}
-                      className="mt-3 w-full rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500"
+                      className="mt-3 w-full rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-500"
                     >
                       See Reviews
                     </button>
@@ -294,6 +277,63 @@ const UserInfoPage = () => {
           )}
         </div>
       </div>
+
+      {/* ── Danger zone ─────────────────────────────────── */}
+      {isAuthenticated && (
+        <div className="mt-12 border-t border-red-100 pt-8">
+          <h2 className="text-base font-semibold text-red-600 mb-1">Danger Zone</h2>
+          <p className="text-sm text-gray-500 mb-4">Permanently delete your account and all associated data. This cannot be undone.</p>
+          <button
+            onClick={() => { setShowDeleteModal(true); setDeleteConfirmText(''); setDeleteError(''); }}
+            className="rounded-md border border-red-300 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 transition-colors"
+          >
+            Delete account
+          </button>
+        </div>
+      )}
+
+      {/* ── Delete account modal ─────────────────────────── */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 flex flex-col gap-4">
+            <div>
+              <h2 className="text-base font-bold text-gray-900">Delete your account?</h2>
+              <p className="text-sm text-gray-500 mt-1">
+                This will permanently delete your account, all reviews, history, and data. This cannot be undone.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Type <strong>{userInfo.username}</strong> to confirm
+              </label>
+              <input
+                type="text"
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                placeholder={userInfo.username}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                autoFocus
+              />
+            </div>
+            {deleteError && <p className="text-xs text-red-500">{deleteError}</p>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteAccount}
+                disabled={deleteConfirmText !== userInfo.username || deleteLoading}
+                className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {deleteLoading ? 'Deleting…' : 'Delete permanently'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {selectedRestaurantId && (
         <RestaurantReviewModal

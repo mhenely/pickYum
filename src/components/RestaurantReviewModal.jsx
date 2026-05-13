@@ -58,7 +58,7 @@ const RestaurantReviewModal = ({ restaurant, reviews, onClose, onAddReview, onRe
                 placeholder="Write your review..."
                 required
                 rows={2}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 resize-none"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
               />
               <div className="flex flex-wrap gap-3 mt-2 items-center">
                 <div className="flex items-center gap-1">
@@ -84,7 +84,7 @@ const RestaurantReviewModal = ({ restaurant, reviews, onClose, onAddReview, onRe
                 </div>
                 <button
                   type="submit"
-                  className="ml-auto rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                  className="ml-auto rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500"
                 >
                   Submit
                 </button>
@@ -120,14 +120,14 @@ const RestaurantReviewModal = ({ restaurant, reviews, onClose, onAddReview, onRe
             ) : (
               sortedReviews.map((review) => (
                 <div
-                  key={review.content + review.date}
+                  key={review.id ?? `${review.content}-${review.date}`}
                   className="mb-3 pb-3 border-b border-gray-100 last:border-0"
                 >
                   <div className="flex justify-between items-center">
                     <StarRating rating={review.rating} />
                     {!readOnly && (
                       <button
-                        onClick={() => onRemoveReview(review.content)}
+                        onClick={() => onRemoveReview(review.id)}
                         className="text-xs text-gray-300 hover:text-red-400 ml-2"
                       >
                         Remove

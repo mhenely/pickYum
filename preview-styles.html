@@ -1,0 +1,1082 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pickYum — Style Previews</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: #f1f5f9;
+      color: #1e293b;
+    }
+
+    /* ── Switcher ─────────────────────────────────────── */
+    .switcher {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #1e293b;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .switcher h1 {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      color: #f8fafc;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-right: 8px;
+    }
+    .tab {
+      padding: 6px 16px;
+      border-radius: 999px;
+      border: 1.5px solid rgba(255,255,255,0.15);
+      color: rgba(255,255,255,0.6);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      background: transparent;
+      transition: all 0.15s;
+    }
+    .tab:hover { border-color: rgba(255,255,255,0.4); color: #fff; }
+    .tab.active { background: #f97316; border-color: #f97316; color: #fff; }
+
+    /* ── Panels ─────────────────────────────────────────── */
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    /* ── Shared preview wrapper ──────────────────────────── */
+    .preview-wrap {
+      max-width: 1100px;
+      margin: 32px auto;
+      padding: 0 24px 80px;
+    }
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin: 40px 0 12px;
+    }
+    .compare-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 700px) { .compare-row { grid-template-columns: 1fr; } }
+    .compare-box {
+      background: #fff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.06);
+    }
+    .compare-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 8px 14px;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+      color: #64748b;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       PANEL A  —  CURRENT
+    ══════════════════════════════════════════════════════ */
+
+    /* Navbar — current */
+    .nav-current {
+      background: #1f2937;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 0;
+    }
+    .nav-current .logo-curr {
+      color: #fff;
+      font-weight: 700;
+      font-size: 16px;
+      margin-right: 28px;
+      letter-spacing: -0.01em;
+    }
+    .nav-current .links { display: flex; gap: 4px; }
+    .nav-current .link-curr {
+      color: #9ca3af;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 10px;
+      border-radius: 5px;
+    }
+    .nav-current .link-curr.active { background: #111827; color: #fff; }
+    .nav-curr-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .avatar-curr { width: 32px; height: 32px; border-radius: 50%; background: #6366f1; }
+
+    /* Selections bar — current */
+    .sel-bar-curr {
+      background: #fff;
+      border-bottom: 1px solid #e5e7eb;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sel-bar-curr h2 { font-size: 15px; font-weight: 700; color: #111827; }
+    .chip-curr {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 13px;
+      color: #374151;
+      font-weight: 500;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .chip-curr .x { color: #9ca3af; font-size: 11px; }
+
+    /* Card — current */
+    .card-curr {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .card-curr .name { font-weight: 600; color: #4f46e5; font-size: 15px; }
+    .card-curr .meta { font-size: 13px; color: #6b7280; margin-top: 4px; }
+    .card-curr .rating { font-size: 12px; color: #f59e0b; font-weight: 700; margin-top: 6px; }
+    .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px; }
+
+    /* Buttons — current */
+    .btn-curr-primary {
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      padding: 9px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-curr-secondary {
+      background: #fff;
+      color: #374151;
+      border: 1px solid #d1d5db;
+      padding: 9px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-curr-ghost {
+      background: transparent;
+      color: #6b7280;
+      border: 1px solid #e5e7eb;
+      padding: 9px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .btn-row { display: flex; gap: 10px; padding: 20px; flex-wrap: wrap; }
+
+    /* ══════════════════════════════════════════════════════
+       PANEL B  —  WARM (ORANGE/AMBER)
+       Brand: orange-500 primary, amber accents, white nav
+    ══════════════════════════════════════════════════════ */
+
+    /* Navbar — warm */
+    .nav-warm {
+      background: #fff;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      border-bottom: 1px solid #fed7aa;
+      box-shadow: 0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06);
+    }
+    .logo-warm {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-right: 32px;
+      text-decoration: none;
+    }
+    .logo-warm .mark {
+      width: 30px; height: 30px;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; line-height: 1;
+      box-shadow: 0 2px 6px rgba(249,115,22,0.35);
+    }
+    .logo-warm .wordmark {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 17px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #ea580c, #dc2626);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.03em;
+    }
+    .nav-warm .links { display: flex; gap: 2px; }
+    .nav-warm .link-warm {
+      color: #78716c;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 7px 12px;
+      border-radius: 7px;
+      transition: all 0.12s;
+    }
+    .nav-warm .link-warm.active {
+      background: #fff7ed;
+      color: #ea580c;
+      font-weight: 600;
+    }
+    .nav-warm-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+    .avatar-warm {
+      width: 34px; height: 34px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px #f97316;
+    }
+    .signin-btn-warm {
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(249,115,22,0.3);
+      letter-spacing: 0.01em;
+    }
+
+    /* Selections bar — warm */
+    .sel-bar-warm {
+      background: linear-gradient(to right, #fff7ed, #fef3c7);
+      border-bottom: 1px solid #fed7aa;
+      padding: 10px 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sel-bar-warm h2 {
+      font-size: 13px;
+      font-weight: 700;
+      color: #9a3412;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+    }
+    .chip-warm {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #fff;
+      border: 1px solid #fdba74;
+      border-radius: 999px;
+      padding: 4px 12px 4px 12px;
+      font-size: 13px;
+      color: #7c2d12;
+      font-weight: 500;
+      box-shadow: 0 1px 3px rgba(234,88,12,0.1);
+    }
+    .chip-warm .x { color: #fb923c; font-size: 11px; font-weight: 700; }
+
+    /* Cards — warm */
+    .card-warm {
+      border: 1px solid #e7e5e4;
+      border-radius: 12px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);
+      transition: box-shadow 0.15s, transform 0.15s;
+    }
+    .card-warm:hover {
+      box-shadow: 0 4px 8px rgba(0,0,0,0.06), 0 12px 28px rgba(234,88,12,0.12);
+      transform: translateY(-1px);
+    }
+    .card-warm .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      background: #fff7ed;
+      color: #ea580c;
+      border-radius: 4px;
+      padding: 2px 7px;
+      margin-bottom: 8px;
+    }
+    .card-warm .name { font-weight: 700; color: #1c1917; font-size: 15px; letter-spacing: -0.01em; }
+    .card-warm .meta { font-size: 13px; color: #78716c; margin-top: 4px; }
+    .card-warm .rating { font-size: 12px; color: #f59e0b; font-weight: 700; margin-top: 6px; }
+    .card-warm .add-btn {
+      margin-top: 12px;
+      width: 100%;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: #fff;
+      border: none;
+      padding: 8px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(249,115,22,0.25);
+    }
+
+    /* Buttons — warm */
+    .btn-warm-primary {
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: #fff;
+      border: none;
+      padding: 10px 22px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(249,115,22,0.3);
+      letter-spacing: 0.01em;
+    }
+    .btn-warm-secondary {
+      background: #fff7ed;
+      color: #ea580c;
+      border: 1.5px solid #fdba74;
+      padding: 9px 22px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-warm-ghost {
+      background: transparent;
+      color: #78716c;
+      border: 1.5px solid #e7e5e4;
+      padding: 9px 22px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    /* Guest banner — warm */
+    .banner-warm {
+      background: #fff7ed;
+      border-bottom: 1px solid #fed7aa;
+      padding: 8px 24px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    }
+    .banner-warm p { font-size: 13px; color: #92400e; }
+    .banner-warm a {
+      font-size: 13px; font-weight: 700; color: #ea580c;
+      text-decoration: none; white-space: nowrap;
+      background: #fff; border: 1.5px solid #fdba74; border-radius: 6px;
+      padding: 4px 12px;
+    }
+
+    /* ══════════════════════════════════════════════════════
+       PANEL C  —  PREMIUM (WHITE NAV, REFINED INDIGO)
+       Clean, minimal, SaaS-feel
+    ══════════════════════════════════════════════════════ */
+
+    /* Navbar — premium */
+    .nav-prem {
+      background: #fff;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      border-bottom: 1px solid #e2e8f0;
+      box-shadow: 0 1px 0 #e2e8f0;
+    }
+    .logo-prem {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-right: 36px;
+    }
+    .logo-prem .mark {
+      width: 28px; height: 28px;
+      background: #4f46e5;
+      border-radius: 7px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; line-height: 1;
+    }
+    .logo-prem .wordmark {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 16px;
+      font-weight: 800;
+      color: #1e1b4b;
+      letter-spacing: -0.04em;
+    }
+    .nav-prem .links { display: flex; gap: 2px; }
+    .nav-prem .link-prem {
+      color: #64748b;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 7px 12px;
+      border-radius: 7px;
+    }
+    .nav-prem .link-prem.active {
+      color: #4f46e5;
+      background: #eef2ff;
+      font-weight: 600;
+    }
+    .nav-prem-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+    .avatar-prem {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: #4f46e5;
+      box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px #c7d2fe;
+    }
+    .signin-btn-prem {
+      background: #4f46e5;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(79,70,229,0.35);
+      letter-spacing: 0.005em;
+    }
+
+    /* Selections bar — premium */
+    .sel-bar-prem {
+      background: #fafafa;
+      border-bottom: 1px solid #e2e8f0;
+      padding: 10px 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sel-bar-prem h2 {
+      font-size: 12px;
+      font-weight: 700;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+    .chip-prem {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: #fff;
+      border: 1px solid #e0e7ff;
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-size: 13px;
+      color: #312e81;
+      font-weight: 500;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .chip-prem .x { color: #a5b4fc; font-size: 11px; font-weight: 700; }
+
+    /* Cards — premium */
+    .card-prem {
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 16px;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.04);
+      transition: box-shadow 0.15s, transform 0.15s;
+    }
+    .card-prem:hover {
+      box-shadow: 0 4px 6px rgba(0,0,0,0.05), 0 10px 20px rgba(79,70,229,0.1);
+      transform: translateY(-1px);
+    }
+    .card-prem .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      background: #eef2ff;
+      color: #4f46e5;
+      border-radius: 4px;
+      padding: 2px 7px;
+      margin-bottom: 8px;
+    }
+    .card-prem .name { font-weight: 700; color: #0f172a; font-size: 15px; letter-spacing: -0.01em; }
+    .card-prem .meta { font-size: 13px; color: #64748b; margin-top: 4px; }
+    .card-prem .rating { font-size: 12px; color: #f59e0b; font-weight: 700; margin-top: 6px; }
+    .card-prem .add-btn {
+      margin-top: 12px;
+      width: 100%;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      padding: 8px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 1px 4px rgba(79,70,229,0.3);
+    }
+
+    /* Buttons — premium */
+    .btn-prem-primary {
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      padding: 10px 22px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(79,70,229,0.3), 0 4px 12px rgba(79,70,229,0.15);
+      letter-spacing: 0.005em;
+    }
+    .btn-prem-secondary {
+      background: #fff;
+      color: #4f46e5;
+      border: 1.5px solid #c7d2fe;
+      padding: 9px 22px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-prem-ghost {
+      background: transparent;
+      color: #64748b;
+      border: 1.5px solid #e2e8f0;
+      padding: 9px 22px;
+      border-radius: 9px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    /* Guest banner — premium */
+    .banner-prem {
+      background: #eef2ff;
+      border-bottom: 1px solid #c7d2fe;
+      padding: 8px 24px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    }
+    .banner-prem p { font-size: 13px; color: #3730a3; }
+    .banner-prem a {
+      font-size: 13px; font-weight: 700; color: #4f46e5;
+      text-decoration: none; white-space: nowrap;
+      border-bottom: 2px solid #a5b4fc; padding-bottom: 1px;
+    }
+
+    /* ── Page content demo ──────────────────────────────── */
+    .page-content {
+      padding: 24px;
+      background: #f8fafc;
+      min-height: 240px;
+    }
+    .page-section-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 12px;
+    }
+    .cards-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    @media (max-width: 600px) { .cards-row { grid-template-columns: 1fr 1fr; } }
+
+    /* ── Full page mockup ──────────────────────────────── */
+    .mockup-frame {
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.06);
+      border: 1px solid #e2e8f0;
+    }
+
+    /* ── Intro card ─────────────────────────────────────── */
+    .intro-card {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 24px 28px;
+      margin-bottom: 8px;
+      color: #cbd5e1;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .intro-card h2 {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 8px;
+    }
+    .intro-card ul { padding-left: 18px; margin-top: 8px; }
+    .intro-card li { margin-bottom: 4px; }
+    .intro-card .tag {
+      display: inline-block;
+      background: rgba(249,115,22,0.15);
+      color: #fb923c;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-right: 6px;
+    }
+    .intro-card .tag-b {
+      display: inline-block;
+      background: rgba(99,102,241,0.15);
+      color: #818cf8;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-right: 6px;
+    }
+
+    /* ── Implementation notes ───────────────────────────── */
+    .impl-card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-top: 24px;
+      font-size: 13.5px;
+      line-height: 1.7;
+      color: #475569;
+    }
+    .impl-card h3 {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 10px;
+    }
+    .impl-card code {
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 12px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: #6366f1;
+    }
+    .impl-card .file-ref {
+      display: inline-block;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      padding: 1px 7px;
+      font-size: 12px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: #334155;
+    }
+    .change-list { list-style: none; padding: 0; }
+    .change-list li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 6px 0;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .change-list li:last-child { border-bottom: none; }
+    .change-list .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #e2e8f0; margin-top: 6px; flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Sticky tab switcher ──────────────────────────────────── -->
+<div class="switcher">
+  <h1>pickYum Style Preview</h1>
+  <button class="tab active" onclick="show('current', this)">① Current</button>
+  <button class="tab" onclick="show('warm', this)">② Warm (recommended)</button>
+  <button class="tab" onclick="show('premium', this)">③ Premium</button>
+</div>
+
+<!-- ══════════════════════════════════════
+     PANEL: CURRENT
+══════════════════════════════════════ -->
+<div id="panel-current" class="panel active">
+  <div class="preview-wrap">
+
+    <div class="intro-card">
+      <h2>Current Design</h2>
+      <p>The existing UI works but reads as a standard Tailwind starter. Main issues:</p>
+      <ul>
+        <li><strong style="color:#f1f5f9">Dark gray nav (<code style="color:#fb923c">bg-gray-800</code>) is disconnected</strong> — the rest of the app is white. The nav reads as "leftover" rather than intentional.</li>
+        <li><strong style="color:#f1f5f9">No brand identity</strong> — "pickYum" appears in plain white text with no mark. Indigo is the default Tailwind accent, not a food-brand color.</li>
+        <li><strong style="color:#f1f5f9">Flat cards</strong> — single-pixel borders with minimal shadow. Fine, but indistinguishable from any CRUD app.</li>
+        <li><strong style="color:#f1f5f9">Selections bar feels generic</strong> — the chips are rectangular with no personality.</li>
+      </ul>
+    </div>
+
+    <div class="section-label">Navigation</div>
+    <div class="mockup-frame">
+      <div class="nav-current">
+        <div class="logo-curr">pickYum</div>
+        <div class="links">
+          <span class="link-curr active">Search</span>
+          <span class="link-curr">Compare</span>
+          <span class="link-curr">Choose</span>
+          <span class="link-curr">Groups</span>
+        </div>
+        <div class="nav-curr-right">
+          <div class="avatar-curr"></div>
+        </div>
+      </div>
+      <div class="sel-bar-curr">
+        <h2>Selections</h2>
+        <div class="chip-curr">Tasty Slice <span class="x">✕</span></div>
+        <div class="chip-curr">Sakura Ramen <span class="x">✕</span></div>
+        <div class="chip-curr">Burger Joint <span class="x">✕</span></div>
+      </div>
+      <div style="background:#fef9f0; border-bottom:1px solid #f3e8d0; padding:8px 20px; display:flex; align-items:center; justify-content:space-between;">
+        <span style="font-size:12px; color:#92400e;">You're browsing as a guest — your data will be lost when you leave.</span>
+        <span style="font-size:12px; font-weight:700; color:#78350f; text-decoration:underline;">Sign in to save</span>
+      </div>
+    </div>
+
+    <div class="section-label">Restaurant Cards</div>
+    <div class="compare-box">
+      <div class="page-content">
+        <div class="page-section-title">Saved Restaurants <span style="font-size:14px; color:#9ca3af; font-weight:400;">(3)</span></div>
+        <div class="cards-row">
+          <div class="card-curr">
+            <div class="name">Tasty Slice</div>
+            <div class="meta">Pizza · $$ · Opens 11:00 AM</div>
+            <div class="rating">★ 4.3 Google</div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <span style="font-size:11px; background:#f3f4f6; border-radius:4px; padding:2px 6px; color:#6b7280;">Takeout</span>
+            </div>
+            <button style="margin-top:10px; width:100%; background:#4f46e5; color:#fff; border:none; padding:7px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Add to selections</button>
+          </div>
+          <div class="card-curr">
+            <div class="name">Sakura Ramen</div>
+            <div class="meta">Japanese · $$$ · Opens 12:00 PM</div>
+            <div class="rating">★ 4.7 Google</div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <span style="font-size:11px; background:#f3f4f6; border-radius:4px; padding:2px 6px; color:#6b7280;">Delivery</span>
+            </div>
+            <button style="margin-top:10px; width:100%; background:#4f46e5; color:#fff; border:none; padding:7px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Add to selections</button>
+          </div>
+          <div class="card-curr">
+            <div class="name">Burger Joint</div>
+            <div class="meta">American · $ · Opens 10:00 AM</div>
+            <div class="rating">★ 4.1 Google</div>
+            <div style="margin-top:10px; display:flex; gap:6px;">
+              <span style="font-size:11px; background:#f3f4f6; border-radius:4px; padding:2px 6px; color:#6b7280;">Takeout</span>
+              <span style="font-size:11px; background:#f3f4f6; border-radius:4px; padding:2px 6px; color:#6b7280;">Delivery</span>
+            </div>
+            <button style="margin-top:10px; width:100%; background:#4f46e5; color:#fff; border:none; padding:7px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;">Added to selections</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Buttons</div>
+    <div class="compare-box">
+      <div class="btn-row">
+        <button class="btn-curr-primary">Choose For Me</button>
+        <button class="btn-curr-secondary">Clear Filters</button>
+        <button class="btn-curr-ghost">View History</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════
+     PANEL: WARM
+══════════════════════════════════════ -->
+<div id="panel-warm" class="panel">
+  <div class="preview-wrap">
+
+    <div class="intro-card">
+      <h2><span class="tag">Recommended</span> Option B — Warm (Orange / Amber)</h2>
+      <p>Orange and amber are proven food-industry colors (DoorDash, Yelp, Seamless all lean warm). For an app literally named "pickYum", a warm palette communicates appetite, energy, and decision-making urgency — much more than indigo.</p>
+      <ul>
+        <li><strong style="color:#f1f5f9">White nav</strong> — eliminates the dark/light contrast crack. The logo color becomes the brand anchor instead.</li>
+        <li><strong style="color:#f1f5f9">Logo mark</strong> — small gradient pill with the 🍽 emoji. Makes the wordmark feel intentional.</li>
+        <li><strong style="color:#f1f5f9">Gradient CTA buttons</strong> — orange→red gradient adds warmth and draws the eye to key actions.</li>
+        <li><strong style="color:#f1f5f9">Pill chips</strong> — rounded selection chips feel friendlier and more app-like.</li>
+        <li><strong style="color:#f1f5f9">Card hover</strong> — subtle orange shadow on hover ties interactive elements to the brand.</li>
+      </ul>
+      <p style="margin-top:10px;">Key changes: <span class="tag">tailwind.config.js</span> custom colors, <span class="tag">Navigation.jsx</span> nav classes, <span class="tag">index.html</span> font import.</p>
+    </div>
+
+    <div class="section-label">Navigation</div>
+    <div class="mockup-frame">
+      <div class="nav-warm">
+        <div class="logo-warm">
+          <div class="mark">🍽</div>
+          <span class="wordmark">pickYum</span>
+        </div>
+        <div class="links">
+          <span class="link-warm active">Search</span>
+          <span class="link-warm">Compare</span>
+          <span class="link-warm">Choose</span>
+          <span class="link-warm">Groups</span>
+        </div>
+        <div class="nav-warm-right">
+          <button class="signin-btn-warm">Sign in</button>
+        </div>
+      </div>
+      <div class="sel-bar-warm">
+        <h2>Selections</h2>
+        <div class="chip-warm">Tasty Slice <span class="x">✕</span></div>
+        <div class="chip-warm">Sakura Ramen <span class="x">✕</span></div>
+        <div class="chip-warm">Burger Joint <span class="x">✕</span></div>
+      </div>
+      <div class="banner-warm">
+        <p>You're browsing as a guest — your selections and history will be lost when you leave.</p>
+        <a href="#">Sign in to save your data →</a>
+      </div>
+    </div>
+
+    <div class="section-label">Restaurant Cards</div>
+    <div class="compare-box">
+      <div class="page-content">
+        <div class="page-section-title">Saved Restaurants <span style="font-size:14px; color:#9ca3af; font-weight:400;">(3)</span></div>
+        <div class="cards-row">
+          <div class="card-warm">
+            <div class="badge">Pizza</div>
+            <div class="name">Tasty Slice</div>
+            <div class="meta">$$ · Opens 11:00 AM</div>
+            <div class="rating">★ 4.3 Google</div>
+            <div style="margin-top:8px; display:flex; gap:5px;">
+              <span style="font-size:11px; background:#fff7ed; border-radius:999px; padding:2px 8px; color:#ea580c; font-weight:500; border:1px solid #fed7aa;">Takeout</span>
+            </div>
+            <button class="add-btn">Add to selections</button>
+          </div>
+          <div class="card-warm">
+            <div class="badge">Japanese</div>
+            <div class="name">Sakura Ramen</div>
+            <div class="meta">$$$ · Opens 12:00 PM</div>
+            <div class="rating">★ 4.7 Google</div>
+            <div style="margin-top:8px; display:flex; gap:5px;">
+              <span style="font-size:11px; background:#fff7ed; border-radius:999px; padding:2px 8px; color:#ea580c; font-weight:500; border:1px solid #fed7aa;">Delivery</span>
+            </div>
+            <button class="add-btn">Add to selections</button>
+          </div>
+          <div class="card-warm">
+            <div class="badge">American</div>
+            <div class="name">Burger Joint</div>
+            <div class="meta">$ · Opens 10:00 AM</div>
+            <div class="rating">★ 4.1 Google</div>
+            <div style="margin-top:8px; display:flex; gap:5px;">
+              <span style="font-size:11px; background:#fff7ed; border-radius:999px; padding:2px 8px; color:#ea580c; font-weight:500; border:1px solid #fed7aa;">Takeout</span>
+              <span style="font-size:11px; background:#fff7ed; border-radius:999px; padding:2px 8px; color:#ea580c; font-weight:500; border:1px solid #fed7aa;">Delivery</span>
+            </div>
+            <button class="add-btn" style="background:#e7e5e4; color:#78716c; box-shadow:none;">✓ Added to selections</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Buttons</div>
+    <div class="compare-box">
+      <div class="btn-row">
+        <button class="btn-warm-primary">🎲 Choose For Me</button>
+        <button class="btn-warm-secondary">Clear Filters</button>
+        <button class="btn-warm-ghost">View History</button>
+      </div>
+    </div>
+
+    <div class="impl-card">
+      <h3>Implementation — What files change</h3>
+      <ul class="change-list">
+        <li>
+          <div class="dot" style="background:#f97316;"></div>
+          <div><span class="file-ref">tailwind.config.js</span> — extend <code>colors</code> with <code>brand: { DEFAULT: '#f97316', dark: '#ea580c', light: '#fff7ed' }</code> so you can use <code>bg-brand</code>, <code>text-brand-dark</code> etc. throughout.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#f97316;"></div>
+          <div><span class="file-ref">index.html</span> — add Inter + Plus Jakarta Sans Google Fonts <code>&lt;link&gt;</code> in <code>&lt;head&gt;</code>. Add <code>font-family: 'Inter', sans-serif</code> to body in a global CSS file.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#f97316;"></div>
+          <div><span class="file-ref">Navigation.jsx</span> — change <code>bg-gray-800</code> → <code>bg-white border-b border-orange-200</code>. Adjust link colors from <code>text-gray-300</code> → <code>text-stone-500</code> and active state from <code>bg-gray-900 text-white</code> → <code>bg-orange-50 text-orange-600</code>. Add logo mark element.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#f97316;"></div>
+          <div><span class="file-ref">SearchPage.jsx</span> — swap all <code>bg-indigo-600</code> buttons → <code>bg-gradient-to-r from-orange-500 to-red-500</code>. Swap pill filter chips to use orange active state.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#f97316;"></div>
+          <div><span class="file-ref">HelpMeChoosePage.jsx</span> — swap coin flip / roulette CTAs. Keep indigo for "Tails" badge (contrast with yellow "Heads") — that's intentional there.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#f97316;"></div>
+          <div><span class="file-ref">index.html</span> — replace <code>vite.svg</code> favicon with a simple orange circle + fork emoji <code>.svg</code> or generate one at favicon.io.</div>
+        </li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════
+     PANEL: PREMIUM
+══════════════════════════════════════ -->
+<div id="panel-premium" class="panel">
+  <div class="preview-wrap">
+
+    <div class="intro-card">
+      <h2><span class="tag-b">Option C</span> Premium (White nav, refined Indigo)</h2>
+      <p>Keeps the existing indigo accent but elevates it with a clean white nav, better typography, and tighter card design. Lower risk — less color change means easier migration. Reads more like a polished SaaS product than a food app, which may suit a more professional/B2B angle (e.g., team lunch tool).</p>
+      <ul>
+        <li><strong style="color:#f1f5f9">White nav with bottom border</strong> — same nav-to-content unification without changing the brand color.</li>
+        <li><strong style="color:#f1f5f9">Logo mark in indigo</strong> — the square mark makes the wordmark feel designed.</li>
+        <li><strong style="color:#f1f5f9">Deeper indigo (<code style="color:#fb923c">#1e1b4b</code>)</strong> for the wordmark vs the lighter <code style="color:#fb923c">#4f46e5</code> for actions — more visual hierarchy.</li>
+        <li><strong style="color:#f1f5f9">Card shadows with indigo tint</strong> on hover — cohesive but subtle.</li>
+        <li><strong style="color:#f1f5f9">Plus Jakarta Sans</strong> for the logo only — just enough typographic personality without a full font swap.</li>
+      </ul>
+    </div>
+
+    <div class="section-label">Navigation</div>
+    <div class="mockup-frame">
+      <div class="nav-prem">
+        <div class="logo-prem">
+          <div class="mark">🍽</div>
+          <span class="wordmark">pickYum</span>
+        </div>
+        <div class="links">
+          <span class="link-prem active">Search</span>
+          <span class="link-prem">Compare</span>
+          <span class="link-prem">Choose</span>
+          <span class="link-prem">Groups</span>
+        </div>
+        <div class="nav-prem-right">
+          <button class="signin-btn-prem">Sign in</button>
+        </div>
+      </div>
+      <div class="sel-bar-prem">
+        <h2>Selections</h2>
+        <div class="chip-prem">Tasty Slice <span class="x">✕</span></div>
+        <div class="chip-prem">Sakura Ramen <span class="x">✕</span></div>
+        <div class="chip-prem">Burger Joint <span class="x">✕</span></div>
+      </div>
+      <div class="banner-prem">
+        <p>You're browsing as a guest — your selections and history will be lost when you leave.</p>
+        <a href="#">Sign in to save your data</a>
+      </div>
+    </div>
+
+    <div class="section-label">Restaurant Cards</div>
+    <div class="compare-box">
+      <div class="page-content" style="background:#f8fafc;">
+        <div class="page-section-title">Saved Restaurants <span style="font-size:14px; color:#94a3b8; font-weight:400;">(3)</span></div>
+        <div class="cards-row">
+          <div class="card-prem">
+            <div class="badge">Pizza</div>
+            <div class="name">Tasty Slice</div>
+            <div class="meta">$$ · Opens 11:00 AM</div>
+            <div class="rating">★ 4.3 Google</div>
+            <div style="margin-top:8px; display:flex; gap:5px;">
+              <span style="font-size:11px; background:#eef2ff; border-radius:4px; padding:2px 8px; color:#4f46e5; font-weight:500;">Takeout</span>
+            </div>
+            <button class="add-btn">Add to selections</button>
+          </div>
+          <div class="card-prem">
+            <div class="badge">Japanese</div>
+            <div class="name">Sakura Ramen</div>
+            <div class="meta">$$$ · Opens 12:00 PM</div>
+            <div class="rating">★ 4.7 Google</div>
+            <div style="margin-top:8px; display:flex; gap:5px;">
+              <span style="font-size:11px; background:#eef2ff; border-radius:4px; padding:2px 8px; color:#4f46e5; font-weight:500;">Delivery</span>
+            </div>
+            <button class="add-btn">Add to selections</button>
+          </div>
+          <div class="card-prem">
+            <div class="badge">American</div>
+            <div class="name">Burger Joint</div>
+            <div class="meta">$ · Opens 10:00 AM</div>
+            <div class="rating">★ 4.1 Google</div>
+            <div style="margin-top:8px; display:flex; gap:5px;">
+              <span style="font-size:11px; background:#eef2ff; border-radius:4px; padding:2px 8px; color:#4f46e5; font-weight:500;">Takeout</span>
+              <span style="font-size:11px; background:#eef2ff; border-radius:4px; padding:2px 8px; color:#4f46e5; font-weight:500;">Delivery</span>
+            </div>
+            <button class="add-btn" style="background:#e2e8f0; color:#94a3b8; box-shadow:none;">✓ Added to selections</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Buttons</div>
+    <div class="compare-box">
+      <div class="btn-row">
+        <button class="btn-prem-primary">🎲 Choose For Me</button>
+        <button class="btn-prem-secondary">Clear Filters</button>
+        <button class="btn-prem-ghost">View History</button>
+      </div>
+    </div>
+
+    <div class="impl-card">
+      <h3>Implementation — What files change</h3>
+      <ul class="change-list">
+        <li>
+          <div class="dot" style="background:#4f46e5;"></div>
+          <div><span class="file-ref">tailwind.config.js</span> — extend <code>fontFamily</code> to add <code>'plus-jakarta': ['Plus Jakarta Sans', 'sans-serif']</code>. Used only for the logo wordmark.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#4f46e5;"></div>
+          <div><span class="file-ref">index.html</span> — add Plus Jakarta Sans Google Fonts link. Add <code>font-family: 'Inter', sans-serif</code> to body.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#4f46e5;"></div>
+          <div><span class="file-ref">Navigation.jsx</span> — <code>bg-gray-800</code> → <code>bg-white border-b border-slate-200 shadow-sm</code>. Links: <code>text-gray-300 hover:bg-gray-700</code> → <code>text-slate-500 hover:bg-slate-100</code>. Active: <code>bg-gray-900</code> → <code>bg-indigo-50 text-indigo-600</code>. Smallest possible change.</div>
+        </li>
+        <li>
+          <div class="dot" style="background:#4f46e5;"></div>
+          <div>All other pages stay identical — the button and card colors remain <code>indigo-600</code>. Only the nav and chips update.</div>
+        </li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  function show(id, btn) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('panel-' + id).classList.add('active');
+    btn.classList.add('active');
+    // Color the active tab correctly
+    document.querySelectorAll('.tab').forEach(t => {
+      t.style.background = '';
+      t.style.borderColor = '';
+      t.style.color = '';
+    });
+    if (id === 'warm') {
+      btn.style.background = '#f97316';
+      btn.style.borderColor = '#f97316';
+      btn.style.color = '#fff';
+    } else if (id === 'premium') {
+      btn.style.background = '#4f46e5';
+      btn.style.borderColor = '#4f46e5';
+      btn.style.color = '#fff';
+    } else {
+      btn.style.background = '#334155';
+      btn.style.borderColor = '#475569';
+      btn.style.color = '#e2e8f0';
+    }
+  }
+  // Init first tab
+  document.querySelector('.tab').style.background = '#334155';
+  document.querySelector('.tab').style.borderColor = '#475569';
+  document.querySelector('.tab').style.color = '#e2e8f0';
+</script>
+
+</body>
+</html>

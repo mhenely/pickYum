@@ -1,36 +1,24 @@
 import { createSlice } from "@reduxjs/toolkit";
 
+// Single boolean: whether the "Help me choose" modal is open. The slice used to
+// also export addSelection / removeSelection / changeZeroIndex actions that
+// mutated a non-existent `selections` array — those would crash if dispatched
+// and have been removed.
+
 const initialState = {
   isOpen: false,
-  // selections: [
-  //   {name: 'PF Changs'},
-  //   {name: 'Burger King'},
-  //   {name: 'Steak n Shake'},
-  //   {name: 'Guthries'}
-  // ],
-}
+};
 
 export const chooseModalSlice = createSlice({
   name: 'chooseModal',
   initialState,
   reducers: {
     setIsOpen: (state) => {
-      state.isOpen = !state.isOpen
+      state.isOpen = !state.isOpen;
     },
-    removeSelection: (state, action) => {
-      state.selections = state.selections.filter((selection) => selection.name !== action.payload)
-    },
-    addSelection: (state, action) => {
-      const newSelection = {name: action.payload};
-      state.selections = [...state.selections, newSelection];
-    },
-    changeZeroIndex: (state) => {
-      state.selections[0].name = 'test';
-    }
-  }
-})
+  },
+});
 
-
-export const { setIsOpen, removeSelection, addSelection, changeZeroIndex } = chooseModalSlice.actions;
+export const { setIsOpen } = chooseModalSlice.actions;
 
 export default chooseModalSlice.reducer;
