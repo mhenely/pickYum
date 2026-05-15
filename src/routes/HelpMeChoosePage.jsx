@@ -416,14 +416,20 @@ const HelpMeChoosePage = () => {
                 larger max-height than the Compare page's identical-purpose
                 cap. overscroll-contain prevents wheel/touch scroll from
                 escaping to the page once the user reaches the edge. */}
-            <div className={`flex flex-col gap-3 ${favorites.length > 6 ? 'max-h-[1040px] overflow-y-auto overscroll-contain pr-1' : ''}`}>
+            // Always-scroll at 80vh — md cards (~150px each + Add
+            // button) outgrow the page faster than the legacy sm
+            // variant, so the previous "scroll only past 6 entries"
+            // pattern stretched the page on most screens. Viewport-
+            // relative cap scales with monitor size; overscroll-
+            // contain stops the scroll from escaping to the page.
+            <div className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-1">
               {favorites.map((id) => {
                 const rating = getUserRating(reviews, id);
                 return (
                   <RestaurantCard
                     key={id}
                     id={id}
-                    size="sm"
+                    size="md"
                     restaurantMap={allRestaurants}
                     personalRating={rating}
                     lastChosen={formatLastChosen(acceptedStats, id)}
@@ -704,7 +710,13 @@ const HelpMeChoosePage = () => {
                     // flex column makes the wrapper a flex item with stretched
                     // height in its row, and h-full on the inner card fills it
                     // — keeps cards in the same row aligned to the tallest.
-                    style={{ minWidth: "140px", maxWidth: "180px" }}
+                    // Wider min/max than the legacy sm-card layout —
+                    // md cards include a photo carousel and richer
+                    // contact rows, so a 140px column was too cramped.
+                    // 220-260px gives the photo a sensible aspect
+                    // ratio (~h-32 photo / w-220 = 1.7) and still
+                    // packs 4-5 across at desktop widths.
+                    style={{ minWidth: "220px", maxWidth: "260px" }}
                     className="flex flex-col"
                     onDragOver={!isTouchDevice ? (e) => handleDragOver(e, id) : undefined}
                     onDragLeave={!isTouchDevice ? handleDragLeave : undefined}
@@ -712,7 +724,7 @@ const HelpMeChoosePage = () => {
                   >
                     <RestaurantCard
                       id={id}
-                      size="sm"
+                      size="md"
                       personalRating={rating}
                       lastChosen={formatLastChosen(acceptedStats, id)}
                       badge={badge}

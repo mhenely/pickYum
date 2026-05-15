@@ -13,7 +13,7 @@ import { api } from '../lib/api';
 import RouletteWheel from '../components/RouletteWheel';
 import InfoRow from '../components/InfoRow';
 import ScheduleModal from '../components/ScheduleModal';
-import PublicRestaurantInfoModal from '../components/PublicRestaurantInfoModal';
+import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import { buildGoogleCalendarUrl } from '../utils/calendarUtils';
@@ -1242,11 +1242,17 @@ const GroupSessionPage = () => {
       )}
 
       {infoForId && (
-        <PublicRestaurantInfoModal
+        <RestaurantDetailModal
           restaurantId={Number(infoForId)}
-          // Pass the session snapshot so the modal shows name/type/price
-          // immediately while it fetches the full restaurant detail.
+          // Session snapshot fills the modal immediately while the
+          // auto-fetch loads canonical data from /api/restaurants/:id.
           fallback={session.restaurants[infoForId]}
+          // Voting page can be opened by guests (no auth). readOnly
+          // hides write actions outright; `actions={null}` drops the
+          // Add-to-Options / Favorite buttons (vote/skip controls
+          // live elsewhere on this page).
+          readOnly
+          actions={null}
           onClose={() => setInfoForId(null)}
         />
       )}

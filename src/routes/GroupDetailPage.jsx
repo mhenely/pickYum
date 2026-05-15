@@ -16,7 +16,7 @@ import { socialApi } from '../lib/socialApi';
 import { api } from '../lib/api';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import BallotDetailModal from '../components/BallotDetailModal';
-import PublicRestaurantInfoModal from '../components/PublicRestaurantInfoModal';
+import RestaurantDetailModal from '../components/RestaurantDetailModal';
 
 const STATUS_BADGE = {
   OPEN:   { label: 'Open',             cls: 'bg-green-100 text-green-700' },
@@ -1400,9 +1400,10 @@ function GroupInsightsPanel({ groupId }) {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
-  // Restaurant detail modal — string id when open, null when closed. Uses
-  // PublicRestaurantInfoModal (self-fetching, no Redux dep) so the panel stays
-  // independent of whatever else the page has loaded.
+  // Restaurant detail modal — string id when open, null when closed.
+  // Uses RestaurantDetailModal in readOnly + actions={null} mode so it
+  // auto-fetches from /api/restaurants/:id and stays a pure viewer
+  // (no Add-to-Options / Favorite implicit in this context).
   const [infoForId, setInfoForId] = useState(null);
 
   const handleToggle = async () => {
@@ -1617,8 +1618,15 @@ function GroupInsightsPanel({ groupId }) {
       )}
 
       {infoForId && (
-        <PublicRestaurantInfoModal
+        <RestaurantDetailModal
           restaurantId={Number(infoForId)}
+          // Group members viewing a candidate or ballot result —
+          // they have an auth session but the read-only experience
+          // matches voter expectations (no Add-to-Options / Favorite
+          // implicit in this context). Modal auto-fetches the row
+          // from /api/restaurants/:id, no restaurantMap needed.
+          readOnly
+          actions={null}
           onClose={() => setInfoForId(null)}
         />
       )}

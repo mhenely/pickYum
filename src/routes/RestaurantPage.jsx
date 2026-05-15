@@ -471,7 +471,7 @@ const RestaurantPage = () => {
                   <div className="flex flex-col gap-2">
                     {favorites.map((id) => (
                       <RestaurantCard
-                        size="sm"
+                        size="md"
                         key={id}
                         id={id}
                         isActive={activeSet.has(sid(id))}
@@ -497,7 +497,7 @@ const RestaurantPage = () => {
                   <div className="flex flex-col gap-2">
                     {options.map((id) => (
                       <RestaurantCard
-                        size="sm"
+                        size="md"
                         key={id}
                         id={id}
                         isActive={activeSet.has(sid(id))}
@@ -547,10 +547,17 @@ const RestaurantPage = () => {
             // overscroll-contain stops the wheel/touch scroll from bubbling
             // up to the page once you hit the top/bottom of the list.
             // pr-1 gives the scrollbar a tiny gutter so it doesn't crowd cards.
-            <div className={`flex flex-col gap-3 ${favorites.length > 6 ? 'max-h-[820px] overflow-y-auto overscroll-contain pr-1' : ''}`}>
+            // md-size cards are ~2× taller than the legacy sm cards
+            // they replaced, so we always scroll (not just past 6
+            // entries) with a viewport-relative cap. 80vh leaves
+            // room for the page header + breadcrumb above and the
+            // viewport bottom edge below. overscroll-contain stops
+            // wheel/touch scroll from bubbling to the page when
+            // the user hits the top/bottom of the list.
+            <div className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-1">
               {favorites.map((id) => (
                 <RestaurantCard
-                  size="sm"
+                  size="md"
                   key={id}
                   id={id}
                   isActive={activeSet.has(sid(id))}
@@ -689,10 +696,15 @@ const RestaurantPage = () => {
             // Mirror of the Favorites sidebar above — same 6-card cap so
             // both columns cap at roughly equal heights and the page
             // doesn't stretch when either list grows long.
-            <div className={`flex flex-col gap-3 ${options.length > 6 ? 'max-h-[820px] overflow-y-auto overscroll-contain pr-1' : ''}`}>
+            // Always-scroll sidebar at 80vh — see Favorites column
+            // above for the rationale (md cards are taller than the
+            // legacy sm cards, so the previous "scroll only past 6
+            // entries" pattern made the column too tall on most
+            // screens).
+            <div className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-1">
               {options.map((id) => (
                 <RestaurantCard
-                  size="sm"
+                  size="md"
                   key={id}
                   id={id}
                   isActive={activeSet.has(sid(id))}

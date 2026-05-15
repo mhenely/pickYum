@@ -184,12 +184,93 @@ function OpenStatusBadge({ status }) {
   );
 }
 
-const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
+// Adapt the server's /api/restaurants/:id shape (canonical Restaurant
+// row, with rating as Decimal-stringified, type as `cuisineType`,
+// price as `priceLevel`, etc.) into the in-memory shape the modal
+// reads from when restaurantMap supplies the row. Kept as a free
+// function so the resolution below stays a one-liner.
+function normalizeFetchedRestaurant(r) {
+  if (!r) return null;
+  return {
+    ...r,
+    // Field-name parity with the in-memory shape used by cards / Redux.
+    type:    r.cuisineType ?? r.type    ?? null,
+    price:   r.priceLevel  ?? r.price   ?? null,
+    rating:  r.googleRating != null ? Number(r.googleRating) : null,
+    photos:  Array.isArray(r.photos) ? r.photos : [],
+  };
+}
+
+// `readOnly`  — hides write-actions (review form, note editor, recommend,
+//               default Add/Favorite buttons). Reviews + recs stay
+//               visible but become display-only. Implied true for
+//               guests (unauthenticated viewers).
+// `actions`   — custom JSX rendered in place of the default Add-to-
+//               Options / Favorite buttons. `null` hides the action
+//               row entirely (e.g. group voting modal where the
+//               action is implicit elsewhere on the page).
+// `fallback`  — snapshot of the restaurant from a caller-provided
+//               source (e.g. a group session payload). Used as the
+//               `r` resolution when restaurantMap doesn't have the
+//               id, so the modal isn't empty for the first ~150ms
+//               while the API fetch lands.
+// `onArchive` / `onUnarchive` / `onDelete` — when set, render
+//   Archive / Unarchive / Delete buttons in the action row. Used by
+//   HistoryPage to move those operations off the card and into the
+//   detail modal (cleaner card UX + consolidated confirmation).
+// `isArchived` — drives the Archive vs Unarchive label.
+const RestaurantDetailModal = ({
+  restaurantId,
+  restaurantMap,
+  onClose,
+  readOnly = false,
+  actions,
+  fallback,
+  onArchive,
+  onUnarchive,
+  onDelete,
+  isArchived = false,
+  // When true, the modal opens with the Yours review tab active AND
+  // the write-review form already expanded. Used by HistoryPage's
+  // "Add Review" card button so the user lands directly in the form
+  // instead of having to click through. Ignored in readOnly mode.
+  defaultShowReviewForm = false,
+}) => {
   const dispatch = useDispatch();
   const userInfo = useCurrentUser();
   const isAuthenticated = useSelector((state) => state.auth?.status === 'authenticated');
+  // Effective read-only state — explicit prop OR guest viewer. Used
+  // throughout to gate write UI. Pulled into one constant so the
+  // checks below stay readable.
+  const isReadOnly = readOnly || !isAuthenticated;
 
-  const r = restaurantMap?.[restaurantId];
+  // Self-fetched copy of the row from /api/restaurants/:id. Used when
+  // restaurantMap is missing the entry (e.g. group voting page —
+  // guests have no Redux user-data). The endpoint is public + cached
+  // server-side, so this is cheap.
+  const [fetched, setFetched] = useState(null);
+  useEffect(() => {
+    const numId = Number(restaurantId);
+    if (!numId) return;
+    // Skip when restaurantMap already has it — that's the authoritative
+    // source for authenticated users (carries notes/etc. for the user).
+    if (restaurantMap?.[restaurantId]) return;
+    let cancelled = false;
+    api.restaurants.get(numId)
+      .then(({ restaurant }) => { if (!cancelled) setFetched(restaurant); })
+      .catch(() => { /* fall through to fallback below */ });
+    return () => { cancelled = true; };
+  }, [restaurantId, restaurantMap]);
+
+  // Resolution priority: in-memory map (Redux) → freshly fetched →
+  // caller-provided snapshot fallback. The fetched row carries
+  // server-normalized fields (rating as Decimal, etc.), so we adapt
+  // them to the in-memory shape via the inline normalizer.
+  const r = restaurantMap?.[restaurantId]
+    ?? (fetched ? normalizeFetchedRestaurant(fetched) : null)
+    ?? fallback
+    ?? null;
+
   const savedNote = r ? (userInfo.notes?.[sid(restaurantId)] ?? '') : '';
   const [noteText, setNoteText] = useState(savedNote);
 
@@ -222,7 +303,13 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
   const [communityLoading, setCommunityLoading] = useState(false);
 
   // ── Review form state ─────────────────────────────────────
-  const [showReviewForm, setShowReviewForm] = useState(false);
+  // defaultShowReviewForm pre-expands the form when the caller wants
+  // to land users directly in the write flow (HistoryPage's
+  // "Add Review" button). Guests / read-only viewers can't write, so
+  // the prop is gated by !isReadOnly even if the caller forgets.
+  const [showReviewForm, setShowReviewForm] = useState(
+    defaultShowReviewForm && !isReadOnly,
+  );
   const [reviewContent, setReviewContent] = useState('');
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewDate, setReviewDate] = useState(() => new Date().toLocaleDateString());
@@ -522,40 +609,84 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
               </span>
             </div>
 
-            {/* Action buttons */}
-            <div className="flex gap-3">
-              <button
-                onClick={() =>
-                  isSelected
-                    ? dispatch(removeUserOption(sid(restaurantId)))
-                    : dispatch(addUserOption(sid(restaurantId)))
-                }
-                className={[
-                  'flex-1 rounded-lg py-2 text-sm font-semibold transition-colors',
-                  isSelected
-                    ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
-                    : 'bg-orange-500 text-white hover:bg-orange-500',
-                ].join(' ')}
-              >
-                {isSelected ? 'Remove from Options' : 'Add to Options'}
-              </button>
-              <button
-                onClick={() =>
-                  dispatch(updateUserFavorites({ restaurantId: sid(restaurantId), userId: userInfo.id }))
-                }
-                className={[
-                  'flex-1 rounded-lg py-2 text-sm font-semibold transition-colors border',
-                  isFavorite
-                    ? 'bg-red-50 text-red-600 hover:bg-red-100 border-red-200'
-                    : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-200',
-                ].join(' ')}
-              >
-                {isFavorite ? '♥ Unfavorite' : '♡ Favorite'}
-              </button>
-            </div>
+            {/* Action buttons — three modes, in priority order:
+                 1. `actions === null` → render nothing (e.g. group
+                    voting modal where action lives elsewhere on page)
+                 2. `actions` is supplied  → render caller's JSX (e.g.
+                    HistoryPage's "Add Review" button)
+                 3. otherwise → default Add-to-Options / Favorite pair
+                Read-only viewers (guests OR explicit readOnly prop)
+                fall through option 3 and see nothing — the default
+                writes are auth-gated. Archive / Delete buttons join
+                whichever row renders, when those handlers are set. */}
+            {actions === null ? null : (
+              <div className="flex flex-wrap gap-3">
+                {actions !== undefined ? (
+                  actions
+                ) : (!isReadOnly && (
+                  <>
+                    <button
+                      onClick={() =>
+                        isSelected
+                          ? dispatch(removeUserOption(sid(restaurantId)))
+                          : dispatch(addUserOption(sid(restaurantId)))
+                      }
+                      className={[
+                        'flex-1 rounded-lg py-2 text-sm font-semibold transition-colors',
+                        isSelected
+                          ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
+                          : 'bg-orange-500 text-white hover:bg-orange-500',
+                      ].join(' ')}
+                    >
+                      {isSelected ? 'Remove from Options' : 'Add to Options'}
+                    </button>
+                    <button
+                      onClick={() =>
+                        dispatch(updateUserFavorites({ restaurantId: sid(restaurantId), userId: userInfo.id }))
+                      }
+                      className={[
+                        'flex-1 rounded-lg py-2 text-sm font-semibold transition-colors border',
+                        isFavorite
+                          ? 'bg-red-50 text-red-600 hover:bg-red-100 border-red-200'
+                          : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-200',
+                      ].join(' ')}
+                    >
+                      {isFavorite ? '♥ Unfavorite' : '♡ Favorite'}
+                    </button>
+                  </>
+                ))}
+                {/* History-page operations live in the modal so the
+                    card can stay clean. Archive vs Unarchive flips on
+                    the row's current archive state. */}
+                {onArchive && !isArchived && (
+                  <button
+                    onClick={onArchive}
+                    className="rounded-lg py-2 px-4 text-sm font-medium border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 transition-colors"
+                  >
+                    Archive
+                  </button>
+                )}
+                {onUnarchive && isArchived && (
+                  <button
+                    onClick={onUnarchive}
+                    className="rounded-lg py-2 px-4 text-sm font-medium border border-orange-300 bg-white text-orange-600 hover:bg-orange-50 transition-colors"
+                  >
+                    Restore
+                  </button>
+                )}
+                {onDelete && (
+                  <button
+                    onClick={onDelete}
+                    className="rounded-lg py-2 px-4 text-sm font-medium border border-red-300 bg-white text-red-600 hover:bg-red-50 transition-colors"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            )}
 
-            {/* ── Recommend section (authenticated only) ───────── */}
-            {isAuthenticated && (
+            {/* ── Recommend section (authenticated, write-mode only) ── */}
+            {isAuthenticated && !isReadOnly && (
               <div className="border-t border-gray-100 pt-4">
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-sm font-semibold text-gray-700">Recommend</p>
@@ -689,7 +820,7 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
                     </button>
                   ))}
                 </div>
-                {reviewTab === 'yours' && !showReviewForm && (
+                {reviewTab === 'yours' && !showReviewForm && !isReadOnly && (
                   <button
                     onClick={() => setShowReviewForm(true)}
                     className="text-xs font-medium text-orange-600 hover:text-orange-500 transition-colors"
@@ -758,12 +889,18 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
                             <span className="text-xs font-bold text-amber-500">★ {rv.rating}</span>
                             <div className="flex items-center gap-3">
                               <span className="text-xs text-gray-400">{rv.date}</span>
-                              <button
-                                onClick={() => dispatch(removeUserReview({ restaurantId: sid(restaurantId), id: rv.id }))}
-                                className="text-xs text-gray-300 hover:text-red-400 transition-colors"
-                              >
-                                ✕
-                              </button>
+                              {/* Delete-review X is owner-only and a
+                                  write action — gated by !isReadOnly so
+                                  read-only viewers (Compare panel,
+                                  group modal) don't see it. */}
+                              {!isReadOnly && (
+                                <button
+                                  onClick={() => dispatch(removeUserReview({ restaurantId: sid(restaurantId), id: rv.id }))}
+                                  className="text-xs text-gray-300 hover:text-red-400 transition-colors"
+                                >
+                                  ✕
+                                </button>
+                              )}
                             </div>
                           </div>
                           <p className="text-xs text-gray-600 leading-relaxed">{rv.content}</p>
@@ -827,37 +964,43 @@ const RestaurantDetailModal = ({ restaurantId, restaurantMap, onClose }) => {
 
             </div>
 
-            {/* Personal note */}
-            <div className="border-t border-gray-100 pt-4">
-              <p className="text-sm font-semibold text-gray-700 mb-2">Your Note</p>
-              <textarea
-                value={noteText}
-                onChange={(e) => setNoteText(e.target.value)}
-                placeholder="Jot something down — parking tips, must-order dishes, who to bring…"
-                rows={3}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
-              />
-              {(noteDirty || savedNote) && (
-                <div className="flex justify-end gap-2 mt-2">
-                  {savedNote && (
-                    <button
-                      onClick={() => { setNoteText(''); dispatch(setRestaurantNote({ restaurantId: sid(restaurantId), text: '' })); }}
-                      className="px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-red-400 transition-colors"
-                    >
-                      Clear
-                    </button>
-                  )}
-                  {noteDirty && (
-                    <button
-                      onClick={handleSaveNote}
-                      className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 transition-colors"
-                    >
-                      Save note
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Personal note — write-only. Hidden in read-only mode
+                (Compare panel, group voting modal) since the note
+                editor is a write action and a guest viewer has no
+                "me" to save against. Owners still see their saved
+                note in the inline reviews section above. */}
+            {!isReadOnly && (
+              <div className="border-t border-gray-100 pt-4">
+                <p className="text-sm font-semibold text-gray-700 mb-2">Your Note</p>
+                <textarea
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                  placeholder="Jot something down — parking tips, must-order dishes, who to bring…"
+                  rows={3}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                />
+                {(noteDirty || savedNote) && (
+                  <div className="flex justify-end gap-2 mt-2">
+                    {savedNote && (
+                      <button
+                        onClick={() => { setNoteText(''); dispatch(setRestaurantNote({ restaurantId: sid(restaurantId), text: '' })); }}
+                        className="px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-red-400 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {noteDirty && (
+                      <button
+                        onClick={handleSaveNote}
+                        className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 transition-colors"
+                      >
+                        Save note
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </DialogPanel>
       </div>

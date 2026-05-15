@@ -1,13 +1,11 @@
 import { useState, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
-import { persistAddReview, removeUserReview, updateUserFavorites, archiveRestaurant, unarchiveRestaurant, removeFromHistory, addUserOption } from '../redux/slices/userInfoSlice';
-import RatingDisplay from '../components/RatingDisplay';
-import RestaurantReviewModal from '../components/RestaurantReviewModal';
+import { updateUserFavorites, archiveRestaurant, unarchiveRestaurant, removeFromHistory } from '../redux/slices/userInfoSlice';
+import RestaurantCard from '../components/RestaurantCard';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import useCurrentUser from '../hooks/useCurrentUser';
-import { buildAcceptedStats, formatLastChosen, getChosenCount } from '../utils/acceptedStats';
-import { PRICE_LABELS } from '../utils/restaurantConstants';
+import { buildAcceptedStats, formatLastChosen } from '../utils/acceptedStats';
 
 // ── Confirmation modal ────────────────────────────────────────
 
@@ -55,150 +53,25 @@ const ConfirmModal = ({ action, restaurantName, onConfirm, onCancel }) => (
   </Dialog>
 );
 
-// ── Restaurant card ───────────────────────────────────────────
-
-const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, acceptedStats, isArchived, isInOptions, note, onCardClick, onNameClick, onArchiveAction, dispatch }) => {
-  const reviews = currentUser.reviews[id] || [];
-  const personalRating =
-    reviews.length > 0
-      ? reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length
-      : null;
-  const isFavorited = favoriteSet.has(String(id));
-  // O(1) lookup off the precomputed acceptedStats map instead of scanning
-  // `currentUser.accepted` twice per row (legacy `getMostRecentDate` +
-  // `getChosenCount`). Page-scope memo guarantees a stable map across renders.
-  const lastChosen = formatLastChosen(acceptedStats, id);
-  const chosenCount = getChosenCount(acceptedStats, id);
-
-  return (
-    <div
-      onClick={() => !isArchived && onNameClick(id)}
-      className={`flex flex-col rounded-lg border p-4 shadow-sm bg-white transition-all duration-150 ${
-        isArchived
-          ? 'border-gray-200 opacity-75'
-          : 'border-gray-200 cursor-pointer hover:shadow-md hover:border-orange-300 hover:bg-orange-50'
-      }`}
-    >
-      {/* Header */}
-      <div className="flex justify-between items-start">
-        <div className="min-w-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); onNameClick(id); }}
-            className={`font-semibold hover:underline text-left ${isArchived ? 'text-gray-500' : 'text-orange-600'}`}
-          >
-            {restaurant.name}
-          </button>
-          {lastChosen && (
-            <span className="ml-2 text-xs text-gray-400 whitespace-nowrap">
-              Last chosen {lastChosen}
-            </span>
-          )}
-        </div>
-        {!isArchived && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              dispatch(updateUserFavorites({ restaurantId: id, userId: currentUser.id }));
-            }}
-            className={`text-xl leading-none ${isFavorited ? 'text-red-500' : 'text-gray-300 hover:text-red-300'}`}
-          >
-            &#9829;
-          </button>
-        )}
-      </div>
-
-      <p className="text-sm text-gray-500 mt-1">
-        {restaurant.type} · {PRICE_LABELS[restaurant.price]} · Opens {restaurant.hours}
-      </p>
-
-      <div className="mt-1">
-        <RatingDisplay
-          restaurantId={id}
-          googleRating={restaurant.rating ?? null}
-          personalRating={personalRating}
-          personalReviews={reviews}
-          restaurantName={restaurant.name}
-        />
-        {reviews.length > 0 && (
-          <span className="text-xs text-gray-400">
-            ({reviews.length} review{reviews.length !== 1 ? 's' : ''})
-          </span>
-        )}
-      </div>
-
-      {note && (
-        <p className="mt-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1 line-clamp-2 italic">
-          📝 {note}
-        </p>
-      )}
-
-      {/* Bottom section */}
-      <div className="mt-auto pt-3">
-        <div className="flex items-center justify-between text-xs text-gray-500 min-h-[1.25rem]">
-          <div className="flex gap-2">
-            {restaurant.takeout && <span className="bg-gray-100 px-2 py-0.5 rounded">Takeout</span>}
-            {restaurant.delivery && <span className="bg-gray-100 px-2 py-0.5 rounded">Delivery</span>}
-          </div>
-          <span className="text-gray-400 italic">Chosen {chosenCount}×</span>
-        </div>
-
-        <div className="flex gap-2 mt-3">
-          {isArchived ? (
-            <>
-              <button
-                onClick={(e) => { e.stopPropagation(); onArchiveAction('unarchive', id); }}
-                className="flex-1 rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-500"
-              >
-                Restore
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onArchiveAction('delete', id); }}
-                className="rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-500 hover:bg-red-50 hover:border-red-300 transition-colors"
-              >
-                Delete
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                onClick={(e) => { e.stopPropagation(); onArchiveAction('archive', id); }}
-                className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-500 hover:bg-gray-50 hover:border-gray-400 transition-colors"
-              >
-                Archive
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onCardClick(id); }}
-                className="flex-1 rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-500"
-              >
-                Add Review
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onArchiveAction('delete', id); }}
-                className="rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-500 hover:bg-red-50 hover:border-red-300 transition-colors"
-              >
-                Delete
-              </button>
-            </>
-          )}
-          {!isArchived && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!isInOptions) dispatch(addUserOption(id));
-              }}
-              disabled={isInOptions}
-              className="rounded-md border border-orange-200 px-2 py-1 text-xs font-medium text-orange-500 hover:bg-orange-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              {isInOptions ? '✓ In options' : '+ Add to options'}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+// Per-user average across all of a user's reviews for one restaurant.
+// Pulled to module scope so the page body can reuse it inline without
+// recomputing in every render and without the legacy local-card
+// component to encapsulate it.
+const getUserAvgRating = (reviewsById, id) => {
+  const list = reviewsById[id] || [];
+  if (list.length === 0) return null;
+  return list.reduce((sum, r) => sum + Number(r.rating), 0) / list.length;
 };
 
 // ── Page ──────────────────────────────────────────────────────
+// History rows now use the shared md-size RestaurantCard (same
+// visual as nearby search results) for cross-page consistency.
+// What this page used to render as a local card — photos, ratings,
+// hours, contact info — is all in the shared card already; what
+// USED to live on the card (Archive / Delete buttons + Add Review)
+// is now consolidated into the popup detail modal so the card
+// stays clean and the destructive actions sit behind an explicit
+// open-modal-and-confirm flow.
 
 const UserHistoryPage = () => {
   const currentUser = useCurrentUser();
@@ -206,15 +79,21 @@ const UserHistoryPage = () => {
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const allRestaurants = customRestaurants;
 
-  const [selectedRestaurantId, setSelectedRestaurantId] = useState(null);
-  const [detailId, setDetailId] = useState(null);
+  // Single modal-open state: `{ id, defaultWriteReview }` (or null).
+  // The detail modal serves both flows now — generic detail view (card
+  // body click → defaultWriteReview=false) and "Add Review" (button
+  // click → defaultWriteReview=true, lands the user directly in the
+  // write-review form). Replaces the previous split between
+  // RestaurantReviewModal and RestaurantDetailModal.
+  const [modalState, setModalState] = useState(null);
   const [sortBy, setSortBy] = useState('date');
   const [sortDir, setSortDir] = useState('desc');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [showArchives, setShowArchives] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null); // { type, id }
 
-  const handleCardClick = (id) => setSelectedRestaurantId(id);
+  const openDetail      = (id) => setModalState({ id, defaultWriteReview: false });
+  const openAddReview   = (id) => setModalState({ id, defaultWriteReview: true });
 
   const handleSortClick = (key) => {
     if (sortBy === key) {
@@ -247,9 +126,8 @@ const UserHistoryPage = () => {
     [currentUser.accepted],
   );
 
-  const { displayIds, displayArchivedIds, favoriteSet, optionSet } = useMemo(() => {
+  const { displayIds, displayArchivedIds, favoriteSet } = useMemo(() => {
     const archivedSet = new Set((currentUser.archived ?? []).map(String));
-    const optionSet   = new Set(currentUser.options.map(String));
     const favoriteSet = new Set(currentUser.favorites.map(String));
 
     // Unique restaurant IDs that appear in history (accepted + reviewed).
@@ -280,10 +158,9 @@ const UserHistoryPage = () => {
       displayIds:         [...filteredIds].sort(sortFn),
       displayArchivedIds: [...archivedIds].sort(sortFn),
       favoriteSet,
-      optionSet,
     };
   }, [
-    currentUser.accepted, currentUser.archived, currentUser.options,
+    currentUser.accepted, currentUser.archived,
     currentUser.favorites, currentUser.reviews,
     favoritesOnly, sortBy, sortDir, acceptedStats,
   ]);
@@ -360,22 +237,36 @@ const UserHistoryPage = () => {
         {displayIds.map((id) => {
           const restaurant = allRestaurants[id];
           if (!restaurant) return null;
+          const personalRating = getUserAvgRating(currentUser.reviews, id);
           return (
             <RestaurantCard
               key={id}
               id={id}
-              restaurant={restaurant}
-              currentUser={currentUser}
-              favoriteSet={favoriteSet}
-              acceptedStats={acceptedStats}
-              isArchived={false}
-              isInOptions={optionSet.has(String(id))}
-              note={currentUser.notes?.[String(id)] ?? null}
-              onCardClick={handleCardClick}
-              onNameClick={setDetailId}
-              onArchiveAction={handleArchiveAction}
-              dispatch={dispatch}
-            />
+              size="md"
+              restaurantMap={allRestaurants}
+              personalRating={personalRating}
+              lastChosen={formatLastChosen(acceptedStats, id)}
+              // Whole-card click opens the detail modal (read view).
+              // Favorite heart toggle uses the shared
+              // updateUserFavorites flow — no longer a custom button.
+              onCardClick={() => openDetail(id)}
+              isFavorited={favoriteSet.has(String(id))}
+              onFavoriteToggle={() =>
+                dispatch(updateUserFavorites({ restaurantId: id, userId: currentUser.id }))
+              }
+            >
+              {/* "Add Review" bottom action — opens the detail modal
+                  with the write-review form pre-expanded. Archive /
+                  Delete used to also live here; they moved into the
+                  modal so the card stays focused on a single
+                  primary action. */}
+              <button
+                onClick={(e) => { e.stopPropagation(); openAddReview(id); }}
+                className="mt-2 w-full rounded-lg text-xs bg-gradient-to-br from-orange-500 to-red-500 text-white py-1.5 hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
+              >
+                + Add Review
+              </button>
+            </RestaurantCard>
           );
         })}
       </div>
@@ -397,20 +288,19 @@ const UserHistoryPage = () => {
               {displayArchivedIds.map((id) => {
                 const restaurant = allRestaurants[id];
                 if (!restaurant) return null;
+                const personalRating = getUserAvgRating(currentUser.reviews, id);
                 return (
                   <RestaurantCard
                     key={id}
                     id={id}
-                    restaurant={restaurant}
-                    currentUser={currentUser}
-                    favoriteSet={favoriteSet}
-              acceptedStats={acceptedStats}
-                    isArchived={true}
-                    isInOptions={false}
-                    note={currentUser.notes?.[String(id)] ?? null}
-                    onCardClick={handleCardClick}
-                    onArchiveAction={handleArchiveAction}
-                    dispatch={dispatch}
+                    size="md"
+                    restaurantMap={allRestaurants}
+                    personalRating={personalRating}
+                    lastChosen={formatLastChosen(acceptedStats, id)}
+                    // Archived rows open the modal for Restore /
+                    // Remove; no inline action button — those
+                    // operations live exclusively in the modal now.
+                    onCardClick={() => openDetail(id)}
                   />
                 );
               })}
@@ -419,39 +309,31 @@ const UserHistoryPage = () => {
         </div>
       )}
 
-      {/* ── Review modal ──────────────────────────────────────── */}
-      {selectedRestaurantId && (
-        <RestaurantReviewModal
-          restaurant={allRestaurants[selectedRestaurantId]}
-          reviews={currentUser.reviews[selectedRestaurantId] || []}
-          onClose={() => setSelectedRestaurantId(null)}
-          onAddReview={({ content, rating, date }) =>
-            dispatch(persistAddReview({
-              restaurantId: selectedRestaurantId,
-              userId: currentUser.id,
-              content,
-              rating,
-              date,
-            }))
-          }
-          onRemoveReview={(id) =>
-            dispatch(removeUserReview({
-              restaurantId: selectedRestaurantId,
-              id,
-              userId: currentUser.id,
-            }))
-          }
-        />
-      )}
-
       {/* ── Detail modal ──────────────────────────────────────── */}
-      {detailId && (
-        <RestaurantDetailModal
-          restaurantId={detailId}
-          restaurantMap={allRestaurants}
-          onClose={() => setDetailId(null)}
-        />
-      )}
+      {/*  Single modal serves three flows:
+            - generic card click → read view
+            - "Add Review" button → defaultShowReviewForm=true
+            - archived row → isArchived=true exposes Restore + Remove
+              instead of Archive
+          handleArchiveAction routes through ConfirmModal so the
+          destructive ops still require an explicit confirmation
+          step before dispatch lands. */}
+      {modalState && (() => {
+        const id = modalState.id;
+        const archived = (currentUser.archived ?? []).map(String).includes(String(id));
+        return (
+          <RestaurantDetailModal
+            restaurantId={id}
+            restaurantMap={allRestaurants}
+            onClose={() => setModalState(null)}
+            defaultShowReviewForm={modalState.defaultWriteReview}
+            isArchived={archived}
+            onArchive={archived ? undefined : () => handleArchiveAction('archive', id)}
+            onUnarchive={archived ? () => handleArchiveAction('unarchive', id) : undefined}
+            onDelete={() => handleArchiveAction('delete', id)}
+          />
+        );
+      })()}
 
       {/* ── Confirmation modal ────────────────────────────────── */}
       {confirmAction && (
