@@ -21,8 +21,10 @@ export default function OAuthCallbackPage() {
         setError('Supabase is not configured. Please fill in VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
         return;
       }
-      // getSession() detects both hash (implicit) and code (PKCE) params automatically
-      const { data, error: sessionError } = await supabase.auth.getSession();
+      // `supabase` is now an AuthClient (auth-only sub-package) — call
+      // `getSession()` directly without the `.auth.` namespace. Behavior is
+      // identical: it detects PKCE code-flow vs implicit hash-flow params.
+      const { data, error: sessionError } = await supabase.getSession();
 
       if (sessionError || !data.session) {
         setError('Sign-in failed or was cancelled. Please try again.');

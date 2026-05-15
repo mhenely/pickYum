@@ -36,7 +36,14 @@ export const groupsApi = {
   removeMember: (groupId, userId)    => del(`/api/groups/${groupId}/members/${userId}`),
 
   // ── Events ───────────────────────────────────────────────────
-  createEvent:  (groupId, name)      => post(`/api/groups/${groupId}/events`, { name }),
+  // optionRestaurantIds is optional — when provided, the server seeds
+  // the initial options in the same transaction as the event create, so
+  // callers that want "create event from N favorites" stop paying N+1
+  // round-trips through the write rate limiter.
+  createEvent:  (groupId, name, optionRestaurantIds) =>
+    post(`/api/groups/${groupId}/events`, optionRestaurantIds && optionRestaurantIds.length > 0
+      ? { name, optionRestaurantIds }
+      : { name }),
   deleteEvent:  (groupId, eventId)   => del(`/api/groups/${groupId}/events/${eventId}`),
 
   // ── Event options ────────────────────────────────────────────

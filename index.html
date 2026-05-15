@@ -7,6 +7,11 @@
     <title>pickYum — Decide Where to Eat</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- Preconnect to the API origin so the first authed request
+         (`checkAuth → /api/auth/me`) doesn't wait on DNS + TLS on cold
+         load. Vite replaces `%VITE_API_BASE_URL%` at build time; an
+         unset env yields an empty href which browsers ignore. -->
+    <link rel="preconnect" href="%VITE_API_BASE_URL%" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
   </head>
   <!-- <body class="h-full"> -->

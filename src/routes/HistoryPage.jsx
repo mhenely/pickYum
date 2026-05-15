@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { persistAddReview, removeUserReview, updateUserFavorites, archiveRestaurant, unarchiveRestaurant, removeFromHistory, addUserOption } from '../redux/slices/userInfoSlice';
@@ -6,17 +6,8 @@ import RatingDisplay from '../components/RatingDisplay';
 import RestaurantReviewModal from '../components/RestaurantReviewModal';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import useCurrentUser from '../hooks/useCurrentUser';
-import getMostRecentDate from '../utils/getMostRecentDate';
+import { buildAcceptedStats, formatLastChosen, getChosenCount } from '../utils/acceptedStats';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
-
-const getLastChosenTimestamp = (accepted, id) => {
-  const entries = accepted.filter((a) => String(a.restaurantId) === String(id));
-  if (!entries.length) return 0;
-  return Math.max(...entries.map((a) => new Date(a.date).getTime()));
-};
-
-const getChosenCount = (accepted, id) =>
-  accepted.filter((a) => String(a.restaurantId) === String(id)).length;
 
 // ── Confirmation modal ────────────────────────────────────────
 
@@ -66,13 +57,18 @@ const ConfirmModal = ({ action, restaurantName, onConfirm, onCancel }) => (
 
 // ── Restaurant card ───────────────────────────────────────────
 
-const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, isArchived, isInOptions, note, onCardClick, onNameClick, onArchiveAction, dispatch }) => {
+const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, acceptedStats, isArchived, isInOptions, note, onCardClick, onNameClick, onArchiveAction, dispatch }) => {
   const reviews = currentUser.reviews[id] || [];
   const personalRating =
     reviews.length > 0
       ? reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length
       : null;
   const isFavorited = favoriteSet.has(String(id));
+  // O(1) lookup off the precomputed acceptedStats map instead of scanning
+  // `currentUser.accepted` twice per row (legacy `getMostRecentDate` +
+  // `getChosenCount`). Page-scope memo guarantees a stable map across renders.
+  const lastChosen = formatLastChosen(acceptedStats, id);
+  const chosenCount = getChosenCount(acceptedStats, id);
 
   return (
     <div
@@ -92,9 +88,9 @@ const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, isArchived, 
           >
             {restaurant.name}
           </button>
-          {getMostRecentDate(currentUser.accepted, id) && (
+          {lastChosen && (
             <span className="ml-2 text-xs text-gray-400 whitespace-nowrap">
-              Last chosen {getMostRecentDate(currentUser.accepted, id)}
+              Last chosen {lastChosen}
             </span>
           )}
         </div>
@@ -143,7 +139,7 @@ const RestaurantCard = ({ id, restaurant, currentUser, favoriteSet, isArchived, 
             {restaurant.takeout && <span className="bg-gray-100 px-2 py-0.5 rounded">Takeout</span>}
             {restaurant.delivery && <span className="bg-gray-100 px-2 py-0.5 rounded">Delivery</span>}
           </div>
-          <span className="text-gray-400 italic">Chosen {getChosenCount(currentUser.accepted, id)}×</span>
+          <span className="text-gray-400 italic">Chosen {chosenCount}×</span>
         </div>
 
         <div className="flex gap-2 mt-3">
@@ -240,38 +236,57 @@ const UserHistoryPage = () => {
     setConfirmAction(null);
   };
 
-  const archivedSet = new Set((currentUser.archived ?? []).map(String));
-  const optionSet = new Set(currentUser.options.map(String));
+  // Heavy derivation block wrapped in a single useMemo. Every keystroke
+  // into the search box, every modal toggle, every confirm-action change
+  // used to rebuild every Set + array AND sort with a comparator that
+  // scanned `currentUser.accepted` per comparison — O(N log N × M) per
+  // render. Pulling derivation behind useMemo + an O(1) acceptedStats
+  // lookup turns the same work into O(N) once per actual input change.
+  const acceptedStats = useMemo(
+    () => buildAcceptedStats(currentUser.accepted),
+    [currentUser.accepted],
+  );
 
-  // Unique restaurant IDs that appear in history (accepted + reviewed)
-  const allHistoryIds = [
-    ...new Set([
-      ...currentUser.accepted.map((a) => String(a.restaurantId)),
-      ...Object.keys(currentUser.reviews).filter((id) => currentUser.reviews[id].length > 0),
-    ]),
-  ];
+  const { displayIds, displayArchivedIds, favoriteSet, optionSet } = useMemo(() => {
+    const archivedSet = new Set((currentUser.archived ?? []).map(String));
+    const optionSet   = new Set(currentUser.options.map(String));
+    const favoriteSet = new Set(currentUser.favorites.map(String));
 
-  const activeIds = allHistoryIds.filter((id) => !archivedSet.has(id));
-  const archivedIds = allHistoryIds.filter((id) => archivedSet.has(id));
+    // Unique restaurant IDs that appear in history (accepted + reviewed).
+    const allHistoryIds = [
+      ...new Set([
+        ...currentUser.accepted.map((a) => String(a.restaurantId)),
+        ...Object.keys(currentUser.reviews).filter((id) => currentUser.reviews[id].length > 0),
+      ]),
+    ];
 
-  const favoriteSet = new Set(currentUser.favorites.map(String));
+    const activeIds   = allHistoryIds.filter((id) => !archivedSet.has(id));
+    const archivedIds = allHistoryIds.filter((id) =>  archivedSet.has(id));
 
-  const filteredIds = favoritesOnly
-    ? activeIds.filter((id) => favoriteSet.has(id))
-    : activeIds;
+    const filteredIds = favoritesOnly
+      ? activeIds.filter((id) => favoriteSet.has(id))
+      : activeIds;
 
-  const sortFn = (a, b) => {
-    const valA = sortBy === 'date'
-      ? getLastChosenTimestamp(currentUser.accepted, a)
-      : getChosenCount(currentUser.accepted, a);
-    const valB = sortBy === 'date'
-      ? getLastChosenTimestamp(currentUser.accepted, b)
-      : getChosenCount(currentUser.accepted, b);
-    return sortDir === 'desc' ? valB - valA : valA - valB;
-  };
+    // O(1) lookups instead of per-comparison full scans of `accepted`.
+    const sortFn = (a, b) => {
+      const entryA = acceptedStats.get(a);
+      const entryB = acceptedStats.get(b);
+      const valA = sortBy === 'date' ? (entryA?.lastTs ?? 0) : (entryA?.count ?? 0);
+      const valB = sortBy === 'date' ? (entryB?.lastTs ?? 0) : (entryB?.count ?? 0);
+      return sortDir === 'desc' ? valB - valA : valA - valB;
+    };
 
-  const displayIds = [...filteredIds].sort(sortFn);
-  const displayArchivedIds = [...archivedIds].sort(sortFn);
+    return {
+      displayIds:         [...filteredIds].sort(sortFn),
+      displayArchivedIds: [...archivedIds].sort(sortFn),
+      favoriteSet,
+      optionSet,
+    };
+  }, [
+    currentUser.accepted, currentUser.archived, currentUser.options,
+    currentUser.favorites, currentUser.reviews,
+    favoritesOnly, sortBy, sortDir, acceptedStats,
+  ]);
 
   const confirmRestaurantName = confirmAction
     ? (allRestaurants[confirmAction.id]?.name ?? 'this restaurant')
@@ -303,9 +318,9 @@ const UserHistoryPage = () => {
           }`}
         >
           {showArchives ? 'Hide Archives' : 'Show Archives'}
-          {archivedIds.length > 0 && (
+          {displayArchivedIds.length > 0 && (
             <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-400 text-white text-[10px] font-bold leading-none">
-              {archivedIds.length}
+              {displayArchivedIds.length}
             </span>
           )}
         </button>
@@ -352,6 +367,7 @@ const UserHistoryPage = () => {
               restaurant={restaurant}
               currentUser={currentUser}
               favoriteSet={favoriteSet}
+              acceptedStats={acceptedStats}
               isArchived={false}
               isInOptions={optionSet.has(String(id))}
               note={currentUser.notes?.[String(id)] ?? null}
@@ -388,6 +404,7 @@ const UserHistoryPage = () => {
                     restaurant={restaurant}
                     currentUser={currentUser}
                     favoriteSet={favoriteSet}
+              acceptedStats={acceptedStats}
                     isArchived={true}
                     isInOptions={false}
                     note={currentUser.notes?.[String(id)] ?? null}

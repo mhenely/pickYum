@@ -63,8 +63,15 @@ describe('POST /api/auth/register', () => {
     expect(res.status).toBe(400);
   });
 
+  // The register route no longer pre-checks uniqueness — it relies on the
+  // DB's unique constraint and translates P2002 to 409 with the matching
+  // field. These tests now simulate the violation by mocking `user.create`
+  // to throw the typed Prisma error.
+  const p2002 = (target: string) =>
+    Object.assign(new Error('Unique constraint violation'), { code: 'P2002', meta: { target: [target] } });
+
   it('returns 409 when email is already taken', async () => {
-    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, username: 'other' });
+    (mockPrisma.user.create as jest.Mock).mockRejectedValue(p2002('email'));
 
     const res = await request(buildApp())
       .post('/api/auth/register')
@@ -75,7 +82,7 @@ describe('POST /api/auth/register', () => {
   });
 
   it('returns 409 when username is already taken', async () => {
-    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, email: 'other@example.com' });
+    (mockPrisma.user.create as jest.Mock).mockRejectedValue(p2002('username'));
 
     const res = await request(buildApp())
       .post('/api/auth/register')
@@ -86,7 +93,8 @@ describe('POST /api/auth/register', () => {
   });
 
   it('returns 409 when username differs only in case', async () => {
-    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, email: 'other@example.com' });
+    // citext catches the case-only difference at the DB layer; same P2002 path.
+    (mockPrisma.user.create as jest.Mock).mockRejectedValue(p2002('username'));
 
     const res = await request(buildApp())
       .post('/api/auth/register')
@@ -144,7 +152,11 @@ describe('POST /api/auth/login', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 401 when account has no password (OAuth account)', async () => {
+  it('returns generic 401 when account has no password (OAuth-only) — does NOT reveal OAuth status', async () => {
+    // Anti-enumeration: the response for an OAuth-only account must look
+    // identical to "wrong password" and "no such user". Otherwise the body
+    // text alone gives an attacker oracle access to "does an account exist
+    // for this email AND does it have a password set?".
     (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, passwordHash: null });
 
     const res = await request(buildApp())
@@ -152,7 +164,8 @@ describe('POST /api/auth/login', () => {
       .send({ email: 'alice@example.com', password: 'anything' });
 
     expect(res.status).toBe(401);
-    expect(res.body.error).toMatch(/social login/i);
+    expect(res.body.error).toMatch(/invalid email or password/i);
+    expect(res.body.error).not.toMatch(/social|google|facebook|oauth/i);
   });
 });
 

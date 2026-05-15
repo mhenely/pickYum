@@ -128,3 +128,63 @@ describe('GET /api/social/friend-requests/incoming', () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ── Recommendation × private restaurant privacy ─────────────────
+describe('POST /api/social/recommendations/:restaurantId (privacy)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 404 when recommending a private restaurant owned by another user', async () => {
+    // Restaurant exists, but is private and the creator is user 99 — caller is user 1.
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+      id: 7, private: true, createdBy: 99,
+    });
+
+    const res = await request(buildApp())
+      .post('/api/social/recommendations/7')
+      .set('Cookie', authCookie(1))
+      .send({ tip: 'great pizza' });
+
+    // 404 not 403 — don't reveal that the row exists at all
+    expect(res.status).toBe(404);
+    expect(mockPrisma.recommendation.upsert).not.toHaveBeenCalled();
+  });
+
+  it('auto-publishes a private restaurant when its creator recommends it', async () => {
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+      id: 7, private: true, createdBy: 1,
+    });
+    (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({ id: 7, private: false });
+    (mockPrisma.recommendation.upsert as jest.Mock).mockResolvedValue({
+      fromUserId: 1, restaurantId: 7, tip: 'great pizza',
+    });
+
+    const res = await request(buildApp())
+      .post('/api/social/recommendations/7')
+      .set('Cookie', authCookie(1))
+      .send({ tip: 'great pizza' });
+
+    expect(res.status).toBe(201);
+    // Publish the row so the recommender's network can actually open it.
+    expect(mockPrisma.restaurant.update).toHaveBeenCalledWith({
+      where: { id: 7 },
+      data: { private: false },
+    });
+    expect(mockPrisma.recommendation.upsert).toHaveBeenCalled();
+  });
+
+  it('accepts a recommendation on a public restaurant without touching privacy', async () => {
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+      id: 7, private: false, createdBy: 99,
+    });
+    (mockPrisma.recommendation.upsert as jest.Mock).mockResolvedValue({
+      fromUserId: 1, restaurantId: 7, tip: null,
+    });
+
+    const res = await request(buildApp())
+      .post('/api/social/recommendations/7')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.restaurant.update).not.toHaveBeenCalled();
+  });
+});

@@ -1,12 +1,22 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import ConfirmDialog from '../components/ConfirmDialog';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { addUserOption, addCustomRestaurant } from '../redux/slices/userInfoSlice';
+
+// Stable sentinels for useSelector fallbacks. The naive
+// `useSelector(s => x ?? [])` produces a NEW [] on every dispatch, which
+// fails reference equality and re-renders the consumer (and its tree)
+// even when nothing relevant changed. Freezing prevents accidental
+// mutation that would compromise the shared reference.
+const EMPTY_ARRAY = Object.freeze([]);
+const EMPTY_OBJECT = Object.freeze({});
 import { groupsApi } from '../lib/groupsApi';
 import { socialApi } from '../lib/socialApi';
 import { api } from '../lib/api';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import BallotDetailModal from '../components/BallotDetailModal';
+import PublicRestaurantInfoModal from '../components/PublicRestaurantInfoModal';
 
 const STATUS_BADGE = {
   OPEN:   { label: 'Open',             cls: 'bg-green-100 text-green-700' },
@@ -16,19 +26,8 @@ const STATUS_BADGE = {
 
 // ── Shared sub-components ─────────────────────────────────────
 
-function ConfirmDialog({ message, onConfirm, onCancel }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-xs p-6 flex flex-col gap-4">
-        <p className="text-sm text-gray-700">{message}</p>
-        <div className="flex gap-2">
-          <button onClick={onCancel} className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">Cancel</button>
-          <button onClick={onConfirm} className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 transition-colors">Confirm</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ConfirmDialog moved to ../components/ConfirmDialog so TripDetailPage
+// (and any future page) can share the same modal pattern.
 
 function InvitePanel({ groupId, existingMemberIds, existingInviteIds, onInvited }) {
   const [query, setQuery] = useState('');
@@ -172,7 +171,7 @@ function HostExitDialog({ group, onClose, onTransferred, onDisbanded }) {
             <select
               value={selectedId}
               onChange={(e) => setSelectedId(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+              className="w-full rounded-lg border border-gray-300 pl-3 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
             >
               {members.map((m) => (
                 <option key={m.userId} value={m.userId}>{m.user?.username}</option>
@@ -261,20 +260,14 @@ function CreateEventModal({ groupId, onClose, onCreate }) {
     if (!name.trim()) return;
     setLoading(true); setError('');
     try {
-      const { event } = await groupsApi.createEvent(groupId, name.trim());
-
-      // Quick-add the checked favorites as event options. Best effort —
-      // a favorite restaurant could have been deleted upstream, but we don't
-      // want one failure to roll back the event itself. allSettled swallows
-      // per-item rejections; the parent does a load() afterwards to pick up
-      // whatever made it in.
-      if (selectedIds.size > 0) {
-        await Promise.allSettled(
-          [...selectedIds].map((restaurantId) =>
-            groupsApi.addOption(groupId, event.id, restaurantId),
-          ),
-        );
-      }
+      // Single round-trip: server seeds the checked-favorite options in the
+      // same transaction as the event create. Was previously
+      // `createEvent` + N parallel `addOption` calls — N round-trips through
+      // writeLimiter for every "Plan an event from my favorites" flow.
+      const optionIds = selectedIds.size > 0
+        ? [...selectedIds].map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        : undefined;
+      const { event } = await groupsApi.createEvent(groupId, name.trim(), optionIds);
 
       onCreate(event);
     } catch (err) {
@@ -416,24 +409,52 @@ function SchedulePicker({ groupId, event, onUpdated }) {
 // server enforces this too. For non-hosts (or non-OPEN events) we display a
 // read-only badge so everyone knows what kind of vote they're walking into.
 function VoteMethodPicker({ groupId, event, isHost, onUpdated }) {
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState('');
-  const current = event.voteMethod ?? 'SIMPLE';
+  const [saving, setSaving]       = useState(false);
+  const [error, setError]         = useState('');
+  // Optimistic value: what the UI should show right NOW, regardless of
+  // whether the network has caught up. Cleared once the prop comes back
+  // matching it (parent refetched + state propagated), or reverted on
+  // error. null means "no override, trust the prop".
+  const [optimistic, setOptimistic] = useState(null);
+  // Bumped on every click so racing responses from rapid back-and-forth
+  // toggling only commit the LAST one. Without this, clicking SIMPLE →
+  // RANKED → SIMPLE quickly could see the RANKED response land after the
+  // second SIMPLE response and stick.
+  const reqIdRef = useRef(0);
+
+  const propValue   = event.voteMethod ?? 'SIMPLE';
+  const displayValue = optimistic ?? propValue;
+
+  // Clear optimistic once the parent's data flows back in matching it —
+  // and also handle the "user is editing, server is lagging behind"
+  // boundary: we DON'T clear if the prop still disagrees, because that
+  // would snap the UI back to the stale value mid-flight.
+  useEffect(() => {
+    if (optimistic != null && propValue === optimistic) setOptimistic(null);
+  }, [propValue, optimistic]);
 
   const handleChange = async (next) => {
-    if (next === current) return;
-    setSaving(true); setError('');
+    if (next === displayValue) return;
+    setOptimistic(next);
+    setError('');
+    setSaving(true);
+    const myReqId = ++reqIdRef.current;
     try {
       await groupsApi.setVoteMethod(groupId, event.id, next);
-      onUpdated();
+      if (reqIdRef.current === myReqId) onUpdated();
     } catch (err) {
-      setError(err.message);
+      // Only the latest click owns the error/revert. Older racing
+      // requests that fail should be ignored — the user already moved on.
+      if (reqIdRef.current === myReqId) {
+        setError(err.message);
+        setOptimistic(null);
+      }
     } finally {
-      setSaving(false);
+      if (reqIdRef.current === myReqId) setSaving(false);
     }
   };
 
-  const label = current === 'RANKED' ? 'Ranked-choice' : 'Simple approval';
+  const label  = displayValue === 'RANKED' ? 'Ranked-choice' : 'Simple Majority';
   const isOpen = event.status === 'OPEN';
 
   // Don't bother rendering for non-hosts on locked events — the badge appears
@@ -442,35 +463,70 @@ function VoteMethodPicker({ groupId, event, isHost, onUpdated }) {
   if (!isHost && !isOpen) return null;
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4">
+    // w-full forces the picker to fill its column even if an ancestor
+    // ever accidentally becomes content-sized — defensive against
+    // future layout drift. Without this, the description text's length
+    // (RANKED is ~155 chars, SIMPLE ~66) could drive the box width.
+    <div className="w-full rounded-xl border border-gray-200 bg-white p-4">
       <h4 className="text-sm font-semibold text-gray-700 mb-1">Voting method</h4>
-      <p className="text-xs text-gray-500 mb-3">
-        {current === 'RANKED'
-          ? 'Each voter ranks every restaurant by preference. Lowest first-place vote is eliminated each round until one has a majority.'
-          : 'Each voter approves any number of restaurants. Highest total wins.'}
-      </p>
+      {/* Both descriptions live in the same grid cell (col-start-1,
+          row-start-1). Only the active one is opaque; the other stays
+          in the layout via opacity-0 so the cell always reserves the
+          height/width of the LONGER copy. Toggling becomes a pure
+          opacity flip — zero reflow, identical box size regardless of
+          which method is selected. */}
+      <div className="grid grid-cols-1 mb-3 text-xs text-gray-500 leading-snug">
+        <p
+          className={`col-start-1 row-start-1 transition-opacity ${
+            displayValue === 'RANKED' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+          aria-hidden={displayValue !== 'RANKED'}
+        >
+          Each voter ranks every restaurant by preference. Lowest first-place vote is eliminated each round until one has a majority.
+        </p>
+        <p
+          className={`col-start-1 row-start-1 transition-opacity ${
+            displayValue === 'SIMPLE' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+          aria-hidden={displayValue !== 'SIMPLE'}
+        >
+          Each voter approves any number of restaurants. Highest total wins.
+        </p>
+      </div>
       {isHost && isOpen ? (
-        <div className="flex items-center gap-2 flex-wrap">
-          {[
-            { value: 'SIMPLE', label: 'Simple approval' },
-            { value: 'RANKED', label: 'Ranked-choice' },
-          ].map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => handleChange(opt.value)}
-              disabled={saving}
-              className={[
-                'rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors',
-                current === opt.value
-                  ? 'bg-orange-500 border-orange-500 text-white'
-                  : 'bg-white border-gray-300 text-gray-600 hover:border-orange-400',
-              ].join(' ')}
-            >
-              {opt.label}
-            </button>
-          ))}
-          {saving && <span className="text-xs text-gray-400">Saving…</span>}
-        </div>
+        <>
+          {/* grid-cols-2 forces both buttons to identical width so the
+              active highlight never jumps between two different widths
+              when toggling. The old `flex` row sized each button to its
+              own label, which made "Simple Majority" wider than
+              "Ranked-choice" and produced the visible width shift. */}
+          <div className="grid grid-cols-2 gap-2">
+            {[
+              { value: 'SIMPLE', label: 'Simple Majority' },
+              { value: 'RANKED', label: 'Ranked-choice' },
+            ].map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => handleChange(opt.value)}
+                // Deliberately NOT disabled while saving — rapid
+                // back-and-forth toggling should feel instant. The
+                // request-id ref above guarantees only the latest
+                // response commits, so race conditions are safe.
+                className={[
+                  'rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors',
+                  displayValue === opt.value
+                    ? 'bg-orange-500 border-orange-500 text-white'
+                    : 'bg-white border-gray-300 text-gray-600 hover:border-orange-400',
+                ].join(' ')}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {/* Saving indicator on its own row so it doesn't push button
+              widths around when it appears. */}
+          {saving && <p className="mt-2 text-xs text-gray-400">Saving…</p>}
+        </>
       ) : (
         <p className="text-sm font-medium text-gray-800">{label}</p>
       )}
@@ -534,8 +590,8 @@ function EventDatePicker({ groupId, event, isHost, onUpdated }) {
 
 function ResultDisplay({ result, scheduledFor }) {
   const dispatch = useDispatch();
-  const userOptions    = useSelector((s) => s.userInfo.users[0]?.options ?? []);
-  const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? {});
+  const userOptions    = useSelector((s) => s.userInfo.users[0]?.options ?? EMPTY_ARRAY);
+  const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? EMPTY_OBJECT);
 
   const [shared, setShared] = useState(false);
   const [localDate, setLocalDate] = useState(
@@ -619,7 +675,10 @@ function ResultDisplay({ result, scheduledFor }) {
     dispatch(addUserOption(id));
   };
 
-  const handleGoogleCalendar = () => window.open(buildGCalUrl(), '_blank');
+  // `noopener,noreferrer` strips window.opener so the newly opened tab can't
+  // navigate this one (reverse tabnabbing). Match the pattern used in
+  // ScheduleModal which has the same external-link concern.
+  const handleGoogleCalendar = () => window.open(buildGCalUrl(), '_blank', 'noopener,noreferrer');
 
   const handleAppleCalendar = () => {
     if (!localDate) return;
@@ -665,17 +724,48 @@ function ResultDisplay({ result, scheduledFor }) {
             {methodLabel} · {new Date(result.createdAt).toLocaleDateString()}
           </p>
           <p className="text-xs text-gray-500">
-            Host: {result.hostUsername} · {result.participants.length} participant{result.participants.length !== 1 ? 's' : ''}
+            {/* The host label is the historical username at result time. If
+                the user has since renamed, the server stamps a currentUsername
+                onto voterMeta[hostUsername] which we surface inline as
+                "(now @new)" without rewriting history. */}
+            Host: {result.hostUsername}
+            {(() => {
+              const meta = result.voterMeta && typeof result.voterMeta === 'object'
+                ? result.voterMeta[result.hostUsername]
+                : null;
+              return meta?.currentUsername ? (
+                <span className="text-gray-400"> (now <span className="font-mono">@{meta.currentUsername}</span>)</span>
+              ) : null;
+            })()}
+            {' '}· {result.participants.length} participant{result.participants.length !== 1 ? 's' : ''}
           </p>
         </div>
       </div>
 
       <div className="flex flex-wrap gap-1">
-        {result.participants.map((name) => (
-          <span key={name} className="text-xs bg-white border border-gray-200 rounded-full px-2 py-0.5 text-gray-600">
-            {name}{name === result.hostUsername ? ' 👑' : ''}
-          </span>
-        ))}
+        {result.participants.map((name) => {
+          // Same rename logic as the host label — look up voterMeta entry for
+          // this display name. If the user behind it has renamed since, append
+          // their current username inline so the pill reads e.g.
+          // "Matt 👑 → @matthew_h" at a glance.
+          const meta = result.voterMeta && typeof result.voterMeta === 'object'
+            ? result.voterMeta[name]
+            : null;
+          return (
+            <span
+              key={name}
+              className="text-xs bg-white border border-gray-200 rounded-full px-2 py-0.5 text-gray-600"
+              title={meta?.currentUsername ? `Now @${meta.currentUsername}` : ''}
+            >
+              {name}{name === result.hostUsername ? ' 👑' : ''}
+              {meta?.currentUsername && (
+                <span className="ml-1 text-gray-400">
+                  → <span className="font-mono">@{meta.currentUsername}</span>
+                </span>
+              )}
+            </span>
+          );
+        })}
       </div>
 
       {scores && pool.length > 0 && (
@@ -802,7 +892,9 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
     setStartingVote(true); setVoteError('');
     try {
       const { sessionId } = await groupsApi.startVoting(group.id, event.id);
-      window.open(`/vote/${sessionId}`, '_blank');
+      // Same noopener guard as the calendar handler — the opened vote tab
+      // hosts authenticated UI; we don't want it able to navigate this one.
+      window.open(`/vote/${sessionId}`, '_blank', 'noopener,noreferrer');
       await onRefresh();
     } catch (err) {
       setVoteError(err.message);
@@ -1308,6 +1400,10 @@ function GroupInsightsPanel({ groupId }) {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
+  // Restaurant detail modal — string id when open, null when closed. Uses
+  // PublicRestaurantInfoModal (self-fetching, no Redux dep) so the panel stays
+  // independent of whatever else the page has loaded.
+  const [infoForId, setInfoForId] = useState(null);
 
   const handleToggle = async () => {
     if (open) { setOpen(false); return; }
@@ -1384,11 +1480,17 @@ function GroupInsightsPanel({ groupId }) {
                     <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Group favorites in practice</p>
                     <ul className="space-y-1.5">
                       {data.topWinners.map((r) => (
-                        <li key={r.restaurantId} className="flex items-center justify-between rounded-lg bg-green-50 border border-green-100 px-3 py-1.5">
-                          <span className="text-sm font-medium text-green-800 truncate">🏆 {r.name}</span>
-                          <span className="text-xs text-green-700 shrink-0">
-                            won {r.wins}× · {Math.round(r.winRate * 100)}%
-                          </span>
+                        <li key={r.restaurantId}>
+                          <button
+                            type="button"
+                            onClick={() => setInfoForId(r.restaurantId)}
+                            className="w-full flex items-center justify-between rounded-lg bg-green-50 border border-green-100 px-3 py-1.5 transition-colors hover:bg-green-100 hover:border-green-200 focus:outline-none focus:ring-2 focus:ring-green-400 text-left"
+                          >
+                            <span className="text-sm font-medium text-green-800 truncate">🏆 {r.name}</span>
+                            <span className="text-xs text-green-700 shrink-0">
+                              won {r.wins}× · {Math.round(r.winRate * 100)}%
+                            </span>
+                          </button>
                         </li>
                       ))}
                     </ul>
@@ -1401,18 +1503,26 @@ function GroupInsightsPanel({ groupId }) {
                     <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Always added, never chosen</p>
                     <ul className="space-y-1.5">
                       {data.oftenSkipped.map((r) => (
-                        <li key={r.restaurantId} className="flex items-center justify-between rounded-lg bg-amber-50 border border-amber-100 px-3 py-1.5">
-                          <span className="text-sm font-medium text-amber-900 truncate">{r.name}</span>
-                          <span className="text-xs text-amber-700 shrink-0">
-                            considered {r.considered}× · 0 wins
-                          </span>
+                        <li key={r.restaurantId}>
+                          <button
+                            type="button"
+                            onClick={() => setInfoForId(r.restaurantId)}
+                            className="w-full flex items-center justify-between rounded-lg bg-amber-50 border border-amber-100 px-3 py-1.5 transition-colors hover:bg-amber-100 hover:border-amber-200 focus:outline-none focus:ring-2 focus:ring-amber-400 text-left"
+                          >
+                            <span className="text-sm font-medium text-amber-900 truncate">{r.name}</span>
+                            <span className="text-xs text-amber-700 shrink-0">
+                              considered {r.considered}× · 0 wins
+                            </span>
+                          </button>
                         </li>
                       ))}
                     </ul>
                   </div>
                 )}
 
-                {/* Member appearances */}
+                {/* Member appearances — keeps the "who's been around" view
+                    minimal. Vote alignment moved to its own section below for
+                    legibility. */}
                 {Object.keys(data.memberAppearances ?? {}).length > 0 && (
                   <div>
                     <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Who shows up</p>
@@ -1425,12 +1535,78 @@ function GroupInsightsPanel({ groupId }) {
                             <span className="text-gray-700">{name}</span>
                             <span className="text-xs text-gray-500">
                               {count} of {data.totalEvents}
-                              {data.memberWinAccuracy?.[name] && data.memberWinAccuracy[name].picks > 0 && (
-                                <span className="ml-2 text-orange-600">· picked winner {Math.round(data.memberWinAccuracy[name].rate * 100)}%</span>
-                              )}
                             </span>
                           </li>
                         ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Vote alignment — per-member rate of voting with the winner.
+                    Simple votes: approved the winning restaurant. Ranked votes:
+                    placed the winner as their #1 choice. Members who never
+                    voted are silently filtered (picks === 0). */}
+                {(() => {
+                  const aligned = Object.entries(data.memberWinAccuracy ?? {})
+                    .filter(([, v]) => v && v.picks > 0)
+                    .sort(([, a], [, b]) => b.rate - a.rate);
+                  if (aligned.length === 0) return null;
+                  return (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Vote alignment</p>
+                      <p className="text-[11px] text-gray-400 mb-2">
+                        How often each member's vote matched the group's winner.
+                      </p>
+                      <ul className="space-y-1.5">
+                        {aligned.map(([name, v]) => {
+                          const pct = Math.round(v.rate * 100);
+                          // Highlight extremes: ≥80% reads as "always agrees with the group",
+                          // ≤25% as "the contrarian". Middle band stays neutral gray.
+                          const tone = pct >= 80 ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
+                                     : pct <= 25 ? 'text-purple-700 bg-purple-50 border-purple-100'
+                                     :             'text-gray-700 bg-gray-50 border-gray-100';
+                          return (
+                            <li key={name} className={`flex items-center gap-3 rounded-lg border px-3 py-1.5 ${tone}`}>
+                              <span className="text-sm font-medium flex-shrink-0 truncate min-w-0 flex-1">{name}</span>
+                              <div className="w-24 h-1.5 bg-white/60 rounded-full overflow-hidden flex-shrink-0">
+                                <div
+                                  className={pct >= 80 ? 'bg-emerald-500 h-full' : pct <= 25 ? 'bg-purple-500 h-full' : 'bg-gray-400 h-full'}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className="text-xs font-mono w-16 text-right flex-shrink-0">
+                                {pct}% · {v.wins}/{v.picks}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
+
+                {/* Member cuisine fingerprint — what each member tends to
+                    propose. Aggregated across all options ever added; members
+                    with fewer than 3 proposals are excluded server-side. */}
+                {Object.keys(data.memberCuisines ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">What each member proposes</p>
+                    <ul className="space-y-1.5">
+                      {Object.entries(data.memberCuisines).map(([name, cuisines]) => (
+                        <li key={name} className="flex items-center gap-2 text-sm">
+                          <span className="text-gray-700 font-medium min-w-0 truncate" style={{ flex: '0 0 6rem' }}>{name}</span>
+                          <div className="flex gap-1.5 flex-wrap min-w-0">
+                            {cuisines.map((c) => (
+                              <span
+                                key={c.cuisine}
+                                className="rounded-full bg-orange-50 border border-orange-100 text-orange-700 text-[11px] px-2 py-0.5"
+                              >
+                                {c.cuisine} <span className="font-semibold">·{c.count}</span>
+                              </span>
+                            ))}
+                          </div>
+                        </li>
+                      ))}
                     </ul>
                   </div>
                 )}
@@ -1438,6 +1614,13 @@ function GroupInsightsPanel({ groupId }) {
             )
           )}
         </div>
+      )}
+
+      {infoForId && (
+        <PublicRestaurantInfoModal
+          restaurantId={Number(infoForId)}
+          onClose={() => setInfoForId(null)}
+        />
       )}
     </section>
   );
@@ -1447,14 +1630,23 @@ const GroupDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const authUserId        = useSelector((state) => state.auth.user?.id);
-  const userOptions    = useSelector((state) => state.userInfo.users[0]?.options ?? []);
-  const customRestaurants = useSelector((state) => state.userInfo.customRestaurants ?? {});
+  const userOptions    = useSelector((state) => state.userInfo.users[0]?.options ?? EMPTY_ARRAY);
+  const customRestaurants = useSelector((state) => state.userInfo.customRestaurants ?? EMPTY_OBJECT);
 
   const [group, setGroup] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [confirm, setConfirm] = useState(null);
   const [showCreateEvent, setShowCreateEvent] = useState(false);
+  // Host's exit dialog. If the group has members, offer to transfer
+  // ownership to one of them so the group keeps running. Disband
+  // (archive) is the fallback when there's nobody to hand off to — or
+  // when the host explicitly wants to wind down the group.
+  // NB: this MUST stay above the early returns below — moving it after
+  // them violates the rules-of-hooks ("Rendered more hooks than during
+  // the previous render") because the early returns fire on the first
+  // render but not subsequent ones.
+  const [showHostExit, setShowHostExit] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -1503,11 +1695,8 @@ const GroupDetailPage = () => {
     });
   };
 
-  // Host's exit dialog. If the group has members, offer to transfer ownership
-  // to one of them so the group keeps running. Disband (archive) is the
-  // fallback when there's nobody to hand off to — or when the host explicitly
-  // wants to wind down the group.
-  const [showHostExit, setShowHostExit] = useState(false);
+  // `showHostExit` state lives above the early returns — see the rule-of-
+  // hooks note up there. This is just the trigger handler.
   const handleDisband = () => setShowHostExit(true);
 
   const activeEvents = (group.events ?? []).filter((e) => e.status !== 'DONE');

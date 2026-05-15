@@ -379,10 +379,19 @@ router.post('/recommendations/:restaurantId', async (req: Request, res: Response
     return;
   }
 
+  // Privacy: a private restaurant can only be recommended by its creator
+  // (analogous to the group-share rule). Other users guessing the id get the
+  // same 404 as a missing row — never reveal that a private restaurant exists.
+  // And recommending implies "I want my network to see this," so we auto-
+  // publish the row at the same time — friends who follow the recommendation
+  // link need to be able to open the restaurant detail.
   const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
-  if (!restaurant) {
+  if (!restaurant || (restaurant.private && restaurant.createdBy !== req.userId)) {
     res.status(404).json({ error: 'Restaurant not found in database' });
     return;
+  }
+  if (restaurant.private && restaurant.createdBy === req.userId) {
+    await prisma.restaurant.update({ where: { id: restaurantId }, data: { private: false } });
   }
 
   const { tip } = req.body as { tip?: string };

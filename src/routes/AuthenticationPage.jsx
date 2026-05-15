@@ -79,7 +79,9 @@ const AuthenticationPage = () => {
     if (!provider.available || !supabase) return;
     setOauthLoading(provider.id);
     setLocalError('');
-    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+    // `supabase` is now an AuthClient directly (auth-only sub-package) — no
+    // `.auth.` namespace. Same `signInWithOAuth` shape, same return value.
+    const { error: oauthError } = await supabase.signInWithOAuth({
       provider: provider.id,
       options: { redirectTo: CALLBACK_URL },
     });

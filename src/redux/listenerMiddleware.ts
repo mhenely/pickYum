@@ -71,9 +71,20 @@ listen({
   },
 });
 
-// Logout: clear all user data so the next login triggers a fresh load
+// Logout: clear all user data so the next login triggers a fresh load.
+// Fires on BOTH fulfilled and rejected — a 5xx on the API call shouldn't
+// leave the previous user's favorites/options/reviews visible on a shared
+// device. The auth slice mirrors this by transitioning to 'unauthenticated'
+// on rejection too. The cookie may still be valid server-side; next mount's
+// checkAuth resolves that.
 listen({
   actionCreator: logoutUser.fulfilled,
+  effect: (_, api_) => {
+    api_.dispatch(clearUserData());
+  },
+});
+listen({
+  actionCreator: logoutUser.rejected,
   effect: (_, api_) => {
     api_.dispatch(clearUserData());
   },

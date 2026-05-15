@@ -5,12 +5,8 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { Provider } from 'react-redux';
 import store from './redux/store';
 import ProtectedRoute from './components/ProtectedRoute';
-import { initSentry } from './lib/sentry';
 
 import './index.css';
-
-// Initialise observability before the app renders so early errors get captured.
-initSentry();
 
 import App from './App.tsx';
 import ErrorPage from './routes/ErrorPage';
@@ -29,6 +25,8 @@ const AboutPage           = lazy(() => import('./routes/AboutPage'));
 const GroupSessionPage    = lazy(() => import('./routes/GroupSessionPage'));
 const GroupDetailPage     = lazy(() => import('./routes/GroupDetailPage'));
 const SocialsPage         = lazy(() => import('./routes/SocialsPage'));
+const TripsPage           = lazy(() => import('./routes/TripsPage'));
+const TripDetailPage      = lazy(() => import('./routes/TripDetailPage'));
 const InsightsPage        = lazy(() => import('./routes/InsightsPage'));
 const PrivacyPage         = lazy(() => import('./routes/PrivacyPage'));
 const TermsPage           = lazy(() => import('./routes/TermsPage'));
@@ -86,6 +84,8 @@ const router = createBrowserRouter([
           { path: 'socials', element: <Suspense fallback={PageFallback}><SocialsPage /></Suspense> },
           { path: 'insights', element: <Suspense fallback={PageFallback}><InsightsPage /></Suspense> },
           { path: 'groups/:id', element: <Suspense fallback={PageFallback}><GroupDetailPage /></Suspense> },
+          { path: 'trips',       element: <Suspense fallback={PageFallback}><TripsPage /></Suspense> },
+          { path: 'trips/:id',   element: <Suspense fallback={PageFallback}><TripDetailPage /></Suspense> },
         ],
       },
     ],
@@ -99,3 +99,25 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     </Provider>
   </React.StrictMode>
 );
+
+// Lazy-load and initialize Sentry AFTER the first render. The Sentry SDK
+// is ~30-50 KB gzipped and was previously eager-imported in this entry
+// chunk, blocking first paint. Pre-mount errors during the brief window
+// before init lands will still surface via the browser's default
+// onerror/onunhandledrejection — Sentry just won't tag them with replay
+// context. That's an acceptable trade for a snappier load.
+//
+// requestIdleCallback runs when the browser is idle; setTimeout is the
+// fallback (Safari/iOS have lagging rIC support as of mid-2026).
+const initObservability = () => {
+  import('./lib/sentry').then((m) => m.initSentry()).catch(() => {
+    // Non-fatal — app still works without observability.
+  });
+};
+if (typeof window !== 'undefined') {
+  if ('requestIdleCallback' in window) {
+    window.requestIdleCallback(initObservability, { timeout: 2000 });
+  } else {
+    setTimeout(initObservability, 100);
+  }
+}

@@ -23,14 +23,28 @@ export interface IrvRound {
 // rankings / submitted) is what they typed when joining; this carries the
 // "behind the scenes" identity so we can show "Bob (signed in as alice42)"
 // or "Bob (guest)" in past-vote ballot detail.
+//
+// `username` is a snapshot of the auth username at /join time. `userId` lets
+// the read side look up the user's *current* name (after a rename) so the
+// modal can render "(signed in as @old, now @new)" — kept in sync via the
+// User FK at render time rather than mutating history. Null for guests, and
+// null on pre-rollout rows that were written before this field existed.
 export interface VoterMeta {
   isGuest: boolean;
   username: string | null;
+  userId:   number | null;
 }
 
 export interface GroupSession {
   id: string;
+  // Parent context. Exactly one of (groupId, tripId) is non-zero — both
+  // default to 0 for legacy or ad-hoc sessions. Trip meal events store the
+  // trip id here so accept-result + back-navigation can resolve the right
+  // parent. tripId is optional so legacy session blobs read from Redis (or
+  // hand-built fixtures in tests) that pre-date the field still typecheck;
+  // consumers should `?? 0` defensively.
   groupId: number;
+  tripId?: number;
   eventId: number;
   hostUserId: number;
   hostName: string;
@@ -70,8 +84,8 @@ export interface GroupSession {
 }
 
 // Wire shape — what every client sees. The server keeps voterTokens and the
-// `username` field of voterMeta internally; both must never reach a response
-// body or SSE frame.
+// `username` + `userId` fields of voterMeta internally; none of them must
+// ever reach a response body or SSE frame.
 export interface ClientVoterMeta { isGuest: boolean }
 export type ClientSession = Omit<GroupSession, 'voterTokens' | 'voterMeta'> & {
   voterMeta: Record<string, ClientVoterMeta>;
@@ -82,9 +96,10 @@ export function redactForClient(session: GroupSession): ClientSession {
   const { voterTokens: _voterTokens, voterMeta, ...rest } = session;
   /* eslint-enable @typescript-eslint/no-unused-vars */
   // Live SSE broadcasts go to every connected client including guests — they
-  // shouldn't reveal another voter's auth account name. Only `isGuest` survives
-  // (used for guest/signed-in pills); `username` stays server-side and reaches
-  // the host post-vote via the GroupEventResult.voterMeta stored at /close.
+  // shouldn't reveal another voter's auth account name *or* their User row id.
+  // Only `isGuest` survives (used for guest/signed-in pills); `username` and
+  // `userId` stay server-side and reach the host post-vote via the
+  // GroupEventResult.voterMeta stored at /close.
   const safeMeta: Record<string, ClientVoterMeta> = {};
   for (const [name, meta] of Object.entries(voterMeta)) {
     safeMeta[name] = { isGuest: meta.isGuest };
@@ -123,16 +138,28 @@ export function unregisterClient(sessionId: string, res: Response): void {
   if (clients.size === 0) sseClients.delete(sessionId);
 }
 
-// Writes to local connections only — does not publish.
-function writeToLocalClients(sessionId: string, session: GroupSession | null): void {
+// Pre-built SSE frame consumed by writeFrame() — null means "close clients".
+type SseFrame = string | null;
+
+// Build the wire frame for an SSE broadcast once, on the publisher. The
+// frame is the literal bytes that get written to each connection — no
+// per-subscriber re-stringify, no per-instance re-redact. Critically, the
+// frame contains only the redacted view (voterTokens stripped), so even
+// if the Redis channel is observed, the secret capability tokens never
+// leave the publisher.
+function buildSseFrame(session: GroupSession | null): SseFrame {
+  if (!session) return null; // signals close to the writer
+  return `data: ${JSON.stringify(redactForClient(session))}\n\n`;
+}
+
+// Writes a pre-built frame to local SSE connections. The frame has already
+// been redacted at the publisher; we just byte-copy here.
+function writeFrameToLocalClients(sessionId: string, frame: SseFrame): void {
   const clients = sseClients.get(sessionId);
   if (!clients || clients.size === 0) return;
-  if (session) {
-    // Strip voterTokens before broadcasting — those are per-voter capabilities
-    // and must not be visible to other connected clients.
-    const payload = `data: ${JSON.stringify(redactForClient(session))}\n\n`;
+  if (frame !== null) {
     for (const res of clients) {
-      try { res.write(payload); } catch { /* connection already closed */ }
+      try { res.write(frame); } catch { /* connection already closed */ }
     }
   } else {
     // Session expired — signal clients to stop and close their streams
@@ -145,6 +172,11 @@ function writeToLocalClients(sessionId: string, session: GroupSession | null): v
 
 // Subscribe once on module load. Uses a dedicated duplicate connection because
 // ioredis can't send commands on a connection that has SUBSCRIBEd.
+//
+// The pub/sub payload is `{ sessionId, frame }` — a pre-built SSE frame
+// produced by the publisher's `buildSseFrame()`. Subscribers just write it
+// to local clients verbatim; no parse-of-session, no redaction-per-instance,
+// and (key security property) voterTokens never traverse the channel.
 if (redis) {
   const subscriber = redis.duplicate();
   subscriber.connect().then(() =>
@@ -152,8 +184,8 @@ if (redis) {
       logger.info('subscribed to SSE pub/sub channel');
       subscriber.on('message', (_channel, raw) => {
         try {
-          const msg = JSON.parse(raw) as { sessionId: string; session: GroupSession | null };
-          writeToLocalClients(msg.sessionId, msg.session);
+          const msg = JSON.parse(raw) as { sessionId: string; frame: SseFrame };
+          writeFrameToLocalClients(msg.sessionId, msg.frame);
         } catch (err) {
           logger.warn({ err }, 'malformed SSE pub/sub message');
         }
@@ -164,29 +196,58 @@ if (redis) {
 
 /**
  * Broadcasts a session update to all SSE clients across all instances.
- * - With Redis: publishes to the channel; every instance's subscriber writes
- *   to its own local clients (including this one).
- * - Without Redis: writes to local clients directly.
  *
- * Net effect is the same in single-instance mode; in multi-instance mode the
- * extra Redis round-trip (~1ms on same network) is the cost of fan-out.
+ * The frame is redacted at the publisher and shipped as a finished string
+ * over Redis pub/sub. Subscribers byte-copy to local clients. Three wins
+ * over the previous design that sent the full session on the channel:
+ *
+ *   1. Security: voterTokens (per-voter capability secrets) no longer
+ *      cross the pub/sub channel where any subscribing instance could see
+ *      them. They stay inside the publisher's process.
+ *   2. ~2× bandwidth reduction on the channel (no token map, no full
+ *      voterMeta entries with userId/username — only what clients see).
+ *   3. Each receiving instance saves a JSON.parse + redactForClient call +
+ *      JSON.stringify per broadcast. Hot during voting.
+ *
+ * The serialize-zero-clients early-out skips the redact+stringify entirely
+ * when no local clients are connected AND Redis isn't running (single-
+ * instance mode). With Redis, we always publish because other instances
+ * may have clients.
  */
 export function notifyClients(sessionId: string, session: GroupSession | null): void {
   if (redis && redis.status === 'ready') {
-    redis.publish(SSE_CHANNEL, JSON.stringify({ sessionId, session })).catch((err) => {
+    const frame = buildSseFrame(session);
+    redis.publish(SSE_CHANNEL, JSON.stringify({ sessionId, frame })).catch((err) => {
       // If publish fails, at least update local clients so single-instance behavior holds.
       logger.error({ err, sessionId }, 'SSE publish failed — falling back to local write');
-      writeToLocalClients(sessionId, session);
+      writeFrameToLocalClients(sessionId, frame);
     });
   } else {
-    writeToLocalClients(sessionId, session);
+    // Single-instance mode: skip the serialize entirely when no one's connected.
+    if (sseClients.get(sessionId)?.size) {
+      const frame = buildSseFrame(session);
+      writeFrameToLocalClients(sessionId, frame);
+    } else if (session === null) {
+      // Even with no clients, we still want to drop the entry on close.
+      sseClients.delete(sessionId);
+    }
   }
 }
 
 // ── ID generation ─────────────────────────────────────────────
 
-function generateCode(): string {
+// Public so the launchVoting / launchTripVoting helpers can pre-allocate
+// an id, claim it atomically in the DB (`groupEvent.sessionId`), and only
+// then materialize the session in storage. Without that two-step, a race
+// between the manual /start-voting route and the on-read auto-launch
+// sweeper can create a session, lose the DB flip, and leak an orphan
+// votable session in Redis for the full TTL window.
+export function generateSessionId(): string {
   return crypto.randomBytes(12).toString('hex');
+}
+
+function generateCode(): string {
+  return generateSessionId();
 }
 
 // 16 bytes = 128 bits, hex-encoded. Each voter gets one at /join, must present
@@ -262,15 +323,32 @@ export async function createSession(
   // (ad-hoc sessions where the host typed a custom display name). Defaults to
   // hostName so callers that don't pass it still get sensible metadata.
   hostUsername: string | null = null,
+  // Trip context for meal events. Mutually exclusive with groupId in
+  // practice (both are 0 for ad-hoc sessions); the GroupEvent CHECK
+  // constraint already enforces that on the persistent side.
+  tripId = 0,
+  // Externally-provided id from the launch helpers. They pre-allocate via
+  // `generateSessionId()`, claim it in the DB with `updateMany`, and only
+  // then call here to materialize storage — fixes the orphan-session race
+  // where the loser of a concurrent launch leaks a votable session.
+  preallocatedId?: string,
 ): Promise<GroupSession> {
-  let id = generateCode();
-  while (await getSession(id)) id = generateCode();
+  // Pre-allocated ids come from the launch helpers, which have already
+  // claimed them atomically in the DB — we trust them and skip the
+  // collision-retry. The retry is for the auto-generated path (ad-hoc
+  // session creation route) where two independent callers could in
+  // principle land on the same 12-byte random.
+  let id = preallocatedId ?? generateCode();
+  if (!preallocatedId) {
+    while (await getSession(id)) id = generateCode();
+  }
 
   const ttlMs = getTtlMs();
 
   const session: GroupSession = {
     id,
     groupId,
+    tripId,
     eventId,
     hostUserId,
     hostName,
@@ -279,7 +357,7 @@ export async function createSession(
     voteMethod,
     voters:    { [hostName]: {} },
     rankings:  {},
-    voterMeta: { [hostName]: { isGuest: false, username: hostUsername ?? hostName } },
+    voterMeta: { [hostName]: { isGuest: false, username: hostUsername ?? hostName, userId: hostUserId } },
     // The host doesn't get a voter token — they vote under requireAuth (their
     // JWT proves identity in /vote). Only non-host display names need a token.
     voterTokens: {},

@@ -1,3 +1,14 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Always reserve gutter for the vertical scrollbar so the viewport width
+   is stable across pages and across state changes within a page.
+   Without this, content that fits the viewport (no scrollbar needed)
+   renders ~15px wider than content that overflows (scrollbar present),
+   causing horizontal jumps when, e.g., the Compare page transitions
+   between map-only and detail-grid+map. `stable` reserves the space on
+   the side appropriate for the writing mode; `both-edges` is overkill. */
+html {
+  scrollbar-gutter: stable;
+}

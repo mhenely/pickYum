@@ -22,6 +22,7 @@ import placesRoutes from './routes/places';
 import sessionsRoutes from './routes/sessions';
 import socialRoutes from './routes/social';
 import groupRoutes from './routes/groups';
+import tripRoutes from './routes/trips';
 import healthRoutes from './routes/health';
 
 export function createApp() {
@@ -68,6 +69,7 @@ export function createApp() {
   app.use('/api/sessions', sessionsRoutes);
   app.use('/api/social', socialRoutes);
   app.use('/api/groups', groupRoutes);
+  app.use('/api/trips', tripRoutes);
   app.use('/api/health', healthRoutes);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

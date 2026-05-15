@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
-import jwt from 'jsonwebtoken';
 import {
   createSession,
   getSession,
@@ -14,26 +13,10 @@ import {
   RestaurantSnapshot,
   VoteMethod,
 } from '../sessions';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, getOptionalAuthUserId } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
 import { tallyRanked } from '../lib/irv';
 import prisma from '../lib/prisma';
-
-// Returns the auth user's id if a valid `token` cookie is present, else null.
-// Used on guest-friendly endpoints (/join, /vote) where we want to enrich the
-// voter's identity record but not require auth. Never throws — bad/missing
-// tokens just give us back null.
-function getOptionalAuthUserId(req: Request): number | null {
-  const token = req.cookies?.token as string | undefined;
-  const secret = process.env.JWT_SECRET;
-  if (!token || !secret) return null;
-  try {
-    const payload = jwt.verify(token, secret) as { userId?: number };
-    return typeof payload.userId === 'number' ? payload.userId : null;
-  } catch {
-    return null;
-  }
-}
 
 const router = Router();
 router.use(writeLimiter);
@@ -229,6 +212,48 @@ router.post('/:id/join', async (req: Request, res: Response) => {
       authUsername = user?.username ?? null;
     }
 
+    // ── Trip-context auth gate (Phase 3) ─────────────────────────
+    // For trip-bound sessions, a *signed-in* joiner must be a member of the
+    // trip; if the event has a participantUserIds restriction, they must also
+    // be in that list. Guests (no cookie) pass through unchanged — the
+    // product decision is "guests with the link can still join", same as
+    // group sessions. participantUserIds applies only to known accounts —
+    // a guest has no userId to match against, so the per-meal subset can't
+    // gate them. Group sessions skip this block entirely.
+    if (session.tripId && authUserId) {
+      const event = await prisma.groupEvent.findUnique({
+        where:  { id: session.eventId },
+        select: { tripId: true, participantUserIds: true },
+      });
+      // If the event has been deleted or its tripId has drifted, fall back
+      // to letting the joiner through — the session itself is the source
+      // of truth for "is this still valid?" and getSession already gated.
+      if (event && event.tripId === session.tripId) {
+        const tripRow = await prisma.trip.findUnique({
+          where:  { id: session.tripId },
+          select: {
+            hostId: true,
+            // Single-membership probe — the host is also a member but we OR
+            // the flag so a missing trip_members row for the host doesn't
+            // accidentally reject them.
+            members: { where: { userId: authUserId }, select: { userId: true } },
+          },
+        });
+        const isTripMember = !!tripRow && (tripRow.hostId === authUserId || tripRow.members.length > 0);
+        if (!isTripMember) {
+          res.status(403).json({ error: "You're not a member of this trip" });
+          return;
+        }
+        // Empty array (or null on legacy rows) = "everyone on the trip";
+        // non-empty array = strict allow-list of user ids that may vote.
+        const allowList = event.participantUserIds ?? [];
+        if (allowList.length > 0 && !allowList.includes(authUserId)) {
+          res.status(403).json({ error: 'This meal is limited to selected participants' });
+          return;
+        }
+      }
+    }
+
     // Voter-token gating (see /vote): a new join under a fresh name mints a
     // token, returned in the response and kept server-side under voterTokens.
     // A re-join under an existing name must present that token to "re-attach"
@@ -244,6 +269,21 @@ router.post('/:id/join', async (req: Request, res: Response) => {
       return;
     }
 
+    // Rejoin identity-binding: if the original joiner was signed in (their
+    // voterMeta.userId is non-null), a rejoin under a *different* signed-in
+    // account is rejected. Without this check, a leaked voter token would
+    // let any signed-in user overwrite the original voter's auth identity
+    // in voterMeta — the persisted GroupEventResult would credit "Bob's"
+    // vote to whoever rejoined last, not the original Bob.
+    //
+    // Guest→signed-in upgrades (existingMeta.userId === null) and rejoins
+    // under the same userId remain allowed — those are legitimate.
+    const existingMeta = session.voterMeta?.[trimmed];
+    if (existingToken && existingMeta?.userId != null && authUserId != null && existingMeta.userId !== authUserId) {
+      res.status(403).json({ error: 'That name is bound to another account' });
+      return;
+    }
+
     const isNewJoin = !existingToken;
     let voterToken = existingToken;
     if (isNewJoin) {
@@ -255,10 +295,15 @@ router.post('/:id/join', async (req: Request, res: Response) => {
     // Always refresh voterMeta on join — a guest who signs in and rejoins under
     // the same name (with their token) should be promoted from guest to
     // signed-in. The token check above ensures only the original joiner can
-    // do this, not a stranger who guessed the name.
+    // do this, not a stranger who guessed the name. The userId-binding check
+    // immediately above ensures a signed-in joiner can't impersonate another.
     session.voterMeta[trimmed] = {
       isGuest: !authUserId,
       username: authUsername,
+      // Capture userId so the ballot-detail modal can look up the user's
+      // *current* name later if they rename — without rewriting the historical
+      // record. Null for guests; matches the existing snapshot pattern.
+      userId: authUserId ?? null,
     };
 
     await saveSession(session);

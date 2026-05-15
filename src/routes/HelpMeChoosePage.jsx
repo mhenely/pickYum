@@ -1,5 +1,5 @@
 import { useDispatch, useSelector } from "react-redux";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Link, useBlocker } from "react-router-dom";
 
 import {
@@ -14,11 +14,11 @@ import { api } from "../lib/api";
 import useCurrentUser from "../hooks/useCurrentUser";
 import RouletteWheel from "../components/RouletteWheel";
 import CreateSessionModal from "../components/CreateSessionModal";
-import getMostRecentDate from "../utils/getMostRecentDate";
+import { buildAcceptedStats, formatLastChosen } from "../utils/acceptedStats";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
 import RestaurantDetailModal from "../components/RestaurantDetailModal";
 import AcceptModal from "../components/AcceptModal";
-import RestaurantMiniCard from "../components/RestaurantMiniCard";
+import RestaurantCard from "../components/RestaurantCard";
 import ResultBanner from "../components/ResultBanner";
 import "./HelpMeChoosePage.css";
 
@@ -59,6 +59,14 @@ const HelpMeChoosePage = () => {
   const dispatch = useDispatch();
   const userInfo = useCurrentUser();
   const { favorites, options, reviews } = userInfo;
+
+  // O(N) precompute over the user's accepted history; row maps below read
+  // last-chosen and counts in O(1) per card. Was N row × M accepted scans
+  // per render of the favorites + options grids.
+  const acceptedStats = useMemo(
+    () => buildAcceptedStats(userInfo.accepted),
+    [userInfo.accepted],
+  );
 
   // ── Mode ──────────────────────────────────────────────────
   const [mode, setMode] = useState("coinflip");
@@ -108,16 +116,22 @@ const HelpMeChoosePage = () => {
   const allRestaurants    = customRestaurants;
 
   // ── Computed flip pool ────────────────────────────────────
-  const cutoff = avoidDays > 0 ? Date.now() - avoidDays * 86_400_000 : null;
-  const recentIds = cutoff
-    ? new Set(
-        userInfo.accepted
-          .filter((a) => new Date(a.date).getTime() >= cutoff)
-          .map((a) => sid(a.restaurantId))
-      )
-    : new Set();
+  // All four derivations below are memoized — they're passed as props to
+  // RestaurantCard / RouletteWheel / pill components, so unstable refs
+  // cause the entire options grid to re-render on every keystroke or
+  // filter toggle. Each dependency list is exactly the inputs the
+  // derivation reads.
+  const recentIds = useMemo(() => {
+    if (avoidDays <= 0) return new Set();
+    const cutoff = Date.now() - avoidDays * 86_400_000;
+    return new Set(
+      userInfo.accepted
+        .filter((a) => new Date(a.date).getTime() >= cutoff)
+        .map((a) => sid(a.restaurantId))
+    );
+  }, [avoidDays, userInfo.accepted]);
 
-  const flipPool = options.filter((id) => {
+  const flipPool = useMemo(() => options.filter((id) => {
     const r = allRestaurants[id];
     if (!r) return false;
     if (priceFilter.size > 0 && !priceFilter.has(r.price)) return false;
@@ -125,16 +139,19 @@ const HelpMeChoosePage = () => {
     if (openNowOnly && !isOpenNow(r.hours)) return false;
     if (recentIds.has(sid(id))) return false;
     return true;
-  });
+  }), [options, allRestaurants, priceFilter, cuisineFilter, openNowOnly, recentIds]);
 
-  const flipPoolSet = new Set(flipPool.map(sid));
+  const flipPoolSet = useMemo(() => new Set(flipPool.map(sid)), [flipPool]);
 
   const filtersActive =
     priceFilter.size > 0 || cuisineFilter || openNowOnly || avoidDays > 0;
 
-  const optionCuisines = [...new Set(
-    options.map((id) => allRestaurants[id]?.type).filter(Boolean)
-  )].sort();
+  const optionCuisines = useMemo(
+    () => [...new Set(
+      options.map((id) => allRestaurants[id]?.type).filter(Boolean)
+    )].sort(),
+    [options, allRestaurants],
+  );
 
   // ── Custom restaurant add ─────────────────────────────────
   const handleAddCustom = async (name) => {
@@ -187,14 +204,23 @@ const HelpMeChoosePage = () => {
       )
     : false;
 
-  const searchSuggestions = trimmedQuery
-    ? Object.entries(allRestaurants)
-        .filter(([id, r]) =>
-          r.name.toLowerCase().includes(trimmedQuery.toLowerCase()) &&
-          !options.map(String).includes(String(id))
-        )
-        .slice(0, 7)
-    : [];
+  // Memoized so we don't re-walk the full customRestaurants map on every
+  // render (e.g. every drag-over event during the H/T assign flow). The
+  // lowercase query + Set-based options lookup are also extracted out of
+  // the .filter() body so each candidate row is O(1) instead of O(options).
+  const searchSuggestions = useMemo(() => {
+    if (!trimmedQuery) return [];
+    const needle = trimmedQuery.toLowerCase();
+    const optionsSet = new Set(options.map(String));
+    const matches = [];
+    for (const [id, r] of Object.entries(allRestaurants)) {
+      if (optionsSet.has(String(id))) continue;
+      if (!r.name.toLowerCase().includes(needle)) continue;
+      matches.push([id, r]);
+      if (matches.length >= 7) break;
+    }
+    return matches;
+  }, [trimmedQuery, options, allRestaurants]);
 
   // ── Roulette ──────────────────────────────────────────────
   const wheelRef = useRef(null);
@@ -384,15 +410,23 @@ const HelpMeChoosePage = () => {
             {favorites.length === 0 && (
               <p className="text-xs text-gray-400 italic">No favorites yet.</p>
             )}
-            <div className="flex flex-col gap-3">
+            {/* Cap at roughly 6 cards when the favorites list is long, so it
+                doesn't push the entire Choose page taller. These sm cards
+                carry an extra "+ Add to Options" button (~36px) so we use a
+                larger max-height than the Compare page's identical-purpose
+                cap. overscroll-contain prevents wheel/touch scroll from
+                escaping to the page once the user reaches the edge. */}
+            <div className={`flex flex-col gap-3 ${favorites.length > 6 ? 'max-h-[1040px] overflow-y-auto overscroll-contain pr-1' : ''}`}>
               {favorites.map((id) => {
                 const rating = getUserRating(reviews, id);
                 return (
-                  <RestaurantMiniCard
+                  <RestaurantCard
                     key={id}
                     id={id}
+                    size="sm"
+                    restaurantMap={allRestaurants}
                     personalRating={rating}
-                    lastChosen={getMostRecentDate(userInfo.accepted, id)}
+                    lastChosen={formatLastChosen(acceptedStats, id)}
                     onUnfavorite={() =>
                       dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
                     }
@@ -404,7 +438,7 @@ const HelpMeChoosePage = () => {
                     >
                       + Add to Options
                     </button>
-                  </RestaurantMiniCard>
+                  </RestaurantCard>
                 );
               })}
             </div>
@@ -525,7 +559,7 @@ const HelpMeChoosePage = () => {
                     <select
                       value={cuisineFilter}
                       onChange={(e) => setCuisineFilter(e.target.value)}
-                      className="text-xs rounded border border-gray-300 pl-2 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
+                      className="text-xs rounded border border-gray-300 pl-2 pr-8 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
                     >
                       <option value="">All</option>
                       {optionCuisines.map((c) => (
@@ -552,7 +586,7 @@ const HelpMeChoosePage = () => {
                     <select
                       value={avoidDays}
                       onChange={(e) => setAvoidDays(Number(e.target.value))}
-                      className="text-xs rounded border border-gray-300 pl-2 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
+                      className="text-xs rounded border border-gray-300 pl-2 pr-8 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500 bg-white"
                     >
                       <option value={0}>Off</option>
                       <option value={3}>3 days</option>
@@ -676,10 +710,11 @@ const HelpMeChoosePage = () => {
                     onDragLeave={!isTouchDevice ? handleDragLeave : undefined}
                     onDrop={!isTouchDevice ? (e) => handleDrop(e, id) : undefined}
                   >
-                    <RestaurantMiniCard
+                    <RestaurantCard
                       id={id}
+                      size="sm"
                       personalRating={rating}
-                      lastChosen={getMostRecentDate(userInfo.accepted, id)}
+                      lastChosen={formatLastChosen(acceptedStats, id)}
                       badge={badge}
                       isDragOver={!isTouchDevice && sid(dragOverId) === sid(id)}
                       isWinner={isWinner}

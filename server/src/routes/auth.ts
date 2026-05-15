@@ -70,7 +70,10 @@ async function generateUniqueUsername(base: string): Promise<string> {
   // 6-digit crypto-random suffix — wider than the original 4-digit space (1e6
   // vs 9e3) so collision retries are rare, and using the CSPRNG over Math.random
   // means an attacker probing for OAuth-account-name patterns can't predict them.
-  while (await prisma.user.findFirst({ where: { username: { equals: candidate, mode: 'insensitive' } } })) {
+  // username column is citext (see prisma/schema.prisma) — equality is
+  // case-insensitive at the DB level and uses the unique B-tree index.
+  // Dropped `mode: 'insensitive'` to take the simple `=` planner path.
+  while (await prisma.user.findFirst({ where: { username: { equals: candidate } } })) {
     candidate = `${slug}${100000 + crypto.randomInt(900000)}`;
   }
   return candidate;
@@ -110,28 +113,41 @@ async function findOrCreateOAuthUser(
   // 2. Existing user with same email — link only if the provider confirmed
   //    the email is verified. An unverified address creates a fresh account
   //    under a synthetic email so the legit account isn't silently joined.
+  // email column is citext — see schema.prisma. The unique index serves
+  // this lookup directly; no need for the ILIKE-translating insensitive mode.
   let user = email && emailVerified
-    ? await prisma.user.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } })
+    ? await prisma.user.findFirst({ where: { email: { equals: email } } })
     : null;
 
-  if (!user) {
-    const username = await generateUniqueUsername(displayName);
-    // Synthetic fallback email is used when we can't safely link by email
-    // (no email at all, or email present but unverified). Keeps the User row's
-    // unique email constraint satisfied without colliding with real addresses.
-    const safeEmail = email && emailVerified ? email : `${providerId}@oauth.pickyum`;
-    user = await prisma.user.create({
-      data: { email: safeEmail, username, avatarUrl, emailVerified, emailVerifiedAt: emailVerified ? new Date() : null },
-    });
-  } else if (avatarUrl && !user.avatarUrl) {
-    user = await prisma.user.update({ where: { id: user.id }, data: { avatarUrl } });
-  }
+  // Create / update User and link OAuthAccount in one transaction so a
+  // failure between the two writes can't leave a User with no auth path —
+  // a stale row no one can sign back into. The unique constraint on
+  // (provider, providerId) also makes concurrent OAuth callbacks for the
+  // same external account collide; the transaction rolls back cleanly,
+  // and the caller's retry hits the linked-account fast path above.
+  const result = await prisma.$transaction(async (tx) => {
+    let resolvedUser = user;
+    if (!resolvedUser) {
+      const username = await generateUniqueUsername(displayName);
+      // Synthetic fallback email is used when we can't safely link by email
+      // (no email at all, or email present but unverified). Keeps the User row's
+      // unique email constraint satisfied without colliding with real addresses.
+      const safeEmail = email && emailVerified ? email : `${providerId}@oauth.pickyum`;
+      resolvedUser = await tx.user.create({
+        data: { email: safeEmail, username, avatarUrl, emailVerified, emailVerifiedAt: emailVerified ? new Date() : null },
+      });
+    } else if (avatarUrl && !resolvedUser.avatarUrl) {
+      resolvedUser = await tx.user.update({ where: { id: resolvedUser.id }, data: { avatarUrl } });
+    }
 
-  await prisma.oAuthAccount.create({
-    data: { userId: user.id, provider, providerId },
+    await tx.oAuthAccount.create({
+      data: { userId: resolvedUser.id, provider, providerId },
+    });
+
+    return resolvedUser;
   });
 
-  return user;
+  return result;
 }
 
 // ── Passport strategies ───────────────────────────────────────
@@ -228,25 +244,31 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
     return;
   }
 
-  const existing = await prisma.user.findFirst({
-    where: {
-      OR: [
-        { email:    { equals: email,    mode: 'insensitive' } },
-        { username: { equals: username, mode: 'insensitive' } },
-      ],
-    },
-  });
-  if (existing) {
-    const field = existing.email.toLowerCase() === email.toLowerCase() ? 'email' : 'username';
-    res.status(409).json({ error: `That ${field} is already taken` });
-    return;
-  }
-
+  // email + username are citext and have unique B-tree indexes. We rely on
+  // the DB for uniqueness (P2002 on `user.create`) rather than a pre-check,
+  // because two concurrent registrations can both pass a findFirst probe
+  // and only one would survive `create` — without a try/catch that violation
+  // bubbles to a generic 500 instead of the field-specific 409 below.
   const passwordHash = await bcrypt.hash(password, 12);
-  const user = await prisma.user.create({
-    data: { email, username, passwordHash },
-    select: { id: true, email: true, username: true, flipCount: true, avatarUrl: true, createdAt: true },
-  });
+  let user;
+  try {
+    user = await prisma.user.create({
+      data: { email, username, passwordHash },
+      select: { id: true, email: true, username: true, flipCount: true, avatarUrl: true, createdAt: true },
+    });
+  } catch (err: unknown) {
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'P2002') {
+      // meta.target tells us which constraint fired — `User_email_key` vs
+      // `User_username_key`. Without it we'd have to disclose generically.
+      const target = (err as { meta?: { target?: string[] | string } }).meta?.target;
+      const targetStr = Array.isArray(target) ? target.join(',') : (target ?? '');
+      const field = targetStr.includes('email') ? 'email'
+                  : targetStr.includes('username') ? 'username'
+                  : 'value';
+      res.status(409).json({ error: `That ${field} is already taken` }); return;
+    }
+    throw err;
+  }
 
   // Fire verification email — send is fail-open and async-fire-and-forget;
   // a failed send doesn't block account creation. The user can request a
@@ -268,8 +290,10 @@ async function sendVerificationEmail(userId: number, email: string): Promise<voi
   await sendEmail({ to: email, ...tmpl });
 }
 
-// POST /api/auth/verify-email — consume token, flip emailVerified=true
-router.post('/verify-email', async (req: Request, res: Response) => {
+// POST /api/auth/verify-email — consume token, flip emailVerified=true.
+// Behind `authLimiter` for parity with /reset-password — defense in depth
+// against any future regression that weakens token generation.
+router.post('/verify-email', authLimiter, async (req: Request, res: Response) => {
   const { token } = req.body as { token?: string };
   if (typeof token !== 'string' || !token) {
     res.status(400).json({ error: 'Token is required' });
@@ -315,8 +339,9 @@ router.post('/forgot-password', emailLimiter, async (req: Request, res: Response
     return;
   }
 
+  // email column is citext — case-insensitive equality via unique index.
   const user = await prisma.user.findFirst({
-    where: { email: { equals: email, mode: 'insensitive' } },
+    where: { email: { equals: email } },
     select: { id: true, email: true, passwordHash: true },
   });
 
@@ -372,21 +397,21 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
 
   // Case-insensitive — the uniqueness check at registration is too. A user who
   // registered "Alice@x.com" can sign in as "alice@x.com" (or any case).
+  // email column is citext (schema.prisma) — `equals` does case-insensitive
+  // index-backed lookup. This is the hottest auth query in the app.
   const user = await prisma.user.findFirst({
-    where: { email: { equals: email, mode: 'insensitive' } },
+    where: { email: { equals: email } },
   });
   // Always run bcrypt regardless of whether the user exists to prevent timing-based email enumeration
   const passwordMatch = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
 
-  if (!user) {
-    res.status(401).json({ error: 'Invalid email or password' });
-    return;
-  }
-  if (!user.passwordHash) {
-    res.status(401).json({ error: 'This account uses social login — please sign in with Google or Facebook' });
-    return;
-  }
-  if (!passwordMatch) {
+  // Single opaque error for every "failure to authenticate" path: missing
+  // user, OAuth-only account, wrong password. Distinct messages here leak
+  // exactly which: "email exists?" and "is it password-protected?" — the
+  // same enumeration vector /forgot-password already avoids. The OAuth-only
+  // hint that used to live here is moved to the UI side (after the user
+  // tries social sign-in successfully).
+  if (!user || !user.passwordHash || !passwordMatch) {
     res.status(401).json({ error: 'Invalid email or password' });
     return;
   }
@@ -429,7 +454,11 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
 // (avoids any JWT-secret encoding issues), then finds/creates the user
 // in our Prisma DB and issues an app JWT cookie.
 
-router.post('/supabase', async (req: Request, res: Response) => {
+// Behind `authLimiter` because every other account-creation / sign-in path
+// is — leaving this one open would let credential-stuffing of leaked
+// Supabase tokens, or un-throttled account creation via synthetic
+// `{providerId}@oauth.pickyum` emails, fly past every other rate limit.
+router.post('/supabase', authLimiter, async (req: Request, res: Response) => {
   const { access_token } = req.body as { access_token?: string };
   if (!access_token) {
     res.status(400).json({ error: 'access_token is required' });

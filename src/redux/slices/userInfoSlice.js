@@ -25,6 +25,11 @@ const initialState = {
       id: null,
       email: '',
       username: '',
+      // Address book — replaces the older single defaultAddress string.
+      // Each entry: { id, label, address, isDefault, createdAt }. Exactly
+      // one entry has isDefault=true (enforced server-side). Frontend
+      // derives the Search-page prefill from `addresses.find(a => a.isDefault)`.
+      addresses:  savedGuest?.addresses  ?? [],
       flipCount:  savedGuest?.flipCount  ?? 0,
       favorites:  savedGuest?.favorites  ?? [],
       options:    savedGuest?.options    ?? [],
@@ -42,14 +47,18 @@ export const userInfoSlice = createSlice({
   name: 'userInfo',
   initialState,
   reducers: {
-    // Hydrates users[0] from API data after login/session restore
+    // Hydrates users[0] from API data after login/session restore.
+    // `addresses` falls back to the existing value when omitted so
+    // callers that update only profile fields (e.g. a username change)
+    // don't accidentally clear the address book.
     setUserData: (state, action) => {
-      const { id, email, username, flipCount, favorites, options, accepted, archived, reviews } = action.payload;
+      const { id, email, username, addresses, flipCount, favorites, options, accepted, archived, reviews } = action.payload;
       state.users[0] = {
         ...state.users[0],
         id,
         email,
         username,
+        addresses: addresses ?? state.users[0].addresses ?? [],
         flipCount: flipCount ?? 0,
         favorites: favorites ?? [],
         options: options ?? [],
@@ -57,6 +66,55 @@ export const userInfoSlice = createSlice({
         archived: archived ?? [],
         reviews: reviews ?? {},
       };
+    },
+
+    // ── Address book mutations ─────────────────────────────────
+    // The reducer is the source of truth for in-memory state; the
+    // thunks below (or component-level callers) fire the network call
+    // and dispatch these on success. Optimistic-then-rollback isn't
+    // worth the complexity for an address book that's edited rarely.
+    setAddresses: (state, action) => {
+      state.users[0].addresses = action.payload ?? [];
+    },
+    addAddress: (state, action) => {
+      const next = action.payload;
+      if (!next) return;
+      // If the incoming row is the new default, demote the others to
+      // keep the "exactly one default" invariant intact on the client.
+      const current = state.users[0].addresses ?? [];
+      const updated = next.isDefault
+        ? current.map((a) => ({ ...a, isDefault: false }))
+        : current;
+      state.users[0].addresses = [...updated, next];
+    },
+    updateAddress: (state, action) => {
+      const next = action.payload;
+      if (!next) return;
+      const current = state.users[0].addresses ?? [];
+      // Same demote-others logic when an existing row is promoted.
+      state.users[0].addresses = current.map((a) => {
+        if (a.id === next.id) return next;
+        if (next.isDefault) return { ...a, isDefault: false };
+        return a;
+      });
+    },
+    removeAddress: (state, action) => {
+      const id = action.payload;
+      const current = state.users[0].addresses ?? [];
+      const removed = current.find((a) => a.id === id);
+      const remaining = current.filter((a) => a.id !== id);
+      // If we deleted the default, promote the oldest remaining entry
+      // (matches the server's transaction in DELETE /me/addresses/:id).
+      if (removed?.isDefault && remaining.length > 0) {
+        const oldest = remaining.reduce((a, b) =>
+          new Date(a.createdAt) <= new Date(b.createdAt) ? a : b
+        );
+        state.users[0].addresses = remaining.map((a) =>
+          a.id === oldest.id ? { ...a, isDefault: true } : a
+        );
+      } else {
+        state.users[0].addresses = remaining;
+      }
     },
 
     updateUserInfo: (state, action) => {
@@ -104,10 +162,15 @@ export const userInfoSlice = createSlice({
     },
 
     addUserAcceptance: (state, action) => {
+      // Callers pass restaurantId as a Number (GroupSessionPage parses
+      // session.result through Number()) or a String (HelpMeChoosePage,
+      // custom IDs). Every downstream consumer normalizes with String(...)
+      // before lookup, so storing strings here at the reducer boundary
+      // eliminates the recurring foot-gun without touching consumers.
       const { restaurantId } = action.payload;
       state.users[0].accepted = [
         ...state.users[0].accepted,
-        { restaurantId, date: new Date().toLocaleDateString() },
+        { restaurantId: String(restaurantId), date: new Date().toLocaleDateString() },
       ];
     },
 
@@ -181,11 +244,14 @@ export const userInfoSlice = createSlice({
       state.isDataLoaded = true;
     },
 
-    // Resets all user data on logout so the next login triggers a fresh load
+    // Resets all user data on logout so the next login triggers a fresh load.
+    // `addresses` is included explicitly — leaving it out leaves the previous
+    // user's address book stuck on the Search page until the next mount.
     clearUserData: (state) => {
       state.users[0] = {
         id: null, email: '', username: '', flipCount: 0,
         favorites: [], options: [], accepted: [], archived: [], reviews: {}, notes: {},
+        addresses: [],
       };
       state.customRestaurants = {};
       state.isDataLoaded = false;
@@ -211,6 +277,10 @@ export const {
   incrementFlipCount,
   setDataLoaded,
   clearUserData,
+  setAddresses,
+  addAddress,
+  updateAddress,
+  removeAddress,
 } = userInfoSlice.actions;
 
 /**
@@ -220,7 +290,7 @@ export const {
 export const loadUserData = createAsyncThunk(
   'userInfo/loadUserData',
   async (user, { dispatch }) => {
-  const { favorites, options, accepted, archived, reviews } = await api.users.getAll();
+  const { favorites, options, accepted, archived, reviews, addresses } = await api.users.getAll();
 
   // Collect all unique restaurants from API responses
   const allApiRestaurants = [
@@ -243,13 +313,41 @@ export const loadUserData = createAsyncThunk(
           type: r.cuisineType ?? 'Custom',
           price: r.priceLevel ?? 1,
           rating: r.googleRating != null ? Number(r.googleRating) : null,
-          hours: r.hours ?? 'N/A',
-          phone: r.phone ?? 'N/A',
-          website: r.website ?? 'N/A',
-          yelp: r.yelpUrl ?? 'N/A',
+          // Total Google ratings backing the average. Surfaced so cards
+          // (Search saved, Compare, Choose) can show "(800)" alongside
+          // the star rating — matches the nearby-search experience.
+          ratingCount: r.ratingCount ?? null,
+          // Address surfaced from the loader so Compare/Choose cards
+          // display the same content as Search cards. Was previously
+          // omitted because those pages didn't render an address line.
+          address: r.address ?? null,
+          // null (not 'N/A') for missing values — downstream cards and
+          // modals do truthiness checks to decide whether to render the
+          // row, so a literal "N/A" string would render as visible text.
+          // Yelp is intentionally dropped from the projection — we no
+          // longer surface it in any UI surface.
+          hours:   r.hours   ?? null,
+          phone:   r.phone   ?? null,
+          website: r.website ?? null,
           takeout: r.takeout ?? false,
           delivery: r.delivery ?? false,
           googlePlaceId: r.googlePlaceId ?? null,
+          // Coords from /me/all so the Compare-page map can render
+          // pins for saved restaurants without re-fetching. Custom
+          // (user-typed) rows have null here and stay off the map.
+          lat: r.lat ?? null,
+          lng: r.lng ?? null,
+          // Cached Google Places photos. Empty array for custom rows /
+          // legacy rows pre-rollout. Card consumers do `photos.length > 0`
+          // to decide whether to render the thumb. Reviews are NOT
+          // loaded — the UI links out to Google Maps for full reviews
+          // instead (see googleMapsUrl utility).
+          photos: Array.isArray(r.photos) ? r.photos : [],
+          // Structured weekly opening hours — periods drive the
+          // open-now / closing-soon badge in the detail modal,
+          // weekdayDescriptions render the hours table. Null when
+          // Google didn't return any (or for custom rows).
+          regularOpeningHours: r.regularOpeningHours ?? null,
         },
       }));
     }
@@ -259,6 +357,7 @@ export const loadUserData = createAsyncThunk(
     id: user.id,
     email: user.email,
     username: user.username,
+    addresses: addresses ?? [],
     flipCount: user.flipCount ?? 0,
     favorites: favorites.map((r) => String(r.id)),
     options: options.map((r) => String(r.id)),
@@ -305,10 +404,17 @@ export const refreshStaleRestaurants = createAsyncThunk(
             type: r.cuisineType ?? 'Custom',
             price: r.priceLevel ?? 1,
             rating: r.googleRating != null ? Number(r.googleRating) : null,
-            hours: r.hours ?? 'N/A',
-            phone: r.phone ?? 'N/A',
-            website: r.website ?? 'N/A',
-            yelp: r.yelpUrl ?? 'N/A',
+            // Mirror the null-fallback used in the initial loader so
+            // post-refresh data behaves the same downstream (see loader
+            // for the rationale). Yelp dropped — no UI surface uses it.
+            hours:   r.hours   ?? null,
+            phone:   r.phone   ?? null,
+            website: r.website ?? null,
+            // Refreshed weekly hours overwrite whatever was previously
+            // cached. Null fallback so a row that no longer returns
+            // hours from Google goes back to "no schedule available"
+            // instead of holding stale data forever.
+            regularOpeningHours: r.regularOpeningHours ?? null,
             takeout: r.takeout ?? false,
             delivery: r.delivery ?? false,
             googlePlaceId: r.googlePlaceId ?? null,

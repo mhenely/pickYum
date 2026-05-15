@@ -23,6 +23,31 @@ function buildApp() {
 
 const authCookie = (userId = 1) => `token=${jwt.sign({ userId }, SECRET)}`;
 
+// Default safety mocks for the new privacy + transactional code paths:
+//   1. The privacy gate on /me/favorites, /me/options, /me/archived,
+//      /me/accepted, /me/reviews calls `prisma.restaurant.findUnique`.
+//      Without a mock it'd resolve to undefined and every write returns
+//      404. Default to a public row; gate-specific tests can override.
+//   2. recomputeCommunityRating now runs inside `prisma.$transaction`
+//      with an advisory lock. Tests that mock `review.groupBy` etc.
+//      expect to see calls on the same mock client. We re-route the
+//      interactive form so the inner callback runs against `mockPrisma`;
+//      the array form is left to return undefined (tests that depend on
+//      its result still mock explicitly).
+beforeEach(() => {
+  (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+    id: 1, private: false, createdBy: null,
+  });
+  (mockPrisma.$transaction as jest.Mock).mockImplementation(async (arg: unknown) => {
+    if (typeof arg === 'function') {
+      return (arg as (tx: typeof mockPrisma) => Promise<unknown>)(mockPrisma);
+    }
+    return undefined;
+  });
+  // The advisory-lock SELECT is a no-op for tests; just resolve.
+  (mockPrisma.$executeRaw as jest.Mock).mockResolvedValue(0);
+});
+
 describe('POST /api/users/me/flip', () => {
   it('returns 401 without a token', async () => {
     const res = await request(buildApp()).post('/api/users/me/flip');
@@ -102,12 +127,15 @@ describe('DELETE /api/users/me/options/:restaurantId', () => {
 });
 
 describe('DELETE /api/users/me', () => {
+  beforeEach(() => jest.clearAllMocks());
+
   it('returns 401 without auth', async () => {
     const res = await request(buildApp()).delete('/api/users/me');
     expect(res.status).toBe(401);
   });
 
   it('deletes the user, clears the token cookie, and returns 200', async () => {
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([]);
     (mockPrisma.user.delete as jest.Mock).mockResolvedValue({});
 
     const res = await request(buildApp())
@@ -123,6 +151,69 @@ describe('DELETE /api/users/me', () => {
     const headerStr = Array.isArray(setCookie) ? setCookie.join('\n') : (setCookie ?? '');
     expect(headerStr).toMatch(/^token=/m);
     expect(headerStr).not.toMatch(/^sid=/m);
+  });
+
+  it('anonymizes reviews by default (no review.deleteMany before user.delete)', async () => {
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 11 },
+      { restaurantId: 22 },
+    ]);
+    (mockPrisma.user.delete as jest.Mock).mockResolvedValue({});
+
+    const res = await request(buildApp())
+      .delete('/api/users/me')
+      .set('Cookie', authCookie())
+      .send({});
+
+    expect(res.status).toBe(200);
+    // No explicit review delete — the FK cascade (SetNull) handles anonymization
+    expect(mockPrisma.review.deleteMany).not.toHaveBeenCalled();
+    expect(mockPrisma.user.delete).toHaveBeenCalled();
+  });
+
+  it('retracts reviews when retractReviews=true (deletes review rows before user.delete)', async () => {
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 11 },
+    ]);
+    (mockPrisma.review.deleteMany as jest.Mock).mockResolvedValue({ count: 3 });
+    (mockPrisma.user.delete as jest.Mock).mockResolvedValue({});
+
+    const res = await request(buildApp())
+      .delete('/api/users/me')
+      .set('Cookie', authCookie())
+      .send({ retractReviews: true });
+
+    expect(res.status).toBe(200);
+    // Server should delete reviews up front so they don't hit the SetNull cascade
+    expect(mockPrisma.review.deleteMany).toHaveBeenCalledWith({ where: { userId: 1 } });
+    expect(mockPrisma.user.delete).toHaveBeenCalled();
+  });
+
+  it('triggers communityRating recompute for every distinct restaurant the user reviewed', async () => {
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 11 },
+      { restaurantId: 22 },
+      { restaurantId: 33 },
+    ]);
+    (mockPrisma.review.groupBy as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.user.delete as jest.Mock).mockResolvedValue({});
+    (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({});
+
+    const res = await request(buildApp())
+      .delete('/api/users/me')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    // findMany on review is called twice per restaurant (one for the route's
+    // "what did this user touch" pass, three for recomputeCommunityRating's
+    // orphan-row lookup). Asserting on restaurant.update is the cleanest
+    // signal: one update per distinct restaurant the user reviewed.
+    // Use await + tiny tick so the fire-and-forget recomputes settle.
+    await new Promise((r) => setTimeout(r, 10));
+    const updatedRestaurantIds = (mockPrisma.restaurant.update as jest.Mock).mock.calls
+      .map((args: [{ where: { id: number } }]) => args[0].where.id)
+      .sort();
+    expect(updatedRestaurantIds).toEqual([11, 22, 33]);
   });
 });
 
@@ -153,7 +244,10 @@ describe('DELETE /api/users/me/history/:restaurantId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.message).toBe('Removed from history');
-    expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+    // The five table-deletes ride in one `$transaction([...])`. We don't
+    // assert on the total $transaction call count anymore — the recompute
+    // now fires a separate interactive transaction in the background, so
+    // the count is non-deterministic at this synchronous assertion point.
     expect(mockPrisma.userFavorite.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
     expect(mockPrisma.userOption.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
     expect(mockPrisma.userArchive.deleteMany).toHaveBeenCalledWith({ where: { userId: 1, restaurantId: 5 } });
@@ -199,10 +293,13 @@ describe('POST /api/users/me/reviews — community rating side effect', () => {
       id: 42, userId: 1, restaurantId: 5, rating: 4, content: 'Solid', createdAt: new Date(),
       restaurant: { id: 5, name: 'Pizza Place' },
     });
+    // Per-user averages for currently-registered users.
     (mockPrisma.review.groupBy as jest.Mock).mockResolvedValue([
       { userId: 1, _avg: { rating: 4 } },
       { userId: 2, _avg: { rating: 5 } },
     ]);
+    // Orphan reviews (from deleted accounts) — none in this scenario.
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([]);
     (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({});
 
     const res = await request(buildApp())
@@ -215,9 +312,11 @@ describe('POST /api/users/me/reviews — community rating side effect', () => {
 
     // recomputeCommunityRating fires async — wait a tick for it to run
     await new Promise((r) => setImmediate(r));
+    // The new groupBy filters out null-user rows (those are handled separately
+    // as orphans). Existing test pre-rollout asserted on the un-filtered shape.
     expect(mockPrisma.review.groupBy).toHaveBeenCalledWith(expect.objectContaining({
       by: ['userId'],
-      where: { restaurantId: 5 },
+      where: { restaurantId: 5, userId: { not: null } },
     }));
     expect(mockPrisma.restaurant.update).toHaveBeenCalledWith({
       where: { id: 5 },
@@ -225,10 +324,41 @@ describe('POST /api/users/me/reviews — community rating side effect', () => {
     });
   });
 
+  it('mixes orphan reviews into the community average (one bucket per orphan row)', async () => {
+    (mockPrisma.review.create as jest.Mock).mockResolvedValue({
+      id: 99, userId: 1, restaurantId: 5, rating: 5, content: null, createdAt: new Date(),
+      restaurant: { id: 5, name: 'Pizza Place' },
+    });
+    // Two real users (avg 4 each) plus two orphan rows from deleted accounts.
+    (mockPrisma.review.groupBy as jest.Mock).mockResolvedValue([
+      { userId: 1, _avg: { rating: 4 } },
+      { userId: 2, _avg: { rating: 4 } },
+    ]);
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([
+      { rating: 5 },
+      { rating: 3 },
+    ]);
+    (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({});
+
+    const res = await request(buildApp())
+      .post('/api/users/me/reviews')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5, rating: 5 });
+
+    expect(res.status).toBe(201);
+    await new Promise((r) => setImmediate(r));
+    // (4 + 4 + 5 + 3) / 4 = 4.0 — orphans count individually, real users group.
+    expect(mockPrisma.restaurant.update).toHaveBeenCalledWith({
+      where: { id: 5 },
+      data: { communityRating: 4 },
+    });
+  });
+
   it('sets communityRating to null when no reviews remain after delete', async () => {
     (mockPrisma.review.findFirst as jest.Mock).mockResolvedValue({ restaurantId: 7 });
     (mockPrisma.review.deleteMany as jest.Mock).mockResolvedValue({ count: 1 });
     (mockPrisma.review.groupBy as jest.Mock).mockResolvedValue([]); // no reviewers left
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([]); // no orphans either
     (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({});
 
     const res = await request(buildApp())
@@ -552,5 +682,180 @@ describe('GET /api/users/me/insights', () => {
     expect(res.body.topConsidered).toEqual([]);  // considered=0 filtered out
     expect(res.body.distinctChosen).toBe(1);
     expect(res.body.methodCounts).toEqual({ unknown: 1 });
+  });
+
+  it('returns weekdayCounts shaped as a 7-element array bucketed by UTC day', async () => {
+    // 2026-05-01 is a Friday (UTC), 2026-05-03 is a Sunday. Two Fridays + one
+    // Sunday → counts[5] === 2, counts[0] === 1.
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 1, acceptedAt: new Date('2026-05-01T18:00:00Z'),
+        optionsSnapshot: ['1'], chooseMethod: 'flip',
+        restaurant: { id: 1, name: 'A', cuisineType: null } },
+      { restaurantId: 1, acceptedAt: new Date('2026-05-08T18:00:00Z'),
+        optionsSnapshot: ['1'], chooseMethod: 'flip',
+        restaurant: { id: 1, name: 'A', cuisineType: null } },
+      { restaurantId: 2, acceptedAt: new Date('2026-05-03T18:00:00Z'),
+        optionsSnapshot: ['2'], chooseMethod: 'flip',
+        restaurant: { id: 2, name: 'B', cuisineType: null } },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.weekdayCounts)).toBe(true);
+    expect(res.body.weekdayCounts).toHaveLength(7);
+    expect(res.body.weekdayCounts[0]).toBe(1);  // Sunday
+    expect(res.body.weekdayCounts[5]).toBe(2);  // Friday
+    // Other days unchanged
+    expect(res.body.weekdayCounts.reduce((a: number, b: number) => a + b, 0)).toBe(3);
+  });
+
+  it('honors the `since` query param by restricting acceptedAt at the DB layer', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights?since=week')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.since).toBe('week');
+    // The route should have filtered on acceptedAt >= (now - 7 days). We can't
+    // pin the exact timestamp without freezing time, but we can assert the
+    // shape of the where-clause.
+    const args = (mockPrisma.userAccepted.findMany as jest.Mock).mock.calls[0][0];
+    expect(args.where.acceptedAt).toBeDefined();
+    expect(args.where.acceptedAt.gte).toBeInstanceOf(Date);
+  });
+
+  it('ignores unknown `since` values and falls back to all-time', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights?since=bogus')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.since).toBe('bogus'); // echoed back as-is — no harm
+    // No acceptedAt filter applied since the value didn't match a known window
+    const args = (mockPrisma.userAccepted.findMany as jest.Mock).mock.calls[0][0];
+    expect(args.where.acceptedAt).toBeUndefined();
+  });
+
+  it('computes varietyScore as distinctChosen / totalDecisions × 10', async () => {
+    // 3 decisions across 2 distinct restaurants → 2/3 × 10 = 6.666... → 6.7
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 1, acceptedAt: new Date('2026-05-01'), optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 1, name: 'A', cuisineType: null } },
+      { restaurantId: 1, acceptedAt: new Date('2026-05-02'), optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 1, name: 'A', cuisineType: null } },
+      { restaurantId: 2, acceptedAt: new Date('2026-05-03'), optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 2, name: 'B', cuisineType: null } },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalDecisions).toBe(3);
+    expect(res.body.distinctChosen).toBe(2);
+    expect(res.body.varietyScore).toBeCloseTo(6.7, 1);
+  });
+
+  it('varietyScore is 0 when there are no decisions (avoids divide-by-zero)', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+    expect(res.body.varietyScore).toBe(0);
+  });
+
+  it('returns neglected favorites: favorited + never picked OR last-pick older than threshold', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+    // Three favorites: A (never chosen) → neglected; B (chosen yesterday) → not
+    // neglected; C (chosen 90 days ago) → neglected. Server's threshold is 60d.
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    (mockPrisma.userFavorite.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 1, restaurant: { id: 1, name: 'Never Joe',  cuisineType: 'Pizza' } },
+      { restaurantId: 2, restaurant: { id: 2, name: 'Recent Tom', cuisineType: 'Thai'  } },
+      { restaurantId: 3, restaurant: { id: 3, name: 'Old Pete',   cuisineType: 'Sushi' } },
+    ]);
+    (mockPrisma.userAccepted.groupBy as jest.Mock).mockResolvedValue([
+      { restaurantId: 2, _max: { acceptedAt: new Date() } },
+      { restaurantId: 3, _max: { acceptedAt: ninetyDaysAgo } },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.neglectedFavorites)).toBe(true);
+    expect(res.body.neglectedFavorites).toHaveLength(2);
+    // Never-chosen ranks first (most neglected); 90-day-old second
+    expect(res.body.neglectedFavorites[0].name).toBe('Never Joe');
+    expect(res.body.neglectedFavorites[0].lastChosenAt).toBeNull();
+    expect(res.body.neglectedFavorites[1].name).toBe('Old Pete');
+    expect(res.body.neglectedFavorites[1].lastChosenAt).not.toBeNull();
+  });
+
+  it('neglectedFavorites is empty when user has no favorites at all', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userFavorite.findMany as jest.Mock).mockResolvedValue([]);
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+    expect(res.body.neglectedFavorites).toEqual([]);
+    // And no groupBy call needs to have run — the route should short-circuit
+    expect(mockPrisma.userAccepted.groupBy).not.toHaveBeenCalled();
+  });
+
+  it('returns previousPeriodCount only when `since` is windowed', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userAccepted.count as jest.Mock).mockResolvedValue(7);
+
+    // since=all → null
+    const allRes = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+    expect(allRes.body.previousPeriodCount).toBeNull();
+
+    // since=month → server should run a count() bounded by (now - 60d, now - 30d)
+    const monthRes = await request(buildApp()).get('/api/users/me/insights?since=month').set('Cookie', authCookie());
+    expect(monthRes.body.previousPeriodCount).toBe(7);
+    const countArgs = (mockPrisma.userAccepted.count as jest.Mock).mock.calls[0][0];
+    expect(countArgs.where.acceptedAt.gte).toBeInstanceOf(Date);
+    expect(countArgs.where.acceptedAt.lt).toBeInstanceOf(Date);
+    // The window width matches the `since` value
+    const widthDays = (countArgs.where.acceptedAt.lt.getTime() - countArgs.where.acceptedAt.gte.getTime()) / (24 * 60 * 60 * 1000);
+    expect(Math.round(widthDays)).toBe(30);
+  });
+
+  it('cuisineWeeklyCounts bucket totals match the number of recent rows per cuisine', async () => {
+    const now = new Date();
+    // 3 Italian + 1 Thai acceptances in the last few weeks (all inside the 12-week window).
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      { restaurantId: 1, acceptedAt: now, optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 1, name: 'A', cuisineType: 'Italian' }, eventId: null, event: null },
+      { restaurantId: 1, acceptedAt: new Date(now.getTime() - 5 * 86_400_000), optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 1, name: 'A', cuisineType: 'Italian' }, eventId: null, event: null },
+      { restaurantId: 1, acceptedAt: new Date(now.getTime() - 8 * 86_400_000), optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 1, name: 'A', cuisineType: 'Italian' }, eventId: null, event: null },
+      { restaurantId: 2, acceptedAt: new Date(now.getTime() - 3 * 86_400_000), optionsSnapshot: null, chooseMethod: 'flip', restaurant: { id: 2, name: 'B', cuisineType: 'Thai' },    eventId: null, event: null },
+    ]);
+
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+    expect(res.body.cuisineWeeklyCounts).toBeDefined();
+    expect(res.body.cuisineWeeklyCounts.Italian).toHaveLength(12);
+    expect(res.body.cuisineWeeklyCounts.Italian.reduce((a: number, b: number) => a + b, 0)).toBe(3);
+    expect(res.body.cuisineWeeklyCounts.Thai.reduce((a: number, b: number) => a + b, 0)).toBe(1);
+  });
+
+  it('surfaces eventId + groupId on recent rows when the acceptance came from a group vote', async () => {
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      // Solo flip — no event link
+      { restaurantId: 1, acceptedAt: new Date(), optionsSnapshot: null, chooseMethod: 'flip',
+        restaurant: { id: 1, name: 'Solo', cuisineType: null },
+        eventId: null, event: null },
+      // Group vote — both ids surfaced
+      { restaurantId: 2, acceptedAt: new Date(), optionsSnapshot: null, chooseMethod: 'vote',
+        restaurant: { id: 2, name: 'Group Pick', cuisineType: null },
+        eventId: 42, event: { groupId: 7 } },
+    ]);
+
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+    expect(res.body.recent).toHaveLength(2);
+    expect(res.body.recent[0]).toMatchObject({ name: 'Solo',       eventId: null, groupId: null });
+    expect(res.body.recent[1]).toMatchObject({ name: 'Group Pick', eventId: 42,   groupId: 7    });
   });
 });

@@ -83,7 +83,11 @@ const ReviewsModal = ({
       visibleReviews.push({
         key:       `community-${r.id}`,
         source:    'community',
-        reviewer:  r.user?.username ?? 'Anonymous',
+        // Null user = the reviewer deleted their account but the review was
+        // kept (anonymized) so the community keeps the rating data. Match the
+        // copy used in RestaurantDetailModal so the deleted-user signal is
+        // consistent across the app.
+        reviewer:  r.user?.username ?? '[deleted user]',
         rating:    Number(r.rating),
         content:   r.content ?? '',
         date:      new Date(r.createdAt).toLocaleDateString(undefined, {
@@ -164,7 +168,7 @@ const ReviewsModal = ({
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value)}
-            className="text-xs rounded border border-gray-300 pl-2 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500"
+            className="text-xs rounded border border-gray-300 pl-2 pr-8 py-1 focus:outline-none focus:ring-1 focus:ring-orange-500"
           >
             {SORT_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>

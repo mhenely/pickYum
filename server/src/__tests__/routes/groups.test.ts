@@ -7,10 +7,16 @@ import { DeepMockProxy } from 'jest-mock-extended';
 
 jest.mock('../../lib/prisma');
 jest.mock('../../sessions', () => ({
-  createSession:  jest.fn(),
-  getSession:     jest.fn(),
-  saveSession:    jest.fn().mockResolvedValue(undefined),
-  notifyClients:  jest.fn(),
+  createSession:     jest.fn(),
+  getSession:        jest.fn(),
+  saveSession:       jest.fn().mockResolvedValue(undefined),
+  notifyClients:     jest.fn(),
+  // Pass-through: withSessionLock just runs the inner function in tests.
+  // The real implementation serializes via a per-id promise chain; the
+  // tests aren't exercising concurrency so a simple invocation matches
+  // the success-path contract while keeping mock results synchronous.
+  withSessionLock:   jest.fn((_id: string, fn: () => Promise<unknown>) => fn()),
+  generateSessionId: jest.fn(() => 'sess-mock-id'),
 }));
 
 import prisma from '../../lib/prisma';
@@ -306,14 +312,21 @@ describe('POST /api/groups/:id/events/:eventId/accept-result', () => {
   it('writes result + creates UserAccepted rows for host and matched members in one transaction', async () => {
     (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
     (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue(baseEvent);
-    getSession.mockResolvedValue(baseSession);
+    // The route now resolves participant userIds from session.voterMeta
+    // (entries with isGuest:false + userId set) instead of matching display
+    // names against the group member roster. Override bob's meta here so
+    // he's a signed-in voter with a userId — that's what now drives the
+    // UserAccepted write. Carol is NOT in voterMeta and shouldn't get a row.
+    getSession.mockResolvedValue({
+      ...baseSession,
+      voterMeta: {
+        alice: { isGuest: false, username: 'alice', userId: 1 },
+        bob:   { isGuest: false, username: 'bob',   userId: 2 },
+      },
+    });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([
       { id: 100, address: '1 Main St', website: 'pho99.test' },
       { id: 200, address: null, website: null },
-    ]);
-    (mockPrisma.groupMember.findMany as jest.Mock).mockResolvedValue([
-      { user: { id: 2, username: 'bob' } },
-      { user: { id: 3, username: 'carol' } }, // not in voters — must NOT get an acceptance row
     ]);
     (mockPrisma.$transaction as jest.Mock).mockResolvedValue([{}, {}]);
 
@@ -345,18 +358,21 @@ describe('POST /api/groups/:id/events/:eventId/accept-result', () => {
     const pool = upsertArgs.create.restaurantPool as Array<Record<string, unknown>>;
     expect(pool[0]).toEqual(expect.objectContaining({ id: '100', address: '1 Main St', website: 'pho99.test' }));
 
-    // Host gets a UserAccepted row
-    expect(mockPrisma.userAccepted.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ userId: 1, restaurantId: 100 }) }),
+    // Host + signed-in voters share one createMany INSERT — was previously
+    // N individual `userAccepted.create` round-trips. The @@unique on
+    // (userId, eventId) + skipDuplicates makes this idempotent for retries.
+    expect(mockPrisma.userAccepted.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skipDuplicates: true,
+        data: expect.arrayContaining([
+          expect.objectContaining({ userId: 1, restaurantId: 100, eventId: 10 }), // host
+          expect.objectContaining({ userId: 2, restaurantId: 100, eventId: 10 }), // bob (signed-in)
+        ]),
+      }),
     );
-    // Bob (matched username) gets one
-    expect(mockPrisma.userAccepted.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ userId: 2, restaurantId: 100 }) }),
-    );
-    // Carol (no participant entry) does NOT
-    expect(mockPrisma.userAccepted.create).not.toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ userId: 3 }) }),
-    );
+    // Carol isn't in voterMeta at all (didn't vote) — must NOT be in the rows.
+    const createManyArgs = (mockPrisma.userAccepted.createMany as jest.Mock).mock.calls[0][0];
+    expect(createManyArgs.data.find((r: { userId: number }) => r.userId === 3)).toBeUndefined();
   });
 
   it('skips UserAccepted writes if winner id is not numeric (custom restaurant edge case)', async () => {
@@ -377,6 +393,8 @@ describe('POST /api/groups/:id/events/:eventId/accept-result', () => {
       .set('Cookie', authCookie(1));
 
     expect(res.status).toBe(200);
+    // Non-numeric winner id (custom restaurant) → no UserAccepted writes at all.
+    expect(mockPrisma.userAccepted.createMany).not.toHaveBeenCalled();
     expect(mockPrisma.userAccepted.create).not.toHaveBeenCalled();
   });
 });
@@ -490,7 +508,10 @@ describe('PATCH /api/groups/:id/transfer-host', () => {
   it('atomically promotes the new host and demotes the old', async () => {
     (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
     (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 2 });
-    (mockPrisma.$transaction as jest.Mock).mockResolvedValue([{}, {}, {}]);
+    // Interactive transaction now — `(fn) => fn(mockPrisma)` lets the
+    // inner mutations run against the mock prisma client.
+    (mockPrisma.$transaction as jest.Mock).mockImplementation(async (fn) => fn(mockPrisma));
+    (mockPrisma.group.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
 
     const res = await request(buildApp())
       .patch('/api/groups/1/transfer-host')
@@ -500,10 +521,40 @@ describe('PATCH /api/groups/:id/transfer-host', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ message: 'Host transferred', hostId: 2 });
     expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
-    // Verify the swap shape: delete new host's GroupMember, update Group.hostId, insert old host as member.
+    // Verify the swap shape — delete the new host's existing member row,
+    // updateMany on group guarded by the EXPECTED previous host id, and
+    // upsert the demoted host's row (so a pre-existing member row from
+    // an earlier transfer-host doesn't 500 with P2002).
     expect(mockPrisma.groupMember.deleteMany).toHaveBeenCalledWith({ where: { groupId: 1, userId: 2 } });
-    expect(mockPrisma.group.update).toHaveBeenCalledWith({ where: { id: 1 }, data: { hostId: 2 } });
-    expect(mockPrisma.groupMember.create).toHaveBeenCalledWith({ data: { groupId: 1, userId: 1 } });
+    expect(mockPrisma.group.updateMany).toHaveBeenCalledWith({
+      where: { id: 1, hostId: 1 },
+      data:  { hostId: 2 },
+    });
+    expect(mockPrisma.groupMember.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where:  { groupId_userId: { groupId: 1, userId: 1 } },
+        create: { groupId: 1, userId: 1 },
+        update: {},
+      }),
+    );
+  });
+
+  it('returns 409 when a concurrent transfer-host won the race', async () => {
+    // Pre-flight passes (hostId=1) but by the time the inner update fires,
+    // another request has already moved hostId to someone else, so the
+    // guarded updateMany hits 0 rows.
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 2 });
+    (mockPrisma.$transaction as jest.Mock).mockImplementation(async (fn) => fn(mockPrisma));
+    (mockPrisma.group.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+    const res = await request(buildApp())
+      .patch('/api/groups/1/transfer-host')
+      .set('Cookie', authCookie(1))
+      .send({ newHostId: 2 });
+
+    expect(res.status).toBe(409);
+    expect(mockPrisma.groupMember.upsert).not.toHaveBeenCalled();
   });
 });
 
@@ -551,6 +602,52 @@ describe('POST /api/groups/:id/events (any-member creation)', () => {
       .set('Cookie', authCookie(1))
       .send({ name: 'Too late' });
     expect(res.status).toBe(400);
+  });
+});
+
+// ── Add-event-option privacy boundary ──
+describe('POST /api/groups/:id/events/:eventId/options (privacy)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('rejects adding a private restaurant owned by another user', async () => {
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+      id: 7, private: true, createdBy: 99, // owned by someone else
+    });
+
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/options')
+      .set('Cookie', authCookie(5))
+      .send({ restaurantId: 7 });
+
+    expect(res.status).toBe(404); // visibility-preserving — don't reveal it exists
+    expect(mockPrisma.groupEventOption.upsert).not.toHaveBeenCalled();
+  });
+
+  it('auto-publishes a private restaurant when its creator shares it', async () => {
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+      id: 7, private: true, createdBy: 5, // owned by the caller
+    });
+    (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({ id: 7, private: false });
+    (mockPrisma.groupEventOption.upsert as jest.Mock).mockResolvedValue({ id: 1, eventId: 10, restaurantId: 7 });
+
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/options')
+      .set('Cookie', authCookie(5))
+      .send({ restaurantId: 7 });
+
+    expect(res.status).toBe(201);
+    expect(mockPrisma.restaurant.update).toHaveBeenCalledWith({
+      where: { id: 7 },
+      data: { private: false },
+    });
   });
 });
 
@@ -666,6 +763,9 @@ describe('Group favorites (CRUD)', () => {
   it('POST upserts so re-adding a favorite is idempotent', async () => {
     (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
     (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    // Privacy check loads the restaurant first — return a public row so the
+    // route proceeds to the favorite upsert.
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({ private: false, createdBy: null });
     (mockPrisma.groupFavorite.upsert as jest.Mock).mockResolvedValue({
       groupId: 1, restaurantId: 10, addedById: 5,
     });
@@ -784,5 +884,207 @@ describe('GET /api/groups/:id/insights', () => {
     // Pizza Place: considered once, never won — fits oftenSkipped only when ≥2 considerations,
     // so with only 1 consideration it shouldn't appear there. Verify.
     expect(res.body.oftenSkipped.find((r: { restaurantId: string }) => r.restaurantId === '3')).toBeUndefined();
+  });
+
+  it('builds memberCuisines fingerprint, hiding members with <3 contributions', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 1 });
+    (mockPrisma.groupEventResult.findMany as jest.Mock).mockResolvedValue([]);
+    // Alice proposes 3× Italian + 1× Thai (4 total → shows up);
+    // Bob proposes 2× Sushi (2 total → below the 3-add cutoff, filtered out).
+    (mockPrisma.groupEventOption.findMany as jest.Mock).mockResolvedValue([
+      { addedBy: { username: 'alice' }, restaurant: { cuisineType: 'Italian' } },
+      { addedBy: { username: 'alice' }, restaurant: { cuisineType: 'Italian' } },
+      { addedBy: { username: 'alice' }, restaurant: { cuisineType: 'Italian' } },
+      { addedBy: { username: 'alice' }, restaurant: { cuisineType: 'Thai'    } },
+      { addedBy: { username: 'bob'   }, restaurant: { cuisineType: 'Sushi'   } },
+      { addedBy: { username: 'bob'   }, restaurant: { cuisineType: 'Sushi'   } },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/groups/1/insights')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body.memberCuisines).toBeDefined();
+    expect(res.body.memberCuisines.alice).toEqual([
+      { cuisine: 'Italian', count: 3 },
+      { cuisine: 'Thai',    count: 1 },
+    ]);
+    expect(res.body.memberCuisines.bob).toBeUndefined(); // below threshold
+  });
+
+  it('counts ranked-vote alignment when voter ranks the winner #1', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 1 });
+    // One ranked event: winner is Pho (id 1). Alice ranked Pho #1 (aligned);
+    // Bob ranked Sushi #1 with Pho second (not aligned by strict-#1 rule).
+    (mockPrisma.groupEventResult.findMany as jest.Mock).mockResolvedValue([
+      {
+        winnerName: 'Pho 99', method: 'vote', voteMethod: 'ranked',
+        participants: ['alice', 'bob'],
+        restaurantPool: [{ id: 1, name: 'Pho 99' }, { id: 2, name: 'Sushi Bar' }],
+        ballots: {
+          alice: ['1', '2'],
+          bob:   ['2', '1'],
+        },
+        createdAt: new Date('2026-05-01'),
+        event: { id: 1, name: 'Friday', voteMethod: 'RANKED', scheduledFor: null },
+      },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/groups/1/insights')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body.memberWinAccuracy.alice).toMatchObject({ picks: 1, wins: 1, rate: 1 });
+    expect(res.body.memberWinAccuracy.bob).toMatchObject({ picks: 1, wins: 0, rate: 0 });
+  });
+});
+
+// ── voterMeta currentUsername enrichment on the ballot-detail endpoint ──
+describe('GET /api/groups/:id/events/:eventId (voterMeta enrichment)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('sets currentUsername when a voter has renamed since the vote', async () => {
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1,
+      result: {
+        winnerName: 'Pho 99',
+        method: 'vote',
+        voteMethod: 'simple',
+        voterMeta: {
+          // Voter chose display name "Alice"; was signed in as @alice_old at vote time.
+          'Alice': { isGuest: false, username: 'alice_old', userId: 42 },
+          // Bob has not renamed — currentUsername should come back null.
+          'Bob':   { isGuest: false, username: 'bobsmith',  userId: 7  },
+          // Guest — no userId, no enrichment.
+          'Guest': { isGuest: true,  username: null,        userId: null },
+        },
+      },
+    });
+    // The lookup returns Alice's CURRENT name (renamed since) and Bob's unchanged.
+    (mockPrisma.user.findMany as jest.Mock).mockResolvedValue([
+      { id: 42, username: 'alice_new' },
+      { id: 7,  username: 'bobsmith'  },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/groups/1/events/10')
+      .set('Cookie', authCookie(5));
+
+    expect(res.status).toBe(200);
+    expect(res.body.event.result.voterMeta.Alice).toMatchObject({
+      username: 'alice_old',       // historical
+      currentUsername: 'alice_new', // live — different from historical
+    });
+    expect(res.body.event.result.voterMeta.Bob).toMatchObject({
+      username: 'bobsmith',
+      currentUsername: null,        // unchanged
+    });
+    expect(res.body.event.result.voterMeta.Guest).toMatchObject({
+      isGuest: true,
+      currentUsername: null,        // no userId → no lookup
+    });
+  });
+
+  it('handles a deleted account by leaving currentUsername null', async () => {
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1,
+      result: {
+        winnerName: 'Pho',
+        method: 'vote',
+        voteMethod: 'simple',
+        voterMeta: {
+          'Ghost': { isGuest: false, username: 'ghost_old', userId: 999 },
+        },
+      },
+    });
+    // User no longer exists in the lookup result
+    (mockPrisma.user.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/groups/1/events/10')
+      .set('Cookie', authCookie(5));
+
+    expect(res.status).toBe(200);
+    expect(res.body.event.result.voterMeta.Ghost).toMatchObject({
+      username: 'ghost_old',
+      currentUsername: null, // account gone — no live name to surface
+    });
+  });
+
+  it('skips the user lookup entirely when voterMeta has no userIds (pre-rollout / guest-only)', async () => {
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1,
+      result: {
+        winnerName: 'Pho',
+        method: 'vote',
+        voteMethod: 'simple',
+        // No userId on any entry — legacy data.
+        voterMeta: {
+          'Alice': { isGuest: false, username: 'alice' },
+        },
+      },
+    });
+
+    const res = await request(buildApp())
+      .get('/api/groups/1/events/10')
+      .set('Cookie', authCookie(5));
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.user.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ── voterMeta enrichment on the group-detail endpoint ──
+// The same enrichment is applied to every event.result on GET /api/groups/:id
+// so the inline ResultDisplay component (not just the ballot modal) can show
+// rename info on host labels and participant pills.
+describe('GET /api/groups/:id (voterMeta enrichment)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('enriches voterMeta on every event.result in the group payload', async () => {
+    (mockPrisma.groupMember.findUnique as jest.Mock).mockResolvedValue({ groupId: 1, userId: 5 });
+    // Single persistent mock that satisfies both findUnique calls the route
+    // makes (archivedAt-only select + the full include). The full payload
+    // already carries `archivedAt: null` so the auto-launch check is happy.
+    // Persistent (not Once) so we don't have to know the exact call count
+    // and so earlier tests' un-consumed Once-queue doesn't leak through.
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue({
+      id: 1, name: 'Group', hostId: 5, archivedAt: null,
+      host: { id: 5, username: 'host', avatarUrl: null },
+      members: [],
+      invites: [],
+      events: [
+        {
+          id: 10, name: 'Friday Night', status: 'DONE',
+          result: {
+            winnerName: 'Pho',
+            voterMeta: {
+              'Alice': { isGuest: false, username: 'alice_old', userId: 42 },
+            },
+          },
+        },
+      ],
+    });
+    (mockPrisma.groupEvent.findMany as jest.Mock).mockResolvedValue([]); // no overdue events
+    (mockPrisma.user.findMany as jest.Mock).mockResolvedValue([
+      { id: 42, username: 'alice_new' }, // Alice has renamed
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/groups/1')
+      .set('Cookie', authCookie(5));
+
+    expect(res.status).toBe(200);
+    expect(res.body.group.events[0].result.voterMeta.Alice).toMatchObject({
+      username: 'alice_old',
+      currentUsername: 'alice_new',
+    });
   });
 });

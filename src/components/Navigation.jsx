@@ -10,6 +10,7 @@ import useCurrentUser from "../hooks/useCurrentUser";
 import RestaurantDetailModal from "./RestaurantDetailModal";
 import { socialApi } from "../lib/socialApi";
 import { groupsApi } from "../lib/groupsApi";
+import { api } from "../lib/api";
 
 const GenericAvatar = () => (
   <div className="h-8 w-8 rounded-full bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center shadow-brand-sm">
@@ -21,6 +22,19 @@ const GenericAvatar = () => (
 
 function classNames(...classes) {
   return classes.filter(Boolean).join(' ');
+}
+
+// Shallow id-list compare used by the notification poll. Returns true when
+// two arrays carry the same items in the same order (compared by id
+// extractor) — letting the poll bail out of setState when the result hasn't
+// changed, avoiding the full navbar + chip-strip re-render every 60s.
+function sameIds(a, b, getId) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (getId(a[i]) !== getId(b[i])) return false;
+  }
+  return true;
 }
 
 const NavBar = () => {
@@ -35,9 +49,10 @@ const NavBar = () => {
   const allRestaurants = customRestaurants;
   const isAuthenticated = useSelector((state) => state.auth.status === 'authenticated');
 
-  // ── Notifications (friend requests + group invites + voting alerts) ─
+  // ── Notifications (friend requests + group invites + trip invites + voting alerts) ─
   const [pendingRequests, setPendingRequests] = useState([]);
   const [pendingGroupInvites, setPendingGroupInvites] = useState([]);
+  const [pendingTripInvites, setPendingTripInvites] = useState([]);
   // Active group votes the user can join right now. Flattened from
   // groups.events[] — one entry per VOTING event with a live sessionId so the
   // notification link goes straight to the voting page.
@@ -46,12 +61,15 @@ const NavBar = () => {
   const fetchNotifications = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const [{ requests }, { pendingInvites, groups }] = await Promise.all([
+      // Three parallel calls so the bell renders quickly even when one
+      // is slow. Failure on any one is non-fatal — the catch outside
+      // still suppresses; individual fields just stay empty until next
+      // poll.
+      const [{ requests }, { pendingInvites, groups }, { invites: tripInvites }] = await Promise.all([
         socialApi.getIncoming(),
         groupsApi.list(),
+        api.trips.listMyInvites(),
       ]);
-      setPendingRequests(requests);
-      setPendingGroupInvites(pendingInvites);
 
       // Walk every group the user is in, surface each event currently in
       // VOTING status. (The old code filtered `groups` by a non-existent
@@ -70,18 +88,68 @@ const NavBar = () => {
           }
         }
       }
-      setActiveVotes(votes);
+
+      // Equality-gated setStates. Every 60s poll used to fire four
+      // unconditional setState calls — each one re-rendered the entire
+      // navbar (and the options chip strip, and the bell dropdown) even
+      // when the poll result was identical to the previous tick. Compare
+      // by length + per-row id and bail if nothing changed.
+      setPendingRequests((prev) =>
+        sameIds(prev, requests, (r) => r?.id) ? prev : requests);
+      setPendingGroupInvites((prev) =>
+        sameIds(prev, pendingInvites, (i) => i?.id) ? prev : pendingInvites);
+      setPendingTripInvites((prev) =>
+        sameIds(prev, tripInvites, (i) => i?.id) ? prev : tripInvites);
+      setActiveVotes((prev) =>
+        sameIds(prev, votes, (v) => v?.sessionId) ? prev : votes);
     } catch { /* non-fatal */ }
   }, [isAuthenticated]);
 
   // Background poll for incoming friend requests, group invites, and live votes.
   // 60s is a compromise: tight enough to feel near-realtime for invites, loose
   // enough that two background tabs aren't generating one request/sec total.
+  //
+  // Polling pauses while the tab is hidden — no point burning API calls and
+  // mobile battery for notifications the user can't see. When the tab
+  // returns to focus, we immediately fetch once (so a user coming back to
+  // pickYum after lunch sees notifications without a 60s delay) and then
+  // resume the interval. visibilitychange + the conditional inside the
+  // interval handler together cover both "tab goes hidden mid-poll" and
+  // "tab was already hidden when we mounted".
   const NOTIFICATIONS_POLL_INTERVAL_MS = 60_000;
   useEffect(() => {
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, NOTIFICATIONS_POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
+    let interval = null;
+
+    const startPolling = () => {
+      if (interval) return;
+      // Fire one immediate fetch so the visible UI is fresh, then resume
+      // the cadence.
+      fetchNotifications();
+      interval = setInterval(() => {
+        if (document.hidden) return; // belt-and-braces; visibilitychange below stops it
+        fetchNotifications();
+      }, NOTIFICATIONS_POLL_INTERVAL_MS);
+    };
+
+    const stopPolling = () => {
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) stopPolling();
+      else                 startPolling();
+    };
+
+    if (!document.hidden) startPolling();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      stopPolling();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [fetchNotifications]);
 
   const handleAccept = async (requestId) => {
@@ -105,7 +173,17 @@ const NavBar = () => {
     } catch { /* ignore */ }
   };
 
+  const handleTripInviteRespond = async (invite, action) => {
+    try {
+      await api.trips.respondToInvite(invite.tripId, invite.id, action);
+      await fetchNotifications();
+    } catch { /* ignore */ }
+  };
+
   const handleLogout = () => {
+    // The auth slice + listener now wipe local user data on BOTH fulfilled
+    // and rejected, so `.then()` works for the navigation regardless of API
+    // outcome. The user lands on home with no residual data either way.
     dispatch(logoutUser()).then(() => navigate('/'));
   };
 
@@ -114,6 +192,7 @@ const NavBar = () => {
     { name: 'Compare',  link: '/restaurant',       active: pathname.startsWith('/restaurant') },
     { name: 'Choose',   link: `/choose/${userId}`, active: pathname.startsWith('/choose') },
     { name: 'Socials',  link: '/socials',          active: pathname.startsWith('/socials') || pathname.startsWith('/groups'), authOnly: true },
+    { name: 'Trips',    link: '/trips',            active: pathname.startsWith('/trips'), authOnly: true },
     { name: 'Insights', link: '/insights',         active: pathname.startsWith('/insights'), authOnly: true },
   ];
 
@@ -126,7 +205,13 @@ const NavBar = () => {
 
   return (
     <>
-      <div className="min-h-full">
+      {/* App shell: full-viewport flex column. Nav + banners take their
+          natural height, <main> grows to fill the remainder so the Footer
+          anchors at the bottom of the viewport on short pages but stays
+          below content (and the page scrolls) on long ones. Replaces the
+          old `min-h-full` wrapper which had no effect — Footer's mt-auto
+          only works inside a flex column. */}
+      <div className="min-h-screen flex flex-col">
         <Disclosure as="nav" className="bg-white border-b border-orange-200" style={{boxShadow: '0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06)'}}>
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <div className="flex h-16 items-center justify-between">
@@ -159,6 +244,11 @@ const NavBar = () => {
                             {pendingGroupInvites.length + activeVotes.length}
                           </span>
                         )}
+                        {item.name === 'Trips' && pendingTripInvites.length > 0 && (
+                          <span className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
+                            {pendingTripInvites.length}
+                          </span>
+                        )}
                       </Link>
                     ))}
                   </div>
@@ -176,9 +266,9 @@ const NavBar = () => {
                     <Menu as="div" className="relative">
                       <MenuButton className="relative flex items-center rounded-md p-2 text-stone-500 hover:bg-orange-50 hover:text-orange-600 transition-colors">
                         <BellIcon className="h-5 w-5" />
-                        {(pendingRequests.length + pendingGroupInvites.length + activeVotes.length) > 0 && (
+                        {(pendingRequests.length + pendingGroupInvites.length + pendingTripInvites.length + activeVotes.length) > 0 && (
                           <span className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
-                            {pendingRequests.length + pendingGroupInvites.length + activeVotes.length}
+                            {pendingRequests.length + pendingGroupInvites.length + pendingTripInvites.length + activeVotes.length}
                           </span>
                         )}
                       </MenuButton>
@@ -256,6 +346,49 @@ const NavBar = () => {
                                     </button>
                                     <button
                                       onClick={() => handleGroupInviteRespond(inv, 'decline')}
+                                      className="rounded px-2 py-1 text-xs font-medium text-gray-400 hover:text-red-400 transition-colors"
+                                    >
+                                      Decline
+                                    </button>
+                                  </div>
+                                </div>
+                              </MenuItem>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Trip invites — same structure as group invites
+                            above, just routed through the trips API. */}
+                        <div className="px-4 py-2.5 border-y border-gray-100">
+                          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                            Trip Invites
+                            {pendingTripInvites.length > 0 && (
+                              <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingTripInvites.length}</span>
+                            )}
+                          </p>
+                        </div>
+                        {pendingTripInvites.length === 0 ? (
+                          <p className="px-4 py-3 text-sm text-gray-400 italic">No pending trip invites</p>
+                        ) : (
+                          <div className="py-1 max-h-48 overflow-y-auto">
+                            {pendingTripInvites.map((inv) => (
+                              <MenuItem key={inv.id}>
+                                <div className="flex items-center justify-between px-4 py-2.5 gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-medium text-gray-800 truncate">{inv.trip.name}</p>
+                                    <p className="text-xs text-gray-400 truncate">
+                                      {inv.trip.destination} · from {inv.invitedBy.username}
+                                    </p>
+                                  </div>
+                                  <div className="flex gap-1.5 shrink-0">
+                                    <button
+                                      onClick={() => handleTripInviteRespond(inv, 'accept')}
+                                      className="rounded px-2 py-1 text-xs font-semibold bg-orange-500 text-white hover:bg-orange-400 transition-colors"
+                                    >
+                                      Accept
+                                    </button>
+                                    <button
+                                      onClick={() => handleTripInviteRespond(inv, 'decline')}
                                       className="rounded px-2 py-1 text-xs font-medium text-gray-400 hover:text-red-400 transition-colors"
                                     >
                                       Decline
@@ -377,6 +510,9 @@ const NavBar = () => {
                     {item.name === 'Groups' && (pendingGroupInvites.length + activeVotes.length) > 0 && (
                       <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingGroupInvites.length + activeVotes.length}</span>
                     )}
+                    {item.name === 'Trips' && pendingTripInvites.length > 0 && (
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingTripInvites.length}</span>
+                    )}
                   </span>
                 </DisclosureButton>
               ))}
@@ -436,6 +572,40 @@ const NavBar = () => {
                         </button>
                         <button
                           onClick={() => handleGroupInviteRespond(inv, 'decline')}
+                          className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Trip invites — mobile */}
+            {isAuthenticated && pendingTripInvites.length > 0 && (
+              <div className="border-t border-orange-100 px-4 py-3">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+                  Trip Invites
+                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingTripInvites.length}</span>
+                </p>
+                <div className="flex flex-col gap-2">
+                  {pendingTripInvites.map((inv) => (
+                    <div key={inv.id} className="flex items-start justify-between text-sm gap-2">
+                      <div className="min-w-0">
+                        <p className="text-gray-700 truncate">{inv.trip.name}</p>
+                        <p className="text-xs text-gray-400">{inv.trip.destination} · from {inv.invitedBy.username}</p>
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <button
+                          onClick={() => handleTripInviteRespond(inv, 'accept')}
+                          className="rounded px-2 py-1 text-xs font-semibold bg-orange-500 text-white hover:bg-orange-400 transition-colors"
+                        >
+                          Accept
+                        </button>
+                        <button
+                          onClick={() => handleTripInviteRespond(inv, 'decline')}
                           className="text-xs text-gray-500 hover:text-red-400 transition-colors"
                         >
                           Decline
@@ -508,7 +678,12 @@ const NavBar = () => {
           </DisclosurePanel>
         </Disclosure>
 
-        {(pathname === '/' || pathname.startsWith('/choose') || pathname.startsWith('/restaurant') || pathname.startsWith('/socials')) && (
+        {/* Banner shows the Options chip list on pages where it adds value as
+            an always-visible reminder — Search (/), Compare (/restaurant), and
+            Socials. Suppressed on /choose because that page already renders the
+            full Options grid with the same affordances (click to inspect, ✕ to
+            remove); the chips just steal vertical space and duplicate state. */}
+        {(pathname === '/' || pathname.startsWith('/restaurant') || pathname.startsWith('/socials')) && (
         <header className="bg-gradient-to-r from-orange-50 to-amber-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8 flex items-center gap-3 flex-wrap">
             <h1 className="text-xs font-bold tracking-widest text-orange-800 uppercase shrink-0">Options</h1>
@@ -540,7 +715,6 @@ const NavBar = () => {
           </div>
         </header>
         )}
-      </div>
 
       {!isAuthenticated && (
         <div className="bg-orange-50 border-b border-orange-200">
@@ -557,8 +731,16 @@ const NavBar = () => {
           </div>
         </div>
       )}
-      <Outlet />
+
+      {/* Outlet wrapped in a flex-1 main so it absorbs vertical slack and
+          pushes the Footer to the bottom of the viewport on short pages.
+          Routes that want their own internal flex layout can wrap their
+          root in `flex flex-col h-full` to fill this container. */}
+      <main className="flex-1 flex flex-col">
+        <Outlet />
+      </main>
       <Footer />
+      </div>{/* /app shell */}
 
       {detailId && (
         <RestaurantDetailModal

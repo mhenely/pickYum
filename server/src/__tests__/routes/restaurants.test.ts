@@ -121,6 +121,8 @@ describe('POST /api/restaurants', () => {
 
 describe('GET /api/restaurants/:id/reviews', () => {
   it('returns reviews and community rating', async () => {
+    // First findUnique is the visibility short-circuit: public row → keep going.
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({ private: false, createdBy: null });
     (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([]);
     (mockPrisma.review.aggregate as jest.Mock).mockResolvedValue({ _avg: { rating: null }, _count: 0 });
     (mockPrisma.review.groupBy as jest.Mock).mockResolvedValue([]);
@@ -132,5 +134,13 @@ describe('GET /api/restaurants/:id/reviews', () => {
     expect(res.body).toHaveProperty('communityRating');
     expect(res.body.averageRating).toBeNull();
     expect(res.body.total).toBe(0);
+  });
+
+  it('returns 404 for a private restaurant when the viewer is not the creator', async () => {
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({ private: true, createdBy: 99 });
+    const res = await request(buildApp()).get('/api/restaurants/1/reviews');
+    expect(res.status).toBe(404);
+    // The expensive aggregate query must not run if visibility short-circuits.
+    expect(mockPrisma.review.findMany).not.toHaveBeenCalled();
   });
 });

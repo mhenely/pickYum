@@ -7,6 +7,9 @@ import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { sessionApi } from '../lib/sessionApi';
 import { groupsApi } from '../lib/groupsApi';
+// Typed api wrapper — used here for the trip-event accept-result branch when
+// the session belongs to a trip rather than a group.
+import { api } from '../lib/api';
 import RouletteWheel from '../components/RouletteWheel';
 import InfoRow from '../components/InfoRow';
 import ScheduleModal from '../components/ScheduleModal';
@@ -16,6 +19,10 @@ import { normalizeUrl } from '../utils/normalizeUrl';
 import { buildGoogleCalendarUrl } from '../utils/calendarUtils';
 
 const SSE_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
+
+// See GroupDetailPage.jsx for rationale — stable empty-object sentinel
+// so the useSelector fallback doesn't churn on every dispatch.
+const EMPTY_OBJECT = Object.freeze({});
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -653,7 +660,7 @@ const ResultView = ({ session, isHost, onAccept, onRedo, onReject }) => {
 // ── Group winner modal ────────────────────────────────────────
 
 const GroupWinnerModal = ({ session, onClose, onAccept }) => {
-  const customRestaurants = useSelector((state) => state.userInfo?.customRestaurants ?? {});
+  const customRestaurants = useSelector((state) => state.userInfo?.customRestaurants ?? EMPTY_OBJECT);
   const userInfo = useSelector((state) => state.userInfo?.users?.[0]);
   const [copied, setCopied] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
@@ -1063,20 +1070,34 @@ const GroupSessionPage = () => {
   };
 
   const handleAcceptResult = async () => {
+    // The session knows which parent it belongs to via either groupId or
+    // tripId — exactly one is non-zero. Route the persist call to the right
+    // API; failures here are non-fatal (the result is already in the session,
+    // the next page load will surface the issue if persisting really failed).
     if (session?.groupId && session?.eventId) {
       try { await groupsApi.acceptResult(session.groupId, session.eventId); } catch { /* non-fatal */ }
+    } else if (session?.tripId && session?.eventId) {
+      try { await api.trips.acceptResult(session.tripId, session.eventId); } catch { /* non-fatal */ }
     }
-    if (session?.result && authUserId) {
-      // accept-result on the server already wrote the host's UserAccepted row
-      // with optionsSnapshot + chooseMethod — _serverHandled tells the
-      // listener to skip the duplicate POST. Local Redux state still updates
-      // immediately so the user sees their acceptance in history right away.
+    // accept-result for group events writes a personal UserAccepted row for
+    // the host on the server; we mirror that into Redux with _serverHandled
+    // so the listener skips the duplicate POST. Trip events don't write
+    // UserAccepted (no personal-insights surface for trip meals yet), so
+    // we only dispatch for the group path.
+    if (session?.groupId && session?.result && authUserId) {
       dispatch(addUserAcceptance({
         restaurantId: Number(session.result),
         _serverHandled: true,
       }));
     }
-    navigate('/socials');
+    // Back-nav: trip meals go back to the trip page, group sessions go to
+    // /socials (which is the trip+group hub). Falls through to /socials for
+    // ad-hoc sessions with neither parent.
+    if (session?.tripId) {
+      navigate(`/trips/${session.tripId}`);
+    } else {
+      navigate('/socials');
+    }
   };
 
   const handleSubmitVotes   = withAction((ballot)  => sessionApi.vote(sessionId, myName, ballot, myVoterToken));

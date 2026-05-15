@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router-dom";
 import {
@@ -7,14 +7,19 @@ import {
   updateUserFavorites,
 } from "../redux/slices/userInfoSlice";
 import RatingDisplay from "../components/RatingDisplay";
-import RestaurantMiniCard from "../components/RestaurantMiniCard";
+import RestaurantCard from "../components/RestaurantCard";
 import useCurrentUser from "../hooks/useCurrentUser";
-import getMostRecentDate from "../utils/getMostRecentDate";
+import { buildAcceptedStats, formatLastChosen } from "../utils/acceptedStats";
 
 import InfoRow from "../components/InfoRow";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
 import { normalizeUrl } from "../utils/normalizeUrl";
 import RestaurantDetailModal from "../components/RestaurantDetailModal";
+// Lazy: the maps chunk (~13 KB gzip via vendor-maps) loads only when the
+// CompareMap is actually rendered — on most visits to this page the user
+// is comparing without the map open, so the chunk stays out of the cold-
+// load critical path.
+const CompareMap = lazy(() => import("../components/CompareMap"));
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -182,7 +187,12 @@ const ChosenModal = ({ id, restaurantMap, onClose }) => {
 
 const MAX_COMPARE = 4;
 
-const gridClass = (count) => (count <= 1 ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2');
+// Compare-grid is ALWAYS 2 panels per row at sm+ — so every panel has the
+// same visual size regardless of how many are active. Odd counts (1 or 3)
+// produce one empty cell which the caller fills with a "+ add another"
+// placeholder (see the JSX below). This keeps cards stable as the user
+// adds/removes — no resizing as the count changes.
+const COMPARE_GRID_CLASS = 'grid-cols-1 sm:grid-cols-2';
 
 // ── Page ─────────────────────────────────────────────────────
 
@@ -194,11 +204,81 @@ const RestaurantPage = () => {
   const allRestaurants = customRestaurants;
   const { favorites, options, reviews } = userInfo;
 
+  // Precompute the user's accepted-history stats once per `accepted` change.
+  // Four card sites below used to call `getMostRecentDate` per render, each
+  // scanning the full accepted array; with stats memoized, lookups are O(1).
+  const acceptedStats = useMemo(
+    () => buildAcceptedStats(userInfo.accepted),
+    [userInfo.accepted],
+  );
+
   const [activeIds, setActiveIds] = useState(
     restaurantId ? [restaurantId] : []
   );
   const [chosenId, setChosenId] = useState(null);
   const [detailId, setDetailId] = useState(null);
+
+  // Two-way card↔marker hover sync. Same pattern as SearchPage — one
+  // piece of state drives "which pin glows" AND "which card is ringed".
+  // Local because it's purely visual ephemera.
+  const [hoveredCompareId, setHoveredCompareId] = useState(null);
+
+  // Keep `activeIds` in lock-step with the options list. `handleRemoveOption`
+  // below only catches the in-page X button on the sidebar card; options
+  // can ALSO be removed via the navbar Options chip strip and the detail
+  // modal's "Remove from options" action — neither of which know about
+  // this page's local state. This effect detects items disappearing from
+  // options (by diffing against the previous render) and prunes them from
+  // the active comparison.
+  //
+  // Critically, it only fires on REMOVALS — not on initial mount and not
+  // on additions. That preserves the URL-load case (e.g. /restaurant/123
+  // where 123 is in `accepted` history but not in `options`): the
+  // restaurant stays in the comparison until the user explicitly
+  // dismisses it.
+  const prevOptionsRef = useRef(options);
+  useEffect(() => {
+    const prev = prevOptionsRef.current;
+    const next = options;
+    prevOptionsRef.current = next;
+
+    const nextSet = new Set(next.map(String));
+    const removed = prev.filter((id) => !nextSet.has(String(id)));
+    if (removed.length === 0) return;
+
+    const removedSet = new Set(removed.map(String));
+    setActiveIds((curr) => {
+      const filtered = curr.filter((id) => !removedSet.has(String(id)));
+      return filtered.length === curr.length ? curr : filtered;
+    });
+  }, [options]);
+
+  // Map-ready item list. The displayed set narrows by comparison state:
+  //   - No restaurants in the comparison → show ALL options (default view).
+  //     Favorites are intentionally omitted — they're a "to consider" list,
+  //     not the primary comparison set; including them clutters the map
+  //     before the user has even started comparing.
+  //   - One or more restaurants in the comparison → show ONLY those
+  //     restaurants. This narrows the map to the spatial question the
+  //     user is currently asking: "where do these specific places sit?"
+  //
+  // Items without lat/lng are silently dropped from the map; their cards
+  // in the sidebars still appear, just without a pin.
+  const compareMapItems = useMemo(() => {
+    const sourceIds = activeIds.length > 0 ? activeIds : options;
+    const items = [];
+    for (const id of sourceIds) {
+      const sid_ = String(id);
+      const r = customRestaurants[sid_];
+      if (!r || r.lat == null || r.lng == null) continue;
+      // When viewing the active comparison set we still tag the item as
+      // 'option' since that's its sidebar origin; the kind tag drives
+      // pin color, and orange-on-comparison reads cleaner than mixing
+      // palettes.
+      items.push({ id: sid_, name: r.name, lat: r.lat, lng: r.lng, kind: 'option' });
+    }
+    return items;
+  }, [activeIds, options, customRestaurants]);
 
   // ── Mobile swipe state ────────────────────────────────────
   const [mobileIndex, setMobileIndex] = useState(0);
@@ -250,6 +330,16 @@ const RestaurantPage = () => {
 
   const handleDismiss = (id) =>
     setActiveIds((prev) => prev.filter((x) => sid(x) !== sid(id)));
+
+  // Combine "remove from options" with "drop from active comparison". The
+  // raw `removeUserOption` dispatch only updates the user's options list
+  // — without this wrapper, a restaurant that's currently being compared
+  // stayed in the comparison body after its X was clicked. Now removing
+  // from the options sidebar (mobile or desktop) syncs both at once.
+  const handleRemoveOption = (id) => {
+    dispatch(removeUserOption(id));
+    setActiveIds((prev) => prev.filter((x) => sid(x) !== sid(id)));
+  };
 
   const handleChooseNow = (id) => {
     // Direct accept from the restaurant page — the active list at this moment
@@ -380,12 +470,13 @@ const RestaurantPage = () => {
                   </p>
                   <div className="flex flex-col gap-2">
                     {favorites.map((id) => (
-                      <RestaurantMiniCard
+                      <RestaurantCard
+                        size="sm"
                         key={id}
                         id={id}
                         isActive={activeSet.has(sid(id))}
                         personalRating={getUserRating(reviews, id)}
-                        lastChosen={getMostRecentDate(userInfo.accepted, id)}
+                        lastChosen={formatLastChosen(acceptedStats, id)}
                         onCardClick={() => handleCardClick(id)}
                         onUnfavorite={() =>
                           dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
@@ -405,14 +496,15 @@ const RestaurantPage = () => {
                   </p>
                   <div className="flex flex-col gap-2">
                     {options.map((id) => (
-                      <RestaurantMiniCard
+                      <RestaurantCard
+                        size="sm"
                         key={id}
                         id={id}
                         isActive={activeSet.has(sid(id))}
                         personalRating={getUserRating(reviews, id)}
-                        lastChosen={getMostRecentDate(userInfo.accepted, id)}
+                        lastChosen={formatLastChosen(acceptedStats, id)}
                         onCardClick={() => handleCardClick(id)}
-                        onRemove={() => dispatch(removeUserOption(id))}
+                        onRemove={() => handleRemoveOption(id)}
                         onInfo={() => setDetailId(id)}
                         restaurantMap={allRestaurants}
                       />
@@ -432,7 +524,17 @@ const RestaurantPage = () => {
       </div>
 
       {/* ── DESKTOP LAYOUT (≥ md) ──────────────────────────── */}
-      <div className="hidden md:flex flex-col lg:flex-row gap-6 items-start">
+      {/* Switched from flex-row to CSS grid at lg+ for guaranteed-stable
+          column widths. With flex-row, the center column was `flex-1
+          min-w-0` and its rendered width could subtly shift based on
+          its children's intrinsic widths AND on viewport scrollbar
+          state. With grid-cols-[13rem_1fr_13rem], the column tracks
+          are absolute: sidebars always exactly 208 px, center always
+          exactly what's left. No reflow when activeIds changes count
+          or when comparison-state-driven height changes scroll state.
+          On md (768-1024 px), keep the simple stacked flex-col since
+          the page is too narrow for side-by-side anyway. */}
+      <div className="hidden md:block lg:grid lg:grid-cols-[13rem_minmax(0,1fr)_13rem] gap-6 items-start">
 
         {/* Left: Favorites */}
         <div className="w-full lg:w-52 lg:shrink-0">
@@ -440,20 +542,32 @@ const RestaurantPage = () => {
           {favorites.length === 0 ? (
             <p className="text-xs text-gray-400 italic">No favorites yet.</p>
           ) : (
-            <div className="flex flex-col gap-3">
+            // Cap at roughly 6 sm-cards-tall when the list is longer, so a
+            // big favorites collection doesn't stretch the page indefinitely.
+            // overscroll-contain stops the wheel/touch scroll from bubbling
+            // up to the page once you hit the top/bottom of the list.
+            // pr-1 gives the scrollbar a tiny gutter so it doesn't crowd cards.
+            <div className={`flex flex-col gap-3 ${favorites.length > 6 ? 'max-h-[820px] overflow-y-auto overscroll-contain pr-1' : ''}`}>
               {favorites.map((id) => (
-                <RestaurantMiniCard
+                <RestaurantCard
+                  size="sm"
                   key={id}
                   id={id}
                   isActive={activeSet.has(sid(id))}
                   personalRating={getUserRating(reviews, id)}
-                  lastChosen={getMostRecentDate(userInfo.accepted, id)}
+                  lastChosen={formatLastChosen(acceptedStats, id)}
                   onCardClick={() => handleCardClick(id)}
                   onUnfavorite={() =>
                     dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
                   }
                   onInfo={() => setDetailId(id)}
                   restaurantMap={allRestaurants}
+                  // Map↔card sync: hovering this card glows the matching
+                  // pin; hovering the pin rings this card via
+                  // isHighlighted (driven by hoveredCompareId).
+                  onMouseEnter={() => setHoveredCompareId(String(id))}
+                  onMouseLeave={() => setHoveredCompareId(null)}
+                  isHighlighted={String(hoveredCompareId) === String(id)}
                 />
               ))}
             </div>
@@ -461,7 +575,14 @@ const RestaurantPage = () => {
         </div>
 
         {/* Center: Detail panels */}
-        <div className="flex-1 min-w-0">
+        {/* w-full + min-w-0: vestigial flex hints were removed when the
+            parent went from flex to grid. w-full keeps the center child
+            stretching to fill its grid cell (default `auto` already does
+            this for block elements, but the explicit class is a guard
+            against any future grid-item alignment surprises). min-w-0
+            allows children to shrink past their intrinsic min width if
+            ever needed (e.g. long restaurant name in a narrow panel). */}
+        <div className="w-full min-w-0">
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-gray-500">
               {activeIds.length === 0
@@ -478,35 +599,85 @@ const RestaurantPage = () => {
             )}
           </div>
 
-          {activeIds.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-72 rounded-xl border-2 border-dashed border-gray-200">
-              <span className="text-4xl mb-3">🍽️</span>
-              <p className="text-sm font-medium text-gray-400">
-                Select a restaurant from either sidebar to compare
-              </p>
-            </div>
-          ) : (
-            <div className={`grid gap-4 ${gridClass(activeIds.length)}`}>
-              {activeIds.map((id) => (
-                <div key={id} className="relative min-w-0 h-full">
-                  <button
-                    onClick={() => handleDismiss(id)}
-                    className="absolute -top-2 -right-2 z-10 w-6 h-6 flex items-center justify-center rounded-full bg-gray-100 hover:bg-red-100 text-gray-400 hover:text-red-500 text-xs font-bold shadow-sm transition-colors"
-                    aria-label="Dismiss"
-                  >
-                    ✕
-                  </button>
-                  <DetailPanel
-                    id={id}
-                    userInfo={userInfo}
-                    dispatch={dispatch}
-                    onChooseNow={() => handleChooseNow(id)}
-                    restaurantMap={allRestaurants}
-                  />
+          {/* Unified layout for every comparison state. Always renders:
+              - A 2-per-row grid of panels and placeholder cards (fills up
+                to MAX_COMPARE = 4 cells; minimum 2 cells even with no
+                active comparison so the page reads as "two ready slots"
+                rather than a single full-width prompt).
+              - A compact map below, sourced from compareMapItems (all
+                options when nothing is being compared, the active set
+                otherwise — see the memo above).
+              By keeping the structure identical regardless of activeIds
+              count, the favorites/options sidebars never move and the
+              center never resizes. */}
+          {(() => {
+            // Number of placeholder cards needed to round the grid out
+            // to a clean 2-up (when 0 or 2 active) or 2x2 (when 3 active).
+            //   0 active → 2 placeholders (empty state)
+            //   1 active → 1 placeholder
+            //   2 active → 0 placeholders (full first row)
+            //   3 active → 1 placeholder (rounds row 2 out)
+            //   4 active → 0 placeholders (full 2x2)
+            const len = activeIds.length;
+            const placeholderCount =
+              len === 0 ? 2 : (len % 2 === 1 && len < MAX_COMPARE ? 1 : 0);
+            return (
+              <>
+                <div className={`w-full grid gap-4 ${COMPARE_GRID_CLASS}`}>
+                  {activeIds.map((id) => (
+                    <div key={id} className="relative min-w-0 h-full">
+                      <button
+                        onClick={() => handleDismiss(id)}
+                        className="absolute -top-2 -right-2 z-10 w-6 h-6 flex items-center justify-center rounded-full bg-gray-100 hover:bg-red-100 text-gray-400 hover:text-red-500 text-xs font-bold shadow-sm transition-colors"
+                        aria-label="Dismiss"
+                      >
+                        ✕
+                      </button>
+                      <DetailPanel
+                        id={id}
+                        userInfo={userInfo}
+                        dispatch={dispatch}
+                        onChooseNow={() => handleChooseNow(id)}
+                        restaurantMap={allRestaurants}
+                      />
+                    </div>
+                  ))}
+                  {/* Dashed placeholder cards. Keyed by index so React
+                      doesn't try to reuse them across renders when the
+                      count changes. */}
+                  {Array.from({ length: placeholderCount }).map((_, i) => (
+                    <div key={`placeholder-${i}`} className="relative min-w-0 h-full">
+                      <div className="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50/50 p-5 h-full min-h-[14rem] flex flex-col items-center justify-center text-center">
+                        <span className="text-3xl mb-2 select-none" aria-hidden="true">＋</span>
+                        <p className="text-sm font-medium text-gray-400">
+                          Add a restaurant to compare
+                        </p>
+                        <p className="text-xs text-gray-400 mt-1">
+                          Click any card in the Favorites or Options list
+                        </p>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+
+                {/* Compact map below. Hidden when no items have coords or
+                    the env key isn't set — in that case the page is just
+                    the placeholder/detail grid, which is fine. */}
+                {compareMapItems.length > 0 && import.meta.env.VITE_GOOGLE_MAPS_API_KEY && (
+                  <div className="w-full mt-4 h-56 rounded-xl overflow-hidden border border-gray-200 shadow-sm bg-gray-50">
+                    <Suspense fallback={<div className="h-full w-full bg-gray-100 animate-pulse" />}>
+                      <CompareMap
+                        items={compareMapItems}
+                        hoveredId={hoveredCompareId}
+                        onMarkerHover={setHoveredCompareId}
+                        onMarkerClick={handleCardClick}
+                      />
+                    </Suspense>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         {/* Right: Options */}
@@ -515,18 +686,27 @@ const RestaurantPage = () => {
           {options.length === 0 ? (
             <p className="text-xs text-gray-400 italic">No options yet.</p>
           ) : (
-            <div className="flex flex-col gap-3">
+            // Mirror of the Favorites sidebar above — same 6-card cap so
+            // both columns cap at roughly equal heights and the page
+            // doesn't stretch when either list grows long.
+            <div className={`flex flex-col gap-3 ${options.length > 6 ? 'max-h-[820px] overflow-y-auto overscroll-contain pr-1' : ''}`}>
               {options.map((id) => (
-                <RestaurantMiniCard
+                <RestaurantCard
+                  size="sm"
                   key={id}
                   id={id}
                   isActive={activeSet.has(sid(id))}
                   personalRating={getUserRating(reviews, id)}
-                  lastChosen={getMostRecentDate(userInfo.accepted, id)}
+                  lastChosen={formatLastChosen(acceptedStats, id)}
                   onCardClick={() => handleCardClick(id)}
-                  onRemove={() => dispatch(removeUserOption(id))}
+                  onRemove={() => handleRemoveOption(id)}
                   onInfo={() => setDetailId(id)}
                   restaurantMap={allRestaurants}
+                  // Map↔card sync — see Favorites sidebar above for the
+                  // full rationale; same pattern.
+                  onMouseEnter={() => setHoveredCompareId(String(id))}
+                  onMouseLeave={() => setHoveredCompareId(null)}
+                  isHighlighted={String(hoveredCompareId) === String(id)}
                 />
               ))}
             </div>

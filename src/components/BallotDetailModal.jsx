@@ -18,7 +18,7 @@ const METHOD_LABEL = {
 };
 
 const VOTE_METHOD_LABEL = {
-  simple: 'Simple approval',
+  simple: 'Simple Majority',
   ranked: 'Ranked-choice',
 };
 
@@ -27,24 +27,42 @@ function poolItemName(pool, id) {
   return item?.name ?? id;
 }
 
-// Renders identity hints for a voter row based on voterMeta:
-//   - Guest:                     "(guest)" in gray italic
-//   - Signed in, same as display: nothing extra
-//   - Signed in, different name:  "(signed in as @real-username)"
-//   - Legacy result (no meta):    nothing — we don't have the info to show
+// Renders identity hints for a voter row based on voterMeta. The historical
+// username is the snapshot at vote time; `currentUsername` is set by the
+// server when the user has since renamed (server-side join via userId — the
+// modal doesn't have to know about that). Cases handled:
+//
+//   - Guest                                  → "guest" italic
+//   - Signed in, same name, no rename        → nothing
+//   - Signed in, same name, renamed since    → "(now @new)"
+//   - Signed in, different name, no rename   → "(signed in as @old)"
+//   - Signed in, different name, renamed     → "(signed in as @old, now @new)"
+//   - Legacy result (no meta / no username)  → nothing
 function VoterIdentityBadge({ voterName, meta }) {
   if (!meta) return null;
   if (meta.isGuest) {
     return <span className="ml-1.5 text-[10px] uppercase tracking-wider text-gray-400 italic">guest</span>;
   }
-  if (meta.username && meta.username !== voterName) {
-    return (
-      <span className="ml-1.5 text-xs font-normal text-gray-400">
-        (signed in as <span className="font-mono">@{meta.username}</span>)
-      </span>
-    );
-  }
-  return null;
+  const historical = meta.username;
+  const current    = meta.currentUsername; // set server-side ONLY when a rename happened
+  if (!historical) return null;
+
+  const differentDisplayName = historical !== voterName;
+  if (!differentDisplayName && !current) return null;
+
+  return (
+    <span className="ml-1.5 text-xs font-normal text-gray-400">
+      (
+      {differentDisplayName && (
+        <>signed in as <span className="font-mono">@{historical}</span></>
+      )}
+      {differentDisplayName && current && ', '}
+      {current && (
+        <>now <span className="font-mono">@{current}</span></>
+      )}
+      )
+    </span>
+  );
 }
 
 const BallotDetailModal = ({ groupId, eventId, onClose }) => {
@@ -117,7 +135,10 @@ const BallotDetailModal = ({ groupId, eventId, onClose }) => {
                   </p>
                 </div>
 
-                {/* Participants */}
+                {/* Participants. Pills show the historical display name + a
+                    visible "→ @new" suffix when the user behind that name has
+                    renamed since the event closed — keyed off voterMeta's
+                    server-stamped currentUsername. */}
                 <div>
                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
                     Participants ({result.participants.length})
@@ -137,12 +158,21 @@ const BallotDetailModal = ({ groupId, eventId, onClose }) => {
                             m?.isGuest
                               ? 'Voted as a guest'
                               : m?.username && m.username !== name
-                                ? `Signed in as @${m.username}`
-                                : ''
+                                ? (m?.currentUsername
+                                    ? `Signed in as @${m.username} (now @${m.currentUsername})`
+                                    : `Signed in as @${m.username}`)
+                                : m?.currentUsername
+                                  ? `Now @${m.currentUsername}`
+                                  : ''
                           }
                         >
                           {name}{name === result.hostUsername ? ' 👑' : ''}
                           {m?.isGuest && <span className="ml-1 text-[9px] uppercase tracking-wide">guest</span>}
+                          {m?.currentUsername && (
+                            <span className="ml-1 text-gray-400">
+                              → <span className="font-mono">@{m.currentUsername}</span>
+                            </span>
+                          )}
                         </span>
                       );
                     })}

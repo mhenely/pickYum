@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
-import { api } from '../lib/api';
+import { api, placePhotoUrl } from '../lib/api';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
 import { normalizeUrl } from '../utils/normalizeUrl';
+import { googleMapsUrl } from '../utils/googleMapsUrl';
 
 // Read-only, guest-friendly restaurant detail. Used on the group voting page
 // so voters (signed-in or not) can check basic info on a candidate before
@@ -44,17 +45,42 @@ const PublicRestaurantInfoModal = ({ restaurantId, fallback, onClose }) => {
   // modal isn't empty for the first ~150ms.
   const r = restaurant ?? fallback ?? {};
   const website = normalizeUrl(r.website);
-  const yelp    = normalizeUrl(r.yelpUrl ?? r.yelp);
   // Server returns googleRating / communityRating as stringified Decimals.
   // Coerce to number for display but render as N.N (Decimal precision is 1).
   const googleRating = r.googleRating != null ? Number(r.googleRating) : null;
   const communityRating = r.communityRating != null ? Number(r.communityRating) : null;
+  // First photo only — this is a lightweight info modal for guest voters,
+  // not a gallery. Skip when the row has none.
+  const heroPhoto = Array.isArray(r.photos) && r.photos.length > 0 && r.photos[0]?.name
+    ? r.photos[0]
+    : null;
+  // Google Maps deep-link — replaces the previous in-modal "Google
+  // reviews" section. Same content for users (reviews/photos/hours),
+  // free to us (no Enterprise-tier API spend), no TOS author-attribution
+  // burden on rendered text.
+  const googleHref = googleMapsUrl(r);
 
   return (
     <Dialog open onClose={onClose} className="relative z-[60]">
       <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
         <DialogPanel className="w-full max-w-sm rounded-2xl bg-white shadow-xl overflow-hidden">
+
+          {/* Photo hero — Google Places thumbnail when available. Smaller
+              than the main modal's gallery; this is a voter info modal,
+              not a discovery surface. The image goes through our photo
+              proxy so the Google API key stays server-side. */}
+          {heroPhoto && (
+            <div className="relative h-32 bg-gray-100">
+              <img
+                src={placePhotoUrl(heroPhoto, 600)}
+                alt={r.name ?? ''}
+                loading="lazy"
+                className="absolute inset-0 h-full w-full object-cover"
+                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+              />
+            </div>
+          )}
 
           {/* Header */}
           <div className="flex justify-between items-start p-5 pb-3 border-b border-gray-100">
@@ -90,6 +116,12 @@ const PublicRestaurantInfoModal = ({ restaurantId, fallback, onClose }) => {
                   <div className="flex-1 rounded-lg bg-amber-50 border border-amber-100 p-2.5 text-center">
                     <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider">Google</p>
                     <p className="text-lg font-black text-amber-700 mt-0.5">★ {googleRating.toFixed(1)}</p>
+                    {/* Total ratings disambiguates "4.5 from 3" vs "from 800". */}
+                    {typeof r.ratingCount === 'number' && r.ratingCount > 0 && (
+                      <p className="text-[10px] text-amber-700/70 tabular-nums">
+                        {r.ratingCount.toLocaleString()} ratings
+                      </p>
+                    )}
                   </div>
                 )}
                 {communityRating != null && (
@@ -120,15 +152,15 @@ const PublicRestaurantInfoModal = ({ restaurantId, fallback, onClose }) => {
                 )}
               />
               <Row
-                label="Yelp"
-                value={yelp && (
+                label="Google"
+                value={googleHref && (
                   <a
-                    href={yelp}
+                    href={googleHref}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-red-600 hover:text-red-500 underline-offset-2 hover:underline"
+                    className="text-blue-600 hover:text-blue-500 underline-offset-2 hover:underline"
                   >
-                    On Yelp
+                    Reviews & photos
                   </a>
                 )}
               />

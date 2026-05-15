@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 const scrollTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
 
 const Footer = () => (
-  <footer className="bg-gradient-to-r from-orange-50 to-amber-50 border-t border-orange-200 mt-auto">
+  <footer className="bg-gradient-to-r from-orange-50 to-amber-50 border-t border-orange-200">
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
       <div className="flex flex-col sm:flex-row items-center justify-between gap-6">
 

@@ -1,4 +1,4 @@
-import { useRef, useEffect, useImperativeHandle, forwardRef } from 'react';
+import { useRef, useEffect, useImperativeHandle, forwardRef, memo } from 'react';
 
 // ── Constants ─────────────────────────────────────────────────
 
@@ -303,10 +303,15 @@ const RouletteWheel = forwardRef(function RouletteWheel(
   const live = useRef({ options, restaurants, onSpinComplete });
   live.current = { options, restaurants, onSpinComplete };
 
-  // Redraw when options change (outside of an active spin)
+  // Redraw when options change (outside of an active spin). The RAF guard
+  // prevents the static paint from racing the spin loop's frame writes —
+  // without it, a parent re-render mid-spin (e.g. someone removes an
+  // option) would paint a frozen frame on top of the running animation
+  // and cause visible flicker.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    if (rafRef.current) return; // skip while a spin is in flight
     paint(canvas.getContext('2d'), angleRef.current, options, restaurants);
   }, [options]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -489,4 +494,8 @@ const RouletteWheel = forwardRef(function RouletteWheel(
   );
 });
 
-export default RouletteWheel;
+// memo because the wheel drives the spin imperatively via refs — the only
+// time it should re-render is when options actually change. Parent
+// re-renders (e.g. timer ticks, hover state) would otherwise trigger this
+// component's render → effect → paint cycle for nothing.
+export default memo(RouletteWheel);

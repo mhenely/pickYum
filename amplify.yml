@@ -29,3 +29,18 @@ frontend:
       # Caching node_modules + npm cache cuts a typical build from ~3min to ~45s.
       - node_modules/**/*
       - ~/.npm/**/*
+  # Far-future caching on hashed asset bundles. Vite emits content-hashed
+  # filenames (`index-abc123.js`), so bytes are content-addressed and safe
+  # to immutable-cache for a year. `index.html` is the cache busters' entry
+  # point — must NOT be cached, otherwise users get pinned to a stale
+  # version of the manifest pointing at old assets. Returning visitors
+  # skip ~300+ KB of JS/CSS downloads entirely.
+  customHeaders:
+    - pattern: '/assets/**'
+      headers:
+        - key: 'Cache-Control'
+          value: 'public, max-age=31536000, immutable'
+    - pattern: '/index.html'
+      headers:
+        - key: 'Cache-Control'
+          value: 'public, max-age=0, must-revalidate'

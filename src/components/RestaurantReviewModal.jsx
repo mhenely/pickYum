@@ -66,7 +66,7 @@ const RestaurantReviewModal = ({ restaurant, reviews, onClose, onAddReview, onRe
                   <select
                     value={rating}
                     onChange={(e) => setRating(Number(e.target.value))}
-                    className="text-sm rounded border border-gray-300 pl-2 pr-7 py-0.5"
+                    className="text-sm rounded border border-gray-300 pl-2 pr-8 py-0.5"
                   >
                     {[1, 2, 3, 4, 5].map((n) => (
                       <option key={n} value={n}>{n} star{n !== 1 ? 's' : ''}</option>
@@ -98,7 +98,7 @@ const RestaurantReviewModal = ({ restaurant, reviews, onClose, onAddReview, onRe
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
-              className="text-sm rounded border border-gray-300 pl-2 pr-7 py-1"
+              className="text-sm rounded border border-gray-300 pl-2 pr-8 py-1"
             >
               {SORT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>

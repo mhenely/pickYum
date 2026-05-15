@@ -93,8 +93,19 @@ const authSlice = createSlice({
         state.status = 'unauthenticated';
         state.error = action.payload as string;
       })
-      // logout
+      // logout — succeed and fail both wipe local state. A 5xx on the API
+      // call shouldn't leave the user appearing logged-in (Redux still
+      // populated with favorites/options/etc.) when they clicked Log Out.
+      // The cookie isn't cleared server-side in that case, but checkAuth on
+      // next mount will resolve cleanly: if the cookie is still valid the
+      // user is re-authenticated; if not, we land in 'unauthenticated'. The
+      // worst case is a stale session cookie that the server eventually
+      // rejects — far better than visible data persistence on shared devices.
       .addCase(logoutUser.fulfilled, (state) => {
+        state.user = null;
+        state.status = 'unauthenticated';
+      })
+      .addCase(logoutUser.rejected, (state) => {
         state.user = null;
         state.status = 'unauthenticated';
       });

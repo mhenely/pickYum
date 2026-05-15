@@ -1,11 +1,42 @@
 const BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
 
 const GET_CACHE = new Map<string, { data: unknown; expiresAt: number }>();
-const CACHE_TTL_MS = 5_000;
+// 60s strikes the right balance for this app's data model:
+// - Mutations correctly invalidate by path prefix (see request() below),
+//   so cache freshness is driven by writes, not TTL expiry. The TTL only
+//   gates how long a STABLE resource stays cached.
+// - Most reads here (profile, reviews, group detail, restaurant info) are
+//   touched once per session — a 5s TTL caused unnecessary refetches on
+//   modal close→reopen and route nav→back, which felt sluggish. 60s
+//   absorbs those repeats while still bounding any cache that escapes
+//   invalidation (e.g. server-side writes from another tab).
+const CACHE_TTL_MS = 60_000;
+
+// Per-path TTL overrides for resources known to be stable across longer
+// windows. The places.nearby cache key is the full URL with address +
+// radius — once a user has the results for a given pair, re-running the
+// same search within 5 minutes shouldn't pay a fresh fetch + Geocoding
+// API call. Mutations don't invalidate this slot (no /api/places mutation
+// exists), so the longer TTL is purely a win.
+function ttlForPath(path: string): number {
+  if (path.startsWith('/api/places/nearby')) return 5 * 60_000;
+  if (path.startsWith('/api/places/text-search')) return 5 * 60_000;
+  return CACHE_TTL_MS;
+}
+
+// Path prefixes that are read-only aggregates and never need to be
+// invalidated by user-data writes. Insights aggregate over completed
+// events; favoriting a restaurant doesn't change them. Skipping these
+// from the broad 3-segment prefix sweep keeps insights warm across the
+// flurry of writes that fire when a user is actively curating their
+// favorites / options list.
+const INVALIDATION_SAFE_PATHS = ['/api/users/me/insights'];
 
 function invalidateCache(prefix: string) {
   for (const key of GET_CACHE.keys()) {
-    if (key.startsWith(prefix)) GET_CACHE.delete(key);
+    if (!key.startsWith(prefix)) continue;
+    if (INVALIDATION_SAFE_PATHS.some((safe) => key.startsWith(safe))) continue;
+    GET_CACHE.delete(key);
   }
 }
 
@@ -40,7 +71,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const prefix = '/' + segments.slice(0, Math.min(3, segments.length)).join('/');
     invalidateCache(prefix);
   } else {
-    GET_CACHE.set(path, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+    GET_CACHE.set(path, { data, expiresAt: Date.now() + ttlForPath(path) });
   }
 
   return data as T;
@@ -52,6 +83,17 @@ export interface AuthUser {
   username: string;
   flipCount?: number;
   avatarUrl?: string | null;
+}
+
+// Address book entry — replaces the older single defaultAddress string on
+// User. Users keep a small list of labeled locations; exactly one carries
+// isDefault and drives the Search-page initial prefill.
+export interface SavedAddress {
+  id: number;
+  label: string;
+  address: string;
+  isDefault: boolean;
+  createdAt: string;
 }
 
 export interface ApiRestaurant {
@@ -67,6 +109,41 @@ export interface ApiRestaurant {
   takeout: boolean;
   delivery: boolean;
   googleRating: string | null;
+  // Number of Google ratings backing the average. Lets the UI show
+  // "4.5 (800 ratings)". Null for custom rows or pre-rollout records.
+  ratingCount: number | null;
+  // Geo coords, captured at create time for Google-Place-backed rows or
+  // back-filled by refresh-places. Null for custom user-typed entries.
+  // Consumers (e.g. CompareMap) skip rows where either is null.
+  lat: number | null;
+  lng: number | null;
+  // Cached Google Places "Pro tier" data — same shape as
+  // PlacesRestaurant.photos so frontend renderers can read from either
+  // source uniformly. Null/empty for custom rows.
+  photos: PlacesPhoto[] | null;
+  // Structured weekly schedule. `periods` drives the client-side
+  // open-now / closing-soon computation; `weekdayDescriptions` powers
+  // the readable hours table in the detail modal. Null when Google
+  // omits it OR when the row is custom user-typed.
+  regularOpeningHours: RegularOpeningHours | null;
+  // googleReviews column still exists in the DB (legacy rows have
+  // cached review data) but is no longer requested or surfaced in the
+  // UI. The Places API `reviews` field is Enterprise-tier; users now
+  // get a "View on Google" deep-link instead (see googleMapsUrl util).
+  // Kept here as nullable so any straggling consumers don't crash, but
+  // new code should not read this — it stays stale forever.
+  googleReviews?: PlacesReview[] | null;
+}
+
+// Build the URL for a Google Places photo via our server-side proxy. Keeps
+// the Google API key out of client JS — the proxy 302-redirects to a
+// signed Google CDN URL. `maxWidthPx` is clamped server-side to
+// [100, 1600]; pick the smallest size you can render (mobile thumb ~400,
+// modal hero ~1200).
+export function placePhotoUrl(photo: PlacesPhoto, maxWidthPx = 400): string {
+  const base = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
+  const params = new URLSearchParams({ name: photo.name, maxWidthPx: String(maxWidthPx) });
+  return `${base}/api/places/photo?${params.toString()}`;
 }
 
 export interface ApiAccepted {
@@ -76,10 +153,55 @@ export interface ApiAccepted {
   restaurant: ApiRestaurant;
 }
 
+// Google Places photo reference. The actual image lives at Google's
+// /v1/{name}/media endpoint; the API key must NOT be exposed client-side,
+// so consumers should fetch via a server-side proxy when one's set up.
+export interface PlacesPhoto {
+  name: string;
+  widthPx: number | null;
+  heightPx: number | null;
+}
+
+// Google Places `regularOpeningHours` shape. `periods` is the structured
+// weekly schedule (one entry per open-close pair; 24-hour places have
+// `close: null`); `weekdayDescriptions` is Google's pre-formatted
+// "Monday: 11:00 AM – 10:00 PM" strings.
+//
+// `day` follows Google's convention: 0 = Sunday, 6 = Saturday.
+// `hour` 0-23, `minute` 0-59. A period that wraps past midnight uses
+// `close.day = (open.day + 1) % 7`.
+export interface OpeningPoint  { day: number; hour: number; minute: number; }
+export interface OpeningPeriod { open: OpeningPoint; close: OpeningPoint | null; }
+export interface RegularOpeningHours {
+  periods: OpeningPeriod[];
+  weekdayDescriptions: string[];
+}
+
+// Legacy shape — `places.reviews` is no longer requested from the
+// Places API (Enterprise-tier cost). Kept exported because the
+// `ApiRestaurant.googleReviews` column still exists in the DB with
+// legacy data, so anything that reads that column references this
+// type. New UI surfaces use a Google Maps deep-link via
+// `googleMapsUrl()` instead.
+export interface PlacesReview {
+  rating: number | null;
+  text: string;
+  publishTime: string | null;
+  relativePublishTimeDescription: string | null;
+  author: {
+    displayName: string | null;
+    uri: string | null;
+    photoUri: string | null;
+  };
+}
+
 export interface PlacesRestaurant {
   googlePlaceId: string;
   name: string;
   googleRating: number | null;
+  // Total number of ratings backing the average — disambiguates
+  // "4.5 from 3 ratings" vs "4.5 from 800". Null when Google omits.
+  ratingCount: number | null;
   priceLevel: number | null;
   address: string | null;
   cuisineType: string | null;
@@ -87,6 +209,21 @@ export interface PlacesRestaurant {
   delivery: boolean;
   openNow: boolean | null;
   distanceKm: number | null;
+  // Optional because text-search results don't include geometry. Nearby
+  // results always do (or null when Google omits the field — render
+  // nothing rather than pin at 0,0).
+  lat?: number | null;
+  lng?: number | null;
+  photos: PlacesPhoto[];
+  // Structured weekly hours. Null when Google omits, or for places
+  // that have currentOpeningHours.openNow only (e.g. permanently
+  // closed listings — those are filtered upstream anyway).
+  regularOpeningHours: RegularOpeningHours | null;
+  // Captured at search time so the modal renders them without waiting
+  // on refresh-places. Null when Google doesn't have one for the
+  // place — modal hides those rows.
+  phone:   string | null;
+  website: string | null;
 }
 
 export interface ApiReview {
@@ -109,12 +246,32 @@ export interface CommunityReview {
 
 export type ChooseMethod = 'flip' | 'spin' | 'vote' | 'surprise' | 'direct';
 
+export type InsightsWindow = 'week' | 'month' | 'year' | 'all';
+
 export interface DecisionInsights {
   totalDecisions: number;
   distinctChosen: number;
+  // 0–10, one decimal: distinct restaurants / total decisions × 10. Higher
+  // means more varied choices; lower means the user keeps going to the same
+  // place. 0 when totalDecisions is 0.
+  varietyScore: number;
+  // Echoes back the requested window so the UI can reflect "Showing this month"
+  // without holding its own copy of the dropdown selection.
+  since: InsightsWindow;
+  // Number of acceptances in the equivalent window immediately prior to the
+  // current one (e.g. days 30-60 ago when `since=month`). null when `since=all`
+  // — there's no "previous all-time". Drives the "+50% vs last month" caption.
+  previousPeriodCount: number | null;
   methodCounts: Record<string, number>;
   cuisineConsidered: Record<string, number>;
   cuisineChosen: Record<string, number>;
+  // Top 5 cuisines by 12-week acceptance count, mapped to 12 weekly buckets
+  // oldest-first. Empty record if no cuisine had any acceptances in the
+  // window. Drives the sparkline column on the cuisine trends table.
+  cuisineWeeklyCounts: Record<string, number[]>;
+  // 7 buckets, Sunday→Saturday (JS getDay() order). Counts within the active
+  // time window. UTC-bucketed on the server today.
+  weekdayCounts: number[];
   topConsidered: Array<{
     restaurantId: string;
     name: string;
@@ -131,11 +288,27 @@ export interface DecisionInsights {
     wins: number;
     winRate: number;
   }>;
+  // Favorites the user hasn't picked in NEGLECT_THRESHOLD_DAYS (currently 60),
+  // or never. Always computed against full history — ignores the `since`
+  // window because "haven't picked it in a long time" only makes sense across
+  // all of it. Empty array when no favorites qualify.
+  neglectedFavorites: Array<{
+    restaurantId: string;
+    name: string;
+    cuisineType: string | null;
+    lastChosenAt: string | null; // null = never chosen
+  }>;
   recent: Array<{
     restaurantId: string;
     name: string;
     acceptedAt: string;
     chooseMethod: ChooseMethod | null;
+    // Present for acceptances created by a group's accept-result flow
+    // (post-rollout). Solo acceptances and pre-rollout group acceptances
+    // have null for both — UI uses these together to deep-link the row into
+    // the ballot detail modal.
+    eventId: number | null;
+    groupId: number | null;
     competing: string[];
   }>;
 }
@@ -164,10 +337,34 @@ export const api = {
   users: {
     // Server requires `currentPassword` whenever `email` or `password` is set
     // (re-auth before sensitive change). Username-only updates don't need it.
+    // Address-book CRUD has moved to its own endpoints below — this no
+    // longer accepts a defaultAddress field.
     updateProfile: (body: { email?: string; username?: string; password?: string; currentPassword?: string }) =>
       request<{ user: AuthUser }>('/api/users/me', { method: 'PATCH', body: JSON.stringify(body) }),
-    deleteAccount: () =>
-      request<{ message: string }>('/api/users/me', { method: 'DELETE' }),
+
+    // ── Address book ─────────────────────────────────────────────
+    // Used by UserInfoPage (full CRUD) and SearchPage (read for the
+    // prefill dropdown). The "default" address is special: exactly one
+    // row per user carries isDefault=true at any time, enforced by the
+    // backend writes.
+    listAddresses: () =>
+      request<{ addresses: SavedAddress[] }>('/api/users/me/addresses'),
+    createAddress: (body: { label: string; address: string; isDefault?: boolean }) =>
+      request<{ address: SavedAddress }>('/api/users/me/addresses', { method: 'POST', body: JSON.stringify(body) }),
+    updateAddress: (id: number, body: { label?: string; address?: string; isDefault?: boolean }) =>
+      request<{ address: SavedAddress }>(`/api/users/me/addresses/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    deleteAddress: (id: number) =>
+      request<{ message: string }>(`/api/users/me/addresses/${id}`, { method: 'DELETE' }),
+    // Account deletion. By default the user's reviews are anonymized
+    // (userId → null) so they stay in each restaurant's community pool. Pass
+    // `retractReviews: true` to additionally delete the review rows entirely
+    // — server-side, that strip happens *before* the FK cascade fires so the
+    // recompute sees them gone.
+    deleteAccount: (opts: { retractReviews?: boolean } = {}) =>
+      request<{ message: string }>('/api/users/me', {
+        method: 'DELETE',
+        body: JSON.stringify(opts),
+      }),
     getFavorites: () =>
       request<{ favorites: ApiRestaurant[] }>('/api/users/me/favorites'),
     addFavorite: (id: number) =>
@@ -190,8 +387,11 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ restaurantId, ...opts }),
       }),
-    getInsights: () =>
-      request<DecisionInsights>('/api/users/me/insights'),
+    // `since` filters acceptances to a sliding window. Defaults to all-time.
+    // The 5-second GET cache is keyed on the full path, so each window picks
+    // up its own cache entry — no extra invalidation logic needed.
+    getInsights: (since: InsightsWindow = 'all') =>
+      request<DecisionInsights>(`/api/users/me/insights?since=${encodeURIComponent(since)}`),
     getArchived: () =>
       request<{ archived: ApiRestaurant[] }>('/api/users/me/archived'),
     archiveRestaurant: (id: number) =>
@@ -199,7 +399,14 @@ export const api = {
     unarchiveRestaurant: (id: number) =>
       request('/api/users/me/archived/' + id, { method: 'DELETE' }),
     getAll: () =>
-      request<{ favorites: ApiRestaurant[]; options: ApiRestaurant[]; accepted: ApiAccepted[]; archived: ApiRestaurant[]; reviews: ApiReview[] }>('/api/users/me/all'),
+      request<{
+        favorites: ApiRestaurant[];
+        options: ApiRestaurant[];
+        accepted: ApiAccepted[];
+        archived: ApiRestaurant[];
+        reviews: ApiReview[];
+        addresses: SavedAddress[];
+      }>('/api/users/me/all'),
     getReviews: () =>
       request<{ reviews: ApiReview[] }>('/api/users/me/reviews'),
     addReview: (body: { restaurantId: number; rating: number; content?: string }) =>
@@ -220,12 +427,30 @@ export const api = {
       cuisineType?: string;
       priceLevel?: number;
       googleRating?: number;
+      // Total Google ratings backing the average. Stored on the Restaurant
+      // row so the UI doesn't have to re-fetch from Places to display
+      // "4.5 (800 ratings)".
+      ratingCount?: number;
       hours?: string;
       phone?: string;
       website?: string;
       yelpUrl?: string;
       takeout?: boolean;
       delivery?: boolean;
+      // Coords passed through when materializing a Places-API nearby
+      // result so the Restaurant row gets geo data without a follow-up
+      // refresh. Omit for custom user-typed entries.
+      lat?: number;
+      lng?: number;
+      // Photos captured at materialize time. Server sanitizes (caps
+      // array length, validates shape) before persisting; the frontend
+      // can stream the raw Places response through. Reviews are no
+      // longer captured here — the UI links out to Google Maps for
+      // full reviews instead (see googleMapsUrl utility).
+      photos?: PlacesPhoto[];
+      // Structured weekly hours from the Places response. Server
+      // re-sanitizes shape + caps periods/descriptions length.
+      regularOpeningHours?: RegularOpeningHours;
     }) => request<{ restaurant: ApiRestaurant }>('/api/restaurants', { method: 'POST', body: JSON.stringify(body) }),
     // Public detail fetch — used by the voting page's info modal. Auth-optional
     // (guest voters can call it), returns only Restaurant-table fields (no
@@ -241,13 +466,237 @@ export const api = {
       ),
   },
   places: {
-    nearby: (address: string, radiusMeters: number) =>
-      request<{ restaurants: PlacesRestaurant[]; rawPlaces: unknown[]; configured: boolean; resolvedAddress?: string }>(
-        `/api/places/nearby?address=${encodeURIComponent(address)}&radiusMeters=${radiusMeters}`,
-      ),
+    // `cuisineType` (optional) is a Google Places type slug like
+    // 'italian_restaurant'. When set, the server issues a single
+    // searchNearby with `includedTypes: [cuisineType]` so only places
+    // of that cuisine come back. When omitted, the server falls back
+    // to its 3-slice fan-out across all food categories. The slug
+    // must match one of the CUISINE_OPTIONS values in
+    // src/utils/cuisineTypes.js — anything else is dropped server-
+    // side (silently falls back to the fan-out).
+    nearby: (address: string, radiusMeters: number, cuisineType?: string | null) => {
+      const params = new URLSearchParams({
+        address,
+        radiusMeters: String(radiusMeters),
+      });
+      if (cuisineType) params.set('cuisineType', cuisineType);
+      return request<{
+        restaurants: PlacesRestaurant[];
+        configured: boolean;
+        resolvedAddress?: string;
+        resolvedLat?: number;
+        resolvedLng?: number;
+      }>(`/api/places/nearby?${params.toString()}`);
+    },
     search: (q: string) =>
       request<{ restaurants: PlacesRestaurant[]; configured: boolean }>(
         `/api/places/text-search?q=${encodeURIComponent(q)}`,
       ),
   },
+  trips: {
+    list: () =>
+      request<{ trips: ApiTripListEntry[] }>('/api/trips'),
+    create: (body: { name: string; destination: string; startDate?: string | null; endDate?: string | null }) =>
+      request<{ trip: ApiTrip }>('/api/trips', { method: 'POST', body: JSON.stringify(body) }),
+    get: (id: number) =>
+      request<{ trip: ApiTrip }>(`/api/trips/${id}`),
+    update: (id: number, body: { name?: string; destination?: string; startDate?: string | null; endDate?: string | null }) =>
+      request<{ trip: ApiTrip }>(`/api/trips/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    archive: (id: number) =>
+      request<{ trip: ApiTrip }>(`/api/trips/${id}/archive`, { method: 'POST' }),
+    // Member lifecycle — invite/accept/decline replaces the old direct-add
+    // flow. Host sends an invite; the invitee can accept (becomes a
+    // TripMember) or decline.
+    inviteMember: (id: number, username: string) =>
+      request<{ trip: ApiTrip; invite: ApiTripInvite }>(`/api/trips/${id}/invites`, { method: 'POST', body: JSON.stringify({ username }) }),
+    importInvitesFromGroup: (id: number, groupId: number) =>
+      request<{ trip: ApiTrip; invited: number; skipped: number }>(`/api/trips/${id}/invites/import-from-group`, { method: 'POST', body: JSON.stringify({ groupId }) }),
+    rescindInvite: (id: number, inviteId: number) =>
+      request<{ trip: ApiTrip }>(`/api/trips/${id}/invites/${inviteId}`, { method: 'DELETE' }),
+    respondToInvite: (id: number, inviteId: number, action: 'accept' | 'decline') =>
+      request<{ trip?: ApiTrip; message?: string }>(`/api/trips/${id}/invites/${inviteId}/respond`, { method: 'POST', body: JSON.stringify({ action }) }),
+    listMyInvites: () =>
+      request<{ invites: ApiTripIncomingInvite[] }>('/api/trips/me/invites'),
+    removeMember: (id: number, userId: number) =>
+      request<{ trip?: ApiTrip; message?: string }>(`/api/trips/${id}/members/${userId}`, { method: 'DELETE' }),
+    addAnchor: (id: number, body: { label: string; address: string; isPrimary?: boolean }) =>
+      request<{ anchor: ApiTripAnchor }>(`/api/trips/${id}/anchors`, { method: 'POST', body: JSON.stringify(body) }),
+    updateAnchor: (id: number, anchorId: number, body: { label?: string; address?: string; isPrimary?: boolean }) =>
+      request<{ anchor: ApiTripAnchor }>(`/api/trips/${id}/anchors/${anchorId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    deleteAnchor: (id: number, anchorId: number) =>
+      request<{ message: string }>(`/api/trips/${id}/anchors/${anchorId}`, { method: 'DELETE' }),
+
+    // ── Meal events ──────────────────────────────────────────────
+    // Lifecycle mirrors groups' event API (groupsApi.js) but scoped to
+    // the trip and with three trip-specific fields: scheduledFor (the
+    // meal time), mealSlot, and participantUserIds.
+    createEvent: (id: number, body: {
+      name: string;
+      scheduledFor?: string | null;
+      mealSlot?: TripMealSlot | null;
+      participantUserIds?: number[];
+    }) =>
+      request<{ event: ApiTripMealEvent }>(`/api/trips/${id}/events`, { method: 'POST', body: JSON.stringify(body) }),
+    updateEvent: (id: number, eventId: number, body: {
+      name?: string;
+      scheduledFor?: string | null;
+      mealSlot?: TripMealSlot | null;
+      participantUserIds?: number[];
+    }) =>
+      request<{ event: ApiTripMealEvent }>(`/api/trips/${id}/events/${eventId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    deleteEvent: (id: number, eventId: number) =>
+      request<{ message: string }>(`/api/trips/${id}/events/${eventId}`, { method: 'DELETE' }),
+    addEventOption: (id: number, eventId: number, restaurantId: number) =>
+      request<{ option: ApiTripMealOption }>(`/api/trips/${id}/events/${eventId}/options`, { method: 'POST', body: JSON.stringify({ restaurantId }) }),
+    removeEventOption: (id: number, eventId: number, restaurantId: number) =>
+      request<{ message: string }>(`/api/trips/${id}/events/${eventId}/options/${restaurantId}`, { method: 'DELETE' }),
+    setVoteMethod: (id: number, eventId: number, voteMethod: 'SIMPLE' | 'RANKED') =>
+      request<{ voteMethod: string }>(`/api/trips/${id}/events/${eventId}/vote-method`, { method: 'PATCH', body: JSON.stringify({ voteMethod }) }),
+    // Set (or clear with null) the time at which the on-read sweeper opens
+    // voting automatically. Mirrors groupsApi.setSchedule for symmetry.
+    setSchedule: (id: number, eventId: number, votingStartsAt: string | null) =>
+      request<{ votingStartsAt: string | null }>(`/api/trips/${id}/events/${eventId}/schedule`, { method: 'PATCH', body: JSON.stringify({ votingStartsAt }) }),
+    startVoting: (id: number, eventId: number) =>
+      request<{ sessionId: string }>(`/api/trips/${id}/events/${eventId}/start-voting`, { method: 'POST' }),
+    cancelVoting: (id: number, eventId: number) =>
+      request<{ message: string }>(`/api/trips/${id}/events/${eventId}/cancel-voting`, { method: 'POST' }),
+    acceptResult: (id: number, eventId: number) =>
+      request<{ message: string }>(`/api/trips/${id}/events/${eventId}/accept-result`, { method: 'POST' }),
+    getEvent: (id: number, eventId: number) =>
+      request<{ event: ApiTripMealEvent }>(`/api/trips/${id}/events/${eventId}`),
+  },
 };
+
+// ── Trip types ─────────────────────────────────────────────────
+export interface ApiTripMember {
+  userId: number;
+  joinedAt: string;
+  user: { id: number; username: string; avatarUrl: string | null };
+}
+
+export interface ApiTripAnchor {
+  id: number;
+  tripId: number;
+  label: string;
+  address: string;
+  isPrimary: boolean;
+  createdAt: string;
+}
+
+export interface ApiTripInvite {
+  id: number;
+  invitedId: number;
+  invitedById: number;
+  status: 'PENDING' | 'ACCEPTED' | 'DECLINED';
+  createdAt: string;
+  invited:   { id: number; username: string; avatarUrl: string | null };
+  invitedBy: { id: number; username: string; avatarUrl: string | null };
+}
+
+// Shape returned by /me/invites — pendings only, denormalized with the
+// trip header so the navbar bell can render the trip name + destination
+// without a follow-up fetch per row.
+export interface ApiTripIncomingInvite {
+  id: number;
+  tripId: number;
+  createdAt: string;
+  trip: { id: number; name: string; destination: string };
+  invitedBy: { id: number; username: string; avatarUrl: string | null };
+}
+
+export type TripMealSlot = 'BREAKFAST' | 'LUNCH' | 'DINNER' | 'SNACK';
+
+// A restaurant pinned as a candidate on a trip meal event. Matches the
+// shape returned by the backend's mealEventInclude — denormalized restaurant
+// fields are inlined so meal cards render in one pass.
+export interface ApiTripMealOption {
+  id: number;
+  eventId: number;
+  restaurantId: number;
+  addedById: number;
+  createdAt: string;
+  restaurant: {
+    id: number;
+    name: string;
+    cuisineType: string | null;
+    priceLevel: number | null;
+    address: string | null;
+    lat: number | null;
+    lng: number | null;
+  };
+  addedBy?: { id: number; username: string };
+}
+
+// Result row written when a trip meal vote concludes. Same shape family as
+// the group-side GroupEventResult; the inline pool snapshot makes the
+// "meal already happened" card self-contained even after the session expires.
+export interface ApiTripMealResult {
+  id: number;
+  eventId: number;
+  hostUsername: string;
+  winnerName: string;
+  method: string;
+  voteMethod: string | null;
+  participants: string[];
+  scores: Record<string, number> | null;
+  ballots: unknown;
+  voterMeta: unknown;
+  irvRounds: unknown;
+  restaurantPool: unknown;
+  createdAt: string;
+}
+
+export interface ApiTripMealEvent {
+  id: number;
+  tripId: number | null;
+  groupId: number | null;       // always null for trip events; kept for clarity
+  name: string;
+  status: 'OPEN' | 'VOTING' | 'DONE';
+  voteMethod: 'SIMPLE' | 'RANKED';
+  mealSlot: TripMealSlot | null;
+  participantUserIds: number[]; // empty array = "everyone on the trip"
+  scheduledFor: string | null;
+  votingStartsAt: string | null;
+  sessionId: string | null;
+  createdById: number | null;
+  createdAt: string;
+  options: ApiTripMealOption[];
+  createdBy: { id: number; username: string } | null;
+  result: ApiTripMealResult | null;
+}
+
+// Slim shape returned by `GET /api/trips` — the Trips landing list. Drops
+// the heavy nested arrays (members, anchors, invites, events) in favor of
+// inline counts so the list payload is O(trips), not O(trips × events ×
+// options). TripDetailPage still gets the full `ApiTrip` from `GET /:id`.
+export interface ApiTripListEntry {
+  id: number;
+  name: string;
+  destination: string;
+  startDate: string | null;
+  endDate: string | null;
+  hostId: number;
+  archivedAt: string | null;
+  createdAt: string;
+  host: { id: number; username: string; avatarUrl: string | null };
+  // Primary anchor only — SearchPage's trip-override banner needs it.
+  // All anchors live on the detail endpoint's full ApiTrip.
+  anchors: Array<{ id: number; label: string; address: string; isPrimary: boolean }>;
+  _count: { members: number; events: number; anchors: number };
+}
+
+export interface ApiTrip {
+  id: number;
+  name: string;
+  destination: string;
+  startDate: string | null;
+  endDate: string | null;
+  hostId: number;
+  archivedAt: string | null;
+  createdAt: string;
+  host: { id: number; username: string; avatarUrl: string | null };
+  members: ApiTripMember[];
+  anchors: ApiTripAnchor[];
+  invites: ApiTripInvite[];
+  events: ApiTripMealEvent[];
+}

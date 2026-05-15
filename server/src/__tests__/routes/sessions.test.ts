@@ -129,10 +129,10 @@ describe('POST /api/sessions/:id/join — voterMeta capture', () => {
       .send({ name: 'bob' });
 
     expect(res.status).toBe(200);
-    expect(res.body.session.voterMeta.bob).toEqual({ isGuest: true, username: null });
+    expect(res.body.session.voterMeta.bob).toEqual({ isGuest: true, username: null, userId: null });
   });
 
-  it('records the auth username when the joiner sends a valid token cookie', async () => {
+  it('records the auth username + userId when the joiner sends a valid token cookie', async () => {
     const sess = { ...baseSession, voters: {}, voterMeta: {} };
     mockSessions.getSession.mockResolvedValue(sess);
     // The user.findUnique on the prisma mock returns whatever we tell it to —
@@ -148,6 +148,7 @@ describe('POST /api/sessions/:id/join — voterMeta capture', () => {
     expect(res.body.session.voterMeta['Bob the Dinner Picker']).toEqual({
       isGuest: false,
       username: 'realname42',
+      userId: 7,
     });
   });
 
@@ -155,7 +156,7 @@ describe('POST /api/sessions/:id/join — voterMeta capture', () => {
     const sess = {
       ...baseSession,
       voters: { bob: {} },
-      voterMeta: { bob: { isGuest: true, username: null } },
+      voterMeta: { bob: { isGuest: true, username: null, userId: null } },
     };
     mockSessions.getSession.mockResolvedValue(sess);
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ username: 'bobsmith' });
@@ -166,7 +167,7 @@ describe('POST /api/sessions/:id/join — voterMeta capture', () => {
       .send({ name: 'bob' });
 
     expect(res.status).toBe(200);
-    expect(res.body.session.voterMeta.bob).toEqual({ isGuest: false, username: 'bobsmith' });
+    expect(res.body.session.voterMeta.bob).toEqual({ isGuest: false, username: 'bobsmith', userId: 7 });
   });
 });
 
@@ -211,6 +212,148 @@ describe('POST /api/sessions/:id/join', () => {
       .send({ name: 'bob' });
     expect(res.status).toBe(200);
     expect(res.body.session).toBeDefined();
+  });
+});
+
+// ── Trip-context auth gate (Phase 3) ──────────────────────────
+// Behavior matrix at /join when session.tripId is set:
+//
+//   Authed + trip member + (no participant list OR in list)  → allowed
+//   Authed + trip member + has participant list + not in it  → 403
+//   Authed + not a trip member                                → 403
+//   Guest (no cookie)                                          → allowed (current behavior preserved)
+//   Group session (tripId = 0)                                 → gate skipped entirely
+describe('POST /api/sessions/:id/join — trip-context auth', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  // Session that lives on Trip 42, Event 10. The session itself is in lobby
+  // status with an empty voter list; the join handler will run end-to-end.
+  const tripSession = {
+    ...baseSession,
+    groupId: 0,
+    tripId:  42,
+    eventId: 10,
+    voters: {} as Record<string, Record<string, boolean>>,
+    voterMeta: {},
+  };
+
+  it('lets a signed-in trip member join', async () => {
+    mockSessions.getSession.mockResolvedValue(tripSession);
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ username: 'bobsmith' });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      tripId: 42, participantUserIds: [],
+    });
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue({
+      hostId: 99,
+      members: [{ userId: 7 }], // user 7 is on the trip
+    });
+
+    const res = await request(buildApp())
+      .post('/api/sessions/sess-abc/join')
+      .set('Cookie', authCookie(7))
+      .send({ name: 'Bob' });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a signed-in non-member with 403', async () => {
+    mockSessions.getSession.mockResolvedValue(tripSession);
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ username: 'stranger' });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      tripId: 42, participantUserIds: [],
+    });
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue({
+      hostId: 99,
+      members: [], // empty: user 7 isn't on the trip
+    });
+
+    const res = await request(buildApp())
+      .post('/api/sessions/sess-abc/join')
+      .set('Cookie', authCookie(7))
+      .send({ name: 'Random' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/not a member of this trip/i);
+  });
+
+  it('rejects a signed-in trip member who is not on the meal participant list', async () => {
+    mockSessions.getSession.mockResolvedValue(tripSession);
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ username: 'bobsmith' });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      tripId: 42,
+      participantUserIds: [99, 8], // user 7 is NOT in this list
+    });
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue({
+      hostId: 99,
+      members: [{ userId: 7 }], // user 7 IS on the trip overall
+    });
+
+    const res = await request(buildApp())
+      .post('/api/sessions/sess-abc/join')
+      .set('Cookie', authCookie(7))
+      .send({ name: 'Bob' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/limited to selected participants/i);
+  });
+
+  it('lets the trip host join even when not in participantUserIds', async () => {
+    // The host might not bother adding themselves to the participant list —
+    // the host check (tripRow.hostId === authUserId) short-circuits the
+    // membership probe before participantUserIds is consulted.
+    mockSessions.getSession.mockResolvedValue(tripSession);
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ username: 'alice' });
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      tripId: 42,
+      participantUserIds: [99, 8], // host id 99 IS in the list here, but
+                                   // we want to verify the membership check
+                                   // accepts the host regardless.
+    });
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue({
+      hostId: 99,
+      members: [], // even if the host has no trip_members row,
+                   // the hostId match should pass membership.
+    });
+
+    const res = await request(buildApp())
+      .post('/api/sessions/sess-abc/join')
+      .set('Cookie', authCookie(99))
+      .send({ name: 'Alice' });
+
+    expect(res.status).toBe(200);
+  });
+
+  it('lets a guest (no cookie) join a trip session regardless of membership', async () => {
+    // Guests with the link are allowed by design; the participantUserIds
+    // gate only applies to known accounts. No trip lookup should happen.
+    mockSessions.getSession.mockResolvedValue(tripSession);
+
+    const res = await request(buildApp())
+      .post('/api/sessions/sess-abc/join')
+      .send({ name: 'Guest' });
+
+    expect(res.status).toBe(200);
+    // The trip/event lookups should NOT have been triggered — there's no
+    // authUserId to gate against, so the new code path bails early.
+    expect(mockPrisma.trip.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.groupEvent.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('skips the trip-auth path entirely for group sessions (tripId = 0)', async () => {
+    // Group session — tripId is 0/falsy. Even an authed user should not
+    // trigger the new lookups.
+    const groupSession = { ...baseSession, groupId: 1, tripId: 0, voters: {} };
+    mockSessions.getSession.mockResolvedValue(groupSession);
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({ username: 'bobsmith' });
+
+    const res = await request(buildApp())
+      .post('/api/sessions/sess-abc/join')
+      .set('Cookie', authCookie(7))
+      .send({ name: 'Bob' });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.trip.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.groupEvent.findUnique).not.toHaveBeenCalled();
   });
 });
 
