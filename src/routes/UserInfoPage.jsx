@@ -401,7 +401,7 @@ const UserInfoPage = () => {
                     type="text"
                     value={newLabel}
                     onChange={(e) => { setNewLabel(e.target.value); setAddError(''); }}
-                    placeholder="Label (e.g. Home)"
+                    placeholder="(e.g. Home)"
                     maxLength={64}
                     className="sm:w-32 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
                   />
@@ -634,7 +634,20 @@ const UserInfoPage = () => {
               </button>
               <button
                 onClick={handleDeleteAccount}
-                disabled={deleteConfirmText !== userInfo.username || deleteLoading}
+                disabled={
+                  // The username must exist AND match. Without the
+                  // first clause, an empty userInfo.username (e.g.
+                  // mid-session-restore before identity hydrates)
+                  // makes empty input "match" empty username and
+                  // the button enables on first render — the
+                  // opposite of what we want for a destructive
+                  // action. Explicit non-empty guard locks the
+                  // button until both sides are populated and
+                  // exactly equal.
+                  !userInfo.username
+                  || deleteConfirmText !== userInfo.username
+                  || deleteLoading
+                }
                 className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 {deleteLoading ? 'Deleting…' : 'Delete permanently'}

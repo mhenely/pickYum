@@ -4,6 +4,7 @@ import chooseModalReducer from "./slices/chooseModalSlice";
 import authReducer from "./slices/authSlice";
 import ratingReducer from "./slices/ratingSlice";
 import searchReducer from "./slices/searchSlice";
+import celebrationReducer from "./slices/celebrationSlice";
 import { listenerMiddleware } from "./listenerMiddleware";
 
 const store = configureStore({
@@ -13,6 +14,9 @@ const store = configureStore({
     chooseModal: chooseModalReducer,
     rating: ratingReducer,
     search: searchReducer,
+    // Transient UI state for the post-Choose-Now celebration modal.
+    // Not persisted to localStorage — it's a popup, not user data.
+    celebration: celebrationReducer,
   },
   middleware: (getDefault) =>
     getDefault().prepend(listenerMiddleware.middleware),

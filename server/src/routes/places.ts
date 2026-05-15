@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/auth';
 import redis from '../lib/redis';
+import { trackGoogleCall } from '../lib/apiUsage';
 
 const router = Router();
 
@@ -149,15 +150,32 @@ function extractRegularOpeningHours(p: RawPlace): RegularOpeningHours | null {
 }
 
 // ── Cache layer (Redis when available, in-memory fallback) ───────────────
-const NEARBY_TTL_S   = 10 * 60; // 10 minutes
+//
+// TTLs picked to maximize cache hit rate without serving meaningfully
+// stale data. Bumped from earlier defaults to cut Google Places spend
+// — restaurant data doesn't change minute-to-minute, and the cost
+// pressure on the Places API budget made the conservative defaults
+// hard to justify.
+//
+// NEARBY: 30 min. A user typing in a filter, hitting search, tweaking
+// the radius, and re-searching the same address-area gets a free hit
+// on the second click. Restaurants don't open/close that fast.
+const NEARBY_TTL_S   = 30 * 60; // 30 minutes
 const TEXT_TTL_S     =  5 * 60; //  5 minutes
-// Geocoding results barely change — "1600 Pennsylvania Ave, DC" resolved
-// once is good for hours. A 30-minute TTL absorbs the typical
-// search-search-search pattern from a single user iterating on radius
-// without re-hitting the Geocoding API quota (which is billed
-// separately from the Places quota). Keyed on the raw address string so
-// even mistypes share the same cache slot on retry.
-const GEOCODE_TTL_S  = 30 * 60; // 30 minutes
+// Geocoding results essentially never change — an address resolves
+// to the same lat/lng forever (until the post office renumbers a
+// street, which is rare). Bumped to 24h so a daily user pays the
+// geocode SKU once a day instead of every 30 min. Geocoding is
+// already the cheapest API ($5/1k) so the savings are small, but
+// no real downside.
+const GEOCODE_TTL_S  = 24 * 60 * 60; // 24 hours
+// Signed Google CDN photo URLs are valid for a few hours, so caching
+// at 30 min is well within the safe window. Drops a 10-100×
+// reduction on the biggest cost line — without this cache, every
+// <img> render hits Google's /v1/{name}/media endpoint (billed per
+// call) even though the actual image bytes come from the
+// publicly-cached CDN URL.
+const PHOTO_URL_TTL_S = 30 * 60; // 30 minutes
 
 interface NearbyEntry {
   restaurants: unknown[];
@@ -176,6 +194,13 @@ interface GeocodeEntry { lat: number; lng: number; formattedAddress: string; }
 const inMemNearby   = new Map<string, NearbyEntry  & { expiresAt: number }>();
 const inMemText     = new Map<string, TextEntry    & { expiresAt: number }>();
 const inMemGeocode  = new Map<string, GeocodeEntry & { expiresAt: number }>();
+// Photo signed-URL cache. Each entry maps a (photoName, maxWidthPx)
+// pair to the redirect URL Google returned for it. Photos viewed
+// repeatedly within the 30-min TTL skip the upstream /media call
+// entirely. Without this cache, every <img> render = one Google
+// API call (billed) even though the actual image is served from
+// Google's CDN.
+const inMemPhotoUrl = new Map<string, { url: string; expiresAt: number }>();
 
 async function nearbyGet(key: string): Promise<NearbyEntry | null> {
   if (redis && redis.status === 'ready') {
@@ -248,6 +273,30 @@ async function geocodeSet(address: string, value: GeocodeEntry): Promise<void> {
     return;
   }
   inMemGeocode.set(key, { ...value, expiresAt: Date.now() + GEOCODE_TTL_S * 1000 });
+}
+
+// Photo signed-URL cache. Key is `(photoName, maxWidthPx)` because
+// Google returns a different signed URL per requested width.
+// Returns null on miss; caller proceeds to fetch from Google.
+async function photoUrlGet(name: string, maxWidthPx: number): Promise<string | null> {
+  const key = `${name}::${maxWidthPx}`;
+  if (redis && redis.status === 'ready') {
+    return await redis.get(`places:photoUrl:${key}`).catch(() => null);
+  }
+  const e = inMemPhotoUrl.get(key);
+  return e && e.expiresAt > Date.now() ? e.url : null;
+}
+
+// Fire-and-forget store — failures are non-fatal (we just lose the
+// cache for that one entry, fall through to a fresh Google call on
+// the next miss).
+async function photoUrlSet(name: string, maxWidthPx: number, url: string): Promise<void> {
+  const key = `${name}::${maxWidthPx}`;
+  if (redis && redis.status === 'ready') {
+    await redis.setex(`places:photoUrl:${key}`, PHOTO_URL_TTL_S, url).catch(() => {});
+    return;
+  }
+  inMemPhotoUrl.set(key, { url, expiresAt: Date.now() + PHOTO_URL_TTL_S * 1000 });
 }
 
 // Round to 3 decimal places (~111 m precision) so nearby searches share
@@ -362,6 +411,22 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
   const maxWidthRaw = Number(req.query.maxWidthPx);
   const maxWidthPx = Number.isFinite(maxWidthRaw) ? Math.min(1600, Math.max(100, Math.floor(maxWidthRaw))) : 400;
 
+  // ── Server-side cache check ─────────────────────────────────
+  // Google's signed CDN URLs are valid for several hours; we cache
+  // for 30 min on our side which leaves a comfortable safety margin.
+  // This is the single biggest cost saver — without it, every <img>
+  // render = one Google /media call (billed), even though the
+  // actual image bytes are served from Google's public CDN. With
+  // the cache, the same photo viewed N times in 30 min costs 1
+  // Google call instead of N.
+  const cached = await photoUrlGet(name, maxWidthPx);
+  if (cached) {
+    trackGoogleCall(req, 'photo', { cacheHit: true });
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.redirect(302, cached);
+    return;
+  }
+
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) { res.status(503).json({ error: 'Photo service not configured' }); return; }
 
@@ -372,6 +437,12 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
     if (upstream.status >= 300 && upstream.status < 400) {
       const location = upstream.headers.get('location');
       if (location) {
+        // Cache the signed URL server-side so the next ~30 min worth
+        // of requests for this (name, width) skip Google entirely.
+        // Fire-and-forget — a cache write failure doesn't break the
+        // response.
+        photoUrlSet(name, maxWidthPx, location).catch(() => {});
+        trackGoogleCall(req, 'photo');
         // Cache the *redirect itself* in the browser for 1 hour. The redirect
         // target (Google CDN URL) has its own long-cache headers, so subsequent
         // page loads of the same photo skip both our proxy and the redirect.
@@ -381,9 +452,11 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
       }
     }
     // Non-redirect response or missing Location — treat as upstream failure.
+    trackGoogleCall(req, 'photo', { status: 'error' });
     res.status(502).json({ error: 'Photo unavailable' });
   } catch (err) {
     console.warn('[places] photo proxy failed:', err);
+    trackGoogleCall(req, 'photo', { status: 'error' });
     res.status(502).json({ error: 'Photo unavailable' });
   }
 });
@@ -409,6 +482,7 @@ router.get('/text-search', async (req: Request, res: Response) => {
 
   const cached = await textGet(q);
   if (cached) {
+    trackGoogleCall(req, 'textSearch', { cacheHit: true });
     res.json({ restaurants: cached.restaurants, configured: true });
     return;
   }
@@ -425,9 +499,11 @@ router.get('/text-search', async (req: Request, res: Response) => {
 
   const data = await searchRes.json() as any;
   if (!searchRes.ok) {
+    trackGoogleCall(req, 'textSearch', { status: 'error' });
     res.status(502).json({ error: data.error?.message ?? 'Places text search failed' });
     return;
   }
+  trackGoogleCall(req, 'textSearch');
 
   const restaurants = (data.places ?? [])
     .filter((p: any) => p.businessStatus !== 'CLOSED_PERMANENTLY')
@@ -511,6 +587,13 @@ const EXCLUDED_PRIMARY_TYPES = [
   'bowling_alley', 'casino', 'golf_course',
   'movie_theater', 'performing_arts_theater', 'night_club',
   'park', 'national_park', 'beach',
+  // Live-entertainment / event spaces — these all tag with
+  // `restaurant` in their secondary types when they have a kitchen
+  // or bar, so without explicit exclusion a "Live Music Venue" or
+  // banquet hall lands in our restaurant results. Caught with this
+  // group instead of the broader attractions block above so it's
+  // obvious which categories drove the addition.
+  'live_music_venue', 'comedy_club', 'event_venue', 'banquet_hall',
   // Lodging (often has on-site restaurants, but it's a hotel listing)
   'lodging', 'hotel', 'motel', 'resort_hotel',
   'bed_and_breakfast', 'campground', 'hostel',
@@ -627,6 +710,7 @@ router.get('/nearby', async (req: Request, res: Response) => {
   let formattedAddress: string;
   const cachedGeocode = await geocodeGet(address);
   if (cachedGeocode) {
+    trackGoogleCall(req, 'geocode', { cacheHit: true });
     ({ lat, lng, formattedAddress } = cachedGeocode);
   } else {
     const geocodeUrl =
@@ -640,12 +724,14 @@ router.get('/nearby', async (req: Request, res: Response) => {
         ? 'Geocoding API denied the request — ensure the Geocoding API is enabled in Google Cloud Console.'
         : 'Could not find that location — try a different address or zip code.';
       console.error('[places] Geocode failed:', geocodeData.status, geocodeData.error_message ?? '');
+      trackGoogleCall(req, 'geocode', { status: 'error' });
       res.status(400).json({ error: msg });
       return;
     }
 
     const geoLoc = geocodeData.results[0].geometry?.location;
     if (!geoLoc) {
+      trackGoogleCall(req, 'geocode', { status: 'error' });
       res.status(400).json({ error: 'Could not find that location — try a different address or zip code.' });
       return;
     }
@@ -654,12 +740,18 @@ router.get('/nearby', async (req: Request, res: Response) => {
     formattedAddress = geocodeData.results[0].formatted_address ?? '';
     // Fire-and-forget cache write — failures are non-fatal.
     geocodeSet(address, { lat, lng, formattedAddress }).catch(() => {});
+    trackGoogleCall(req, 'geocode');
   }
 
   // ── 2. Check cache before hitting the Places API ──────────────
   const key = cacheKey(lat, lng, radius, cuisineType);
   const cached = await nearbyGet(key);
   if (cached) {
+    // Cache hit covers the entire nearby fan-out (1-3 slices
+    // depending on cuisineType). Record one cacheHit entry — the
+    // dashboard interprets "1 nearby cache hit" as "we saved an
+    // entire fan-out's worth of upstream calls."
+    trackGoogleCall(req, 'nearby', { cacheHit: true });
     // rawPlaces is intentionally kept in the cache (useful for debugging
     // and potential future audit) but NOT sent to the client — the
     // frontend doesn't read it, and shipping the full Google Places
@@ -717,19 +809,25 @@ router.get('/nearby', async (req: Request, res: Response) => {
 
   // Collect successful payloads; log + skip rejected slices. Most
   // common rejection cause is a transient Google 5xx — we don't fail
-  // the whole search on one bad slice.
+  // the whole search on one bad slice. Each slice is independently
+  // recorded in api_usage so a 2-slice success + 1-slice failure
+  // shows up as 2 successful + 1 errored nearby call (errors don't
+  // accrue cost in the counter).
   const slicePayloads: Array<{ places: any[] }> = [];
   for (let i = 0; i < nearbyResponses.length; i++) {
     const res_i = nearbyResponses[i];
     if (res_i.status === 'rejected') {
       console.warn(`[places] Nearby slice ${i} fetch failed:`, res_i.reason);
+      trackGoogleCall(req, 'nearby', { status: 'error' });
       continue;
     }
     const { ok, data } = res_i.value;
     if (!ok || data.error) {
       console.warn(`[places] Nearby slice ${i} returned error:`, JSON.stringify(data.error ?? ok));
+      trackGoogleCall(req, 'nearby', { status: 'error' });
       continue;
     }
+    trackGoogleCall(req, 'nearby');
     slicePayloads.push({ places: Array.isArray(data.places) ? data.places : [] });
   }
 
@@ -759,9 +857,21 @@ router.get('/nearby', async (req: Request, res: Response) => {
   }
   const mergedPlaces = Array.from(byId.values());
 
+  // Defense-in-depth filter: `excludedPrimaryTypes` is a hint to
+  // Google, not a guarantee. The hint catches the vast majority of
+  // venues that happen to tag with `restaurant` in their secondary
+  // types, but occasionally a result still slips through — e.g. a
+  // live-music venue whose primaryType is `live_music_venue` arrived
+  // in nearby results despite the exclusion list. We re-check the
+  // primaryType on the response side and drop any straggler, so a
+  // mis-honored hint can't reach the user. Using a Set for O(1)
+  // lookups vs the array's O(n).
+  const excludedPrimarySet = new Set(EXCLUDED_PRIMARY_TYPES);
+
   // ── 4. Transform to app shape ─────────────────────────────────
   const restaurants = mergedPlaces
     .filter((p: any) => p.businessStatus !== 'CLOSED_PERMANENTLY')
+    .filter((p: any) => !(typeof p?.primaryType === 'string' && excludedPrimarySet.has(p.primaryType)))
     .map((p: any) => {
       const pLat: number | undefined = p.location?.latitude;
       const pLng: number | undefined = p.location?.longitude;

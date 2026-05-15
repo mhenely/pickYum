@@ -1,8 +1,10 @@
 import { useState, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
-import { updateUserFavorites, archiveRestaurant, unarchiveRestaurant, removeFromHistory } from '../redux/slices/userInfoSlice';
+import { archiveRestaurant, unarchiveRestaurant, removeFromHistory } from '../redux/slices/userInfoSlice';
 import RestaurantCard from '../components/RestaurantCard';
+import HeartWithKebab from '../components/HeartWithKebab';
+import HistoryRowKebab from '../components/HistoryRowKebab';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import useCurrentUser from '../hooks/useCurrentUser';
 import { buildAcceptedStats, formatLastChosen } from '../utils/acceptedStats';
@@ -126,7 +128,7 @@ const UserHistoryPage = () => {
     [currentUser.accepted],
   );
 
-  const { displayIds, displayArchivedIds, favoriteSet } = useMemo(() => {
+  const { displayIds, displayArchivedIds } = useMemo(() => {
     const archivedSet = new Set((currentUser.archived ?? []).map(String));
     const favoriteSet = new Set(currentUser.favorites.map(String));
 
@@ -157,7 +159,6 @@ const UserHistoryPage = () => {
     return {
       displayIds:         [...filteredIds].sort(sortFn),
       displayArchivedIds: [...archivedIds].sort(sortFn),
-      favoriteSet,
     };
   }, [
     currentUser.accepted, currentUser.archived,
@@ -247,13 +248,21 @@ const UserHistoryPage = () => {
               personalRating={personalRating}
               lastChosen={formatLastChosen(acceptedStats, id)}
               // Whole-card click opens the detail modal (read view).
-              // Favorite heart toggle uses the shared
-              // updateUserFavorites flow — no longer a custom button.
+              // Heart toggle + multi-list kebab via HeartWithKebab —
+              // same component the other favoriting surfaces use, so
+              // a user can favorite / move-between-lists from history
+              // without bouncing through the modal. <HistoryRowKebab>
+              // sits beside it for the HistoryPage-only "exclude from
+              // insights" toggle; kept as a separate component so the
+              // shared HeartWithKebab metaphor (list management only)
+              // stays uncluttered across the other surfaces that use it.
               onCardClick={() => openDetail(id)}
-              isFavorited={favoriteSet.has(String(id))}
-              onFavoriteToggle={() =>
-                dispatch(updateUserFavorites({ restaurantId: id, userId: currentUser.id }))
-              }
+              cornerSlot={(
+                <div className="inline-flex items-center gap-1 shrink-0">
+                  <HeartWithKebab restaurantId={id} size="md" />
+                  <HistoryRowKebab restaurantId={id} size="md" />
+                </div>
+              )}
             >
               {/* "Add Review" bottom action — opens the detail modal
                   with the write-review form pre-expanded. Archive /

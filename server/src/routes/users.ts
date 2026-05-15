@@ -8,6 +8,19 @@ import { validatePassword } from './auth';
 import { issueToken } from '../lib/emailTokens';
 import { sendEmail, verifyEmailTemplate } from '../lib/email';
 import { logger } from '../lib/logger';
+import { trackGoogleCall } from '../lib/apiUsage';
+import {
+  LIST_COLOR_PALETTE,
+  LIST_WITH_ENTRIES_SELECT,
+  MAX_LIST_DESCRIPTION_LEN,
+  MAX_LIST_ENTRY_NOTE_LEN,
+  MAX_LIST_NAME_LEN,
+  MAX_LISTS_PER_USER,
+  InvalidColorError,
+  normalizeColor,
+  serializeList,
+  ensureDefaultFavoriteList,
+} from '../lib/favoriteLists';
 
 const router = Router();
 
@@ -269,19 +282,38 @@ router.delete('/me', async (req: Request, res: Response) => {
 // Restaurant payload is sent through 5 separate collections; each row was
 // previously a full Restaurant (every column). The frontend slice
 // (userInfoSlice.loadUserData) only reads a fixed set of fields, so we
-// project them server-side to slim the response by ~40%. Anything not in
-// here is unused at the call site; if you need a new field on cards, add
-// it here AND in the addCustomRestaurant mapping in the slice.
+// project them server-side. Anything not in here is unused at the call
+// site; if you need a new field on cards, add it here AND in the
+// addCustomRestaurant mapping in the slice.
+//
+// THIS PROJECTION IS THE SESSION-RESTORE BOTTLENECK. Anything you want
+// to survive a logout/login cycle on cards/modals MUST be listed here
+// — otherwise the field comes back from /me/all as undefined and the
+// frontend can only repopulate it via a fresh nearby search. Found and
+// fixed an instance where photos / ratingCount / regularOpeningHours /
+// address were missing here even though they were persisted in the DB
+// (added via materialize + refresh-places); the cards rendered them
+// after a search but lost them on the next session.
+//
+// yelpUrl was previously selected here too, but no UI surface reads
+// it anymore — dropped to keep the projection lean.
 const RESTAURANT_CARD_SELECT = {
   id: true,
   name: true,
   cuisineType: true,
   priceLevel: true,
   googleRating: true,
+  // Number of Google ratings backing the average. UI uses it to show
+  // "4.5 (827 ratings)" — without it the count silently disappears
+  // after a session refresh.
+  ratingCount: true,
+  // Free-form opening-hours string (typically null — only set on
+  // user-typed custom rows that supplied an Opens line).
   hours: true,
   phone: true,
   website: true,
-  yelpUrl: true,
+  // Postal address rendered in the modal's Contact info grid.
+  address: true,
   takeout: true,
   delivery: true,
   googlePlaceId: true,
@@ -289,44 +321,91 @@ const RESTAURANT_CARD_SELECT = {
   // payload addition. Frontend skips rows where these are null.
   lat: true,
   lng: true,
+  // Cached Google Places photo metadata array. Drives the photo
+  // carousel on cards + the photo hero/strip in the detail modal.
+  // JSON column — typical row carries 200-500 bytes.
+  photos: true,
+  // Structured weekly hours used by the open-now / closing-soon
+  // indicator + the collapsible weekday table. JSON column —
+  // typical row carries 300-800 bytes.
+  regularOpeningHours: true,
+  // Custom-row opt-out for the post-search match-suggestion scan.
+  // Read by the frontend to skip a custom row when scanning
+  // search results; toggled by the user via the match-confirm
+  // modal's "Stop asking" button or the detail-modal toggle.
+  excludeFromPlaceMatching: true,
+  // Surfaces a "Google data updated 2 months ago" indicator on the
+  // detail modal so users know to expect possible staleness when
+  // STALE_DAYS is set to 90. Null for custom rows + legacy
+  // pre-rollout rows; rendered only when older than ~7 days so
+  // freshly-refreshed rows don't show noise like "updated today".
+  googleDataUpdatedAt: true,
 } as const;
 
+// Bump this whenever /me/all's response shape changes in a breaking
+// way (added fields are non-breaking; removed/renamed fields are).
+// Future mobile clients use it to detect "please update" scenarios
+// instead of failing on missing keys. Mirrored by ApiMeAllResponse
+// in src/lib/api.ts — update both together.
+//
+//   v1 → original Option-B normalized shape (deduped restaurants[]
+//        + per-collection ID arrays).
+//   v2 → adds favoriteLists[] (multi-list favorites). `favoriteIds`
+//        stays during the transition as a derived view of the
+//        default list's entries; drop in a future minor bump after
+//        all client surfaces read from favoriteLists.
+const ME_ALL_API_VERSION = 2;
+
 router.get('/me/all', async (req: Request, res: Response) => {
-  const [favRows, optRows, accRows, arcRows, revRows, addrRows] = await Promise.all([
+  // Five thin ID-only fetches + one batched restaurant lookup. Replaces
+  // the previous shape that joined the full Restaurant onto each
+  // collection row — that shipped the same restaurant data N times for
+  // any row appearing in two collections, AND silently dropped any
+  // "accepted-only" restaurants because the accepted query was thin
+  // (no join). The deduped shape solves both at once and is the right
+  // mobile-friendly contract for the upcoming mobile client.
+  //
+  // favoriteListRows added in apiVersion=2: each row carries its
+  // entries inline. Backfill migration guarantees every user with
+  // prior favorites has a default list; defensive ensureDefault
+  // below covers the edge case where neither path created one.
+  const [favRows, optRows, accRows, arcRows, revRows, addrRows, favListRows] = await Promise.all([
     prisma.userFavorite.findMany({
       where: { userId: req.userId },
-      select: { restaurant: { select: RESTAURANT_CARD_SELECT } },
+      select: { restaurantId: true },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.userOption.findMany({
       where: { userId: req.userId },
-      select: { restaurant: { select: RESTAURANT_CARD_SELECT } },
+      select: { restaurantId: true },
       orderBy: { createdAt: 'asc' },
     }),
     prisma.userAccepted.findMany({
       where: { userId: req.userId },
-      // Only restaurantId + acceptedAt are read here; the slice doesn't
-      // touch optionsSnapshot / chooseMethod / eventId in this path
-      // (Insights has its own endpoint that fetches those).
-      select: { restaurantId: true, acceptedAt: true },
+      // `id` + `excludeFromInsights` ship with each row so the client
+      // can target a specific acceptance with PATCH /me/accepted/:id
+      // and render the "off-the-record" badge in History without a
+      // second roundtrip. Pre-rollout rows default to false (NOT NULL
+      // with a `false` default), so existing clients reading the
+      // expanded shape see the same insights behavior they had before.
+      select: { id: true, restaurantId: true, acceptedAt: true, excludeFromInsights: true },
       orderBy: { acceptedAt: 'desc' },
     }),
     prisma.userArchive.findMany({
       where: { userId: req.userId },
-      select: { restaurant: { select: RESTAURANT_CARD_SELECT } },
+      select: { restaurantId: true },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.review.findMany({
       where: { userId: req.userId },
-      // Slice reads id, content, rating, restaurantId, createdAt; restaurant
-      // is also walked so we populate customRestaurants on hydrate.
+      // No nested restaurant — the client joins by restaurantId
+      // against the deduped restaurants array below.
       select: {
         id: true,
         content: true,
         rating: true,
         restaurantId: true,
         createdAt: true,
-        restaurant: { select: RESTAURANT_CARD_SELECT },
       },
       orderBy: { createdAt: 'desc' },
     }),
@@ -336,15 +415,74 @@ router.get('/me/all', async (req: Request, res: Response) => {
       where: { userId: req.userId },
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     }),
+    // Multi-list favorites. Ordered by position so the client gets a
+    // stable display order without a second pass; entries are
+    // ordered most-recent-first inside the LIST_WITH_ENTRIES_SELECT.
+    prisma.favoriteList.findMany({
+      where: { userId: req.userId },
+      orderBy: { position: 'asc' },
+      select: LIST_WITH_ENTRIES_SELECT,
+    }),
   ]);
 
+  // Defensive bootstrap: a user with zero lists (legacy account or
+  // a freshly-deleted-everything case) gets a default created here
+  // so the client never sees a list-less account. Common path is
+  // skipped via the favListRows.length > 0 check.
+  let lists = favListRows;
+  if (lists.length === 0) {
+    await ensureDefaultFavoriteList(req.userId);
+    lists = await prisma.favoriteList.findMany({
+      where: { userId: req.userId },
+      orderBy: { position: 'asc' },
+      select: LIST_WITH_ENTRIES_SELECT,
+    });
+  }
+
+  // Distinct set of every restaurant the user references via ANY
+  // collection — including entries inside favorite lists, since
+  // those are the new primary read path for favorites surfaces.
+  // Set guarantees no duplicate fetches and the spread gives Prisma
+  // a plain array for the IN clause.
+  const linkedIds = new Set<number>();
+  favRows.forEach((r) => linkedIds.add(r.restaurantId));
+  optRows.forEach((r) => linkedIds.add(r.restaurantId));
+  accRows.forEach((r) => linkedIds.add(r.restaurantId));
+  arcRows.forEach((r) => linkedIds.add(r.restaurantId));
+  revRows.forEach((r) => linkedIds.add(r.restaurantId));
+  for (const list of lists) {
+    for (const entry of list.entries) linkedIds.add(entry.restaurantId);
+  }
+
+  const restaurants = linkedIds.size === 0 ? [] : await prisma.restaurant.findMany({
+    where: { id: { in: [...linkedIds] } },
+    select: RESTAURANT_CARD_SELECT,
+  });
+
+  // `favoriteIds` is now derived from the default list's entries
+  // for transition-period back-compat. New client code reads
+  // `favoriteLists` directly; this field can be dropped in a
+  // future minor bump once nothing depends on it.
+  const defaultList = lists.find((l) => l.isDefault) ?? lists[0] ?? null;
+  const favoriteIds = defaultList
+    ? defaultList.entries.map((e) => e.restaurantId)
+    : favRows.map((r) => r.restaurantId);
+
   res.json({
-    favorites: favRows.map((f) => f.restaurant),
-    options: optRows.map((o) => o.restaurant),
-    accepted: accRows,
-    archived: arcRows.map((a) => a.restaurant),
-    reviews: revRows,
-    addresses: addrRows,
+    apiVersion: ME_ALL_API_VERSION,
+    restaurants,
+    favoriteIds,
+    optionIds:       optRows.map((r) => r.restaurantId),
+    archivedIds:     arcRows.map((r) => r.restaurantId),
+    // Accepted is the only collection that's not ID-only — each
+    // accept event carries its own timestamp the client needs for
+    // History ordering / Insights bucketing.
+    acceptedEntries: accRows,
+    // Reviews keep their full row data but reference the restaurant
+    // by ID; the client resolves it via the restaurants[] array.
+    reviews:         revRows,
+    addresses:       addrRows,
+    favoriteLists:   lists.map(serializeList),
   });
 });
 
@@ -528,6 +666,14 @@ router.get('/me/favorites', async (req: Request, res: Response) => {
 });
 
 // POST /api/users/me/favorites/:restaurantId
+// LEGACY endpoint. Still present for backward compatibility, but
+// new code uses POST /me/favorite-lists/:id/entries instead. The
+// new endpoint already mirrors writes into UserFavorite when the
+// list is default — so the legacy table stays current as long as
+// the modern endpoints are the source of truth. No reverse mirror
+// here on purpose: the frontend migration is removing the only
+// callers of this route, and forcing a default-list lookup on
+// every legacy write would over-couple the two surfaces.
 router.post('/me/favorites/:restaurantId', async (req: Request, res: Response) => {
   const restaurantId = parseRestaurantId(req.params.restaurantId);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
@@ -554,6 +700,7 @@ router.post('/me/favorites/:restaurantId', async (req: Request, res: Response) =
 });
 
 // DELETE /api/users/me/favorites/:restaurantId
+// LEGACY endpoint — see POST comment for the back-compat story.
 router.delete('/me/favorites/:restaurantId', async (req: Request, res: Response) => {
   const restaurantId = parseRestaurantId(req.params.restaurantId);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
@@ -562,6 +709,509 @@ router.delete('/me/favorites/:restaurantId', async (req: Request, res: Response)
   });
   res.json({ message: 'Removed from favorites' });
 });
+
+// ── Favorite lists (multi-list favorites) ─────────────────────
+//
+// User-scoped CRUD for FavoriteList + FavoriteListEntry. All routes
+// require auth via the router-level requireAuth above; every handler
+// additionally asserts ownership by matching `userId === req.userId`
+// before any mutation so a list id leaked between accounts can't be
+// poked from a different session.
+//
+// During the v1 rollout these endpoints keep the legacy UserFavorite
+// table in sync: adding/removing a default-list entry mirrors to
+// user_favorites so the old surfaces (and the legacy `favorites`
+// array in /me/all) still reflect the user's current favorites
+// without requiring a second write at the call site.
+
+const parseListId = (raw: string): number | null => {
+  const id = Number(raw);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+// Pull a list row and confirm the caller owns it. Returns the
+// existing row + a 404-aware response shape. Used by every PATCH /
+// DELETE handler so the ownership check + 404-on-other-user path
+// are identical across endpoints (and indistinguishable from
+// 404-on-missing — avoids id-enumeration via 403 vs 404 timing).
+async function loadOwnedList(listId: number, userId: number) {
+  const list = await prisma.favoriteList.findUnique({
+    where: { id: listId },
+    select: {
+      id: true,
+      userId: true,
+      groupId: true,
+      name: true,
+      isDefault: true,
+      position: true,
+    },
+  });
+  if (!list || list.userId !== userId) return null;
+  return list;
+}
+
+// GET /api/users/me/favorite-lists
+// Returns every list owned by this user, with entries inlined.
+// Defensive default-bootstrap covers legacy accounts that pre-date
+// the backfill or somehow ended up with no rows.
+router.get('/me/favorite-lists', async (req: Request, res: Response) => {
+  let lists = await prisma.favoriteList.findMany({
+    where: { userId: req.userId },
+    orderBy: { position: 'asc' },
+    select: LIST_WITH_ENTRIES_SELECT,
+  });
+
+  if (lists.length === 0) {
+    await ensureDefaultFavoriteList(req.userId);
+    lists = await prisma.favoriteList.findMany({
+      where: { userId: req.userId },
+      orderBy: { position: 'asc' },
+      select: LIST_WITH_ENTRIES_SELECT,
+    });
+  }
+
+  res.json({ lists: lists.map(serializeList) });
+});
+
+// POST /api/users/me/favorite-lists
+// Create a new named list. Position lands at the end of the user's
+// existing lists; rename / reorder via PATCH afterwards.
+router.post('/me/favorite-lists', async (req: Request, res: Response) => {
+  const { name, description, color } = req.body as {
+    name?: unknown;
+    description?: unknown;
+    color?: unknown;
+  };
+
+  // Name — required, trimmed, length-capped.
+  if (typeof name !== 'string') {
+    res.status(400).json({ error: 'name is required' }); return;
+  }
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    res.status(400).json({ error: 'name cannot be empty' }); return;
+  }
+  if (trimmedName.length > MAX_LIST_NAME_LEN) {
+    res.status(400).json({ error: `name must be ${MAX_LIST_NAME_LEN} characters or fewer` }); return;
+  }
+
+  // Description — optional, length-capped.
+  let cleanDescription: string | null = null;
+  if (description !== undefined && description !== null) {
+    if (typeof description !== 'string') {
+      res.status(400).json({ error: 'description must be a string' }); return;
+    }
+    if (description.length > MAX_LIST_DESCRIPTION_LEN) {
+      res.status(400).json({ error: `description must be ${MAX_LIST_DESCRIPTION_LEN} characters or fewer` }); return;
+    }
+    cleanDescription = description;
+  }
+
+  // Color — palette-allowlist validated.
+  let cleanColor: string | null;
+  try { cleanColor = normalizeColor(color); }
+  catch (err) {
+    if (err instanceof InvalidColorError) {
+      res.status(400).json({ error: `color must be one of: ${LIST_COLOR_PALETTE.join(', ')}` });
+      return;
+    }
+    throw err;
+  }
+
+  // Soft cap on lists per user. Stops abuse + keeps the management
+  // modal usable.
+  const existingCount = await prisma.favoriteList.count({ where: { userId: req.userId } });
+  if (existingCount >= MAX_LISTS_PER_USER) {
+    res.status(400).json({ error: `You can have at most ${MAX_LISTS_PER_USER} lists` });
+    return;
+  }
+
+  // Position = (max existing position) + 1. SQL would give us this
+  // atomically; doing it in JS is fine at this scale and keeps the
+  // logic readable.
+  const maxPos = await prisma.favoriteList.aggregate({
+    where: { userId: req.userId },
+    _max:  { position: true },
+  });
+  const nextPosition = (maxPos._max.position ?? -1) + 1;
+
+  try {
+    const created = await prisma.favoriteList.create({
+      data: {
+        userId: req.userId,
+        name: trimmedName,
+        description: cleanDescription,
+        color: cleanColor,
+        isDefault: false,
+        position: nextPosition,
+      },
+      select: LIST_WITH_ENTRIES_SELECT,
+    });
+    res.status(201).json({ list: serializeList(created) });
+  } catch (err: unknown) {
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'P2002') {
+      res.status(409).json({ error: 'You already have a list with that name' });
+      return;
+    }
+    throw err;
+  }
+});
+
+// PATCH /api/users/me/favorite-lists/positions
+// Declared BEFORE the `:id` parameterized patches so Express matches
+// the literal "positions" path first — otherwise the param route
+// catches "positions" as `:id` and 400s on parseListId.
+//
+// Rewrite every list's `position` in one shot. Body shape:
+// `{ order: [listId, listId, ...] }`. We validate that the supplied
+// id set EXACTLY matches the user's current list set — partial
+// reorders would leave some positions stale and break the sort.
+router.patch('/me/favorite-lists/positions', async (req: Request, res: Response) => {
+  const { order } = req.body as { order?: unknown };
+  if (!Array.isArray(order) || !order.every((x) => Number.isInteger(x) && (x as number) > 0)) {
+    res.status(400).json({ error: 'order must be an array of positive integer list ids' }); return;
+  }
+  const orderIds = order as number[];
+
+  const current = await prisma.favoriteList.findMany({
+    where: { userId: req.userId },
+    select: { id: true },
+  });
+  const currentIds = new Set(current.map((l) => l.id));
+
+  // Exact set match — same length AND every id present. Catches
+  // duplicates in the input (length mismatch after Set conversion).
+  if (orderIds.length !== currentIds.size || new Set(orderIds).size !== orderIds.length
+      || !orderIds.every((id) => currentIds.has(id))) {
+    res.status(400).json({ error: 'order must contain exactly your current list ids' }); return;
+  }
+
+  // Sequential 0..N positions. Transaction so a partial failure
+  // doesn't leave the user with an inconsistent order.
+  await prisma.$transaction(
+    orderIds.map((id, idx) =>
+      prisma.favoriteList.update({ where: { id }, data: { position: idx } }),
+    ),
+  );
+
+  res.json({ message: 'List order updated' });
+});
+
+// PATCH /api/users/me/favorite-lists/:id
+// Rename, change description, or change color. Promote-to-default is
+// a separate POST (.../default) to keep the validation focused.
+router.patch('/me/favorite-lists/:id', async (req: Request, res: Response) => {
+  const listId = parseListId(req.params.id);
+  if (!listId) { res.status(400).json({ error: 'Invalid list id' }); return; }
+
+  const existing = await loadOwnedList(listId, req.userId);
+  if (!existing) { res.status(404).json({ error: 'List not found' }); return; }
+
+  const { name, description, color } = req.body as {
+    name?: unknown;
+    description?: unknown;
+    color?: unknown;
+  };
+
+  const data: Record<string, unknown> = {};
+
+  if (typeof name === 'string') {
+    const trimmed = name.trim();
+    if (!trimmed) { res.status(400).json({ error: 'name cannot be empty' }); return; }
+    if (trimmed.length > MAX_LIST_NAME_LEN) {
+      res.status(400).json({ error: `name must be ${MAX_LIST_NAME_LEN} characters or fewer` }); return;
+    }
+    data.name = trimmed;
+  }
+
+  if (description !== undefined) {
+    if (description === null) {
+      data.description = null;
+    } else if (typeof description !== 'string') {
+      res.status(400).json({ error: 'description must be a string or null' }); return;
+    } else if (description.length > MAX_LIST_DESCRIPTION_LEN) {
+      res.status(400).json({ error: `description must be ${MAX_LIST_DESCRIPTION_LEN} characters or fewer` }); return;
+    } else {
+      data.description = description;
+    }
+  }
+
+  if (color !== undefined) {
+    try { data.color = normalizeColor(color); }
+    catch (err) {
+      if (err instanceof InvalidColorError) {
+        res.status(400).json({ error: `color must be one of: ${LIST_COLOR_PALETTE.join(', ')}` });
+        return;
+      }
+      throw err;
+    }
+  }
+
+  if (Object.keys(data).length === 0) {
+    // Nothing to change — return the current row as-is so the client
+    // can use the response uniformly without special-casing no-op.
+    const current = await prisma.favoriteList.findUnique({
+      where: { id: listId },
+      select: LIST_WITH_ENTRIES_SELECT,
+    });
+    res.json({ list: current ? serializeList(current) : null });
+    return;
+  }
+
+  try {
+    const updated = await prisma.favoriteList.update({
+      where: { id: listId },
+      data,
+      select: LIST_WITH_ENTRIES_SELECT,
+    });
+    res.json({ list: serializeList(updated) });
+  } catch (err: unknown) {
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'P2002') {
+      res.status(409).json({ error: 'You already have a list with that name' });
+      return;
+    }
+    throw err;
+  }
+});
+
+// DELETE /api/users/me/favorite-lists/:id
+// Deletes the list + all of its entries (entry cascade). Two
+// guards: cannot delete the user's only list, and cannot delete a
+// list that's currently marked default (promote another first).
+router.delete('/me/favorite-lists/:id', async (req: Request, res: Response) => {
+  const listId = parseListId(req.params.id);
+  if (!listId) { res.status(400).json({ error: 'Invalid list id' }); return; }
+
+  const existing = await loadOwnedList(listId, req.userId);
+  if (!existing) { res.status(404).json({ error: 'List not found' }); return; }
+
+  if (existing.isDefault) {
+    res.status(400).json({ error: 'Cannot delete the default list — promote another first' });
+    return;
+  }
+
+  const totalLists = await prisma.favoriteList.count({ where: { userId: req.userId } });
+  if (totalLists <= 1) {
+    // Belt-and-suspenders: the default-guard above already catches
+    // the typical case (only list → it's default → reject). This
+    // covers the legacy edge case of a non-default sole list.
+    res.status(400).json({ error: 'Cannot delete your only list' });
+    return;
+  }
+
+  await prisma.favoriteList.delete({ where: { id: listId } });
+  res.json({ message: 'List deleted' });
+});
+
+// POST /api/users/me/favorite-lists/:id/default
+// Promote this list to default. Atomic: clears any existing default
+// inside the same transaction so we never end up with two defaults.
+router.post('/me/favorite-lists/:id/default', async (req: Request, res: Response) => {
+  const listId = parseListId(req.params.id);
+  if (!listId) { res.status(400).json({ error: 'Invalid list id' }); return; }
+
+  const existing = await loadOwnedList(listId, req.userId);
+  if (!existing) { res.status(404).json({ error: 'List not found' }); return; }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // Demote any current defaults that aren't this list. Bulk
+    // updateMany rather than a per-row update because there's only
+    // ever supposed to be one — but if the invariant somehow got
+    // broken we want to repair on the next promote.
+    await tx.favoriteList.updateMany({
+      where: { userId: req.userId, isDefault: true, NOT: { id: listId } },
+      data:  { isDefault: false },
+    });
+    return tx.favoriteList.update({
+      where: { id: listId },
+      data: { isDefault: true },
+      select: LIST_WITH_ENTRIES_SELECT,
+    });
+  });
+
+  // Sync the legacy user_favorites table with the new default's
+  // entries so /me/all's derived favoriteIds + any code still
+  // reading the old table reflect the promotion. Fire-and-forget so
+  // a hiccup here doesn't block the response — the read paths are
+  // self-healing via favoriteLists.
+  syncLegacyFavorites(req.userId)
+    .catch((err) => logger.warn({ err, userId: req.userId }, 'syncLegacyFavorites after default promote failed'));
+
+  res.json({ list: serializeList(updated) });
+});
+
+// POST /api/users/me/favorite-lists/:id/entries
+// Add a restaurant to a list. Body: { restaurantId, note? }.
+// Idempotent on the (listId, restaurantId) PK — repeat adds are a
+// no-op rather than a 409, which matches the heart-icon UX (rapid
+// double-click should be safe).
+router.post('/me/favorite-lists/:id/entries', async (req: Request, res: Response) => {
+  const listId = parseListId(req.params.id);
+  if (!listId) { res.status(400).json({ error: 'Invalid list id' }); return; }
+
+  const existing = await loadOwnedList(listId, req.userId);
+  if (!existing) { res.status(404).json({ error: 'List not found' }); return; }
+
+  const { restaurantId, note } = req.body as { restaurantId?: unknown; note?: unknown };
+  if (typeof restaurantId !== 'number' || !Number.isInteger(restaurantId) || restaurantId <= 0) {
+    res.status(400).json({ error: 'restaurantId must be a positive integer' }); return;
+  }
+  if (!(await loadVisibleRestaurant(restaurantId, req.userId))) {
+    res.status(404).json({ error: 'Restaurant not found' }); return;
+  }
+
+  let cleanNote: string | null = null;
+  if (note !== undefined && note !== null) {
+    if (typeof note !== 'string') {
+      res.status(400).json({ error: 'note must be a string' }); return;
+    }
+    if (note.length > MAX_LIST_ENTRY_NOTE_LEN) {
+      res.status(400).json({ error: `note must be ${MAX_LIST_ENTRY_NOTE_LEN} characters or fewer` }); return;
+    }
+    cleanNote = note;
+  }
+
+  const entry = await prisma.favoriteListEntry.upsert({
+    where: { listId_restaurantId: { listId, restaurantId } },
+    create: { listId, restaurantId, note: cleanNote },
+    // Re-add of the same entry shouldn't overwrite an existing note
+    // with null — only update if the caller explicitly sent a note.
+    update: cleanNote === null ? {} : { note: cleanNote },
+    select: { restaurantId: true, note: true, addedAt: true },
+  });
+
+  // Mirror to the legacy user_favorites table when this is the
+  // user's default list. Keeps /me/all's transition-period
+  // favoriteIds + any old client reading UserFavorite consistent.
+  if (existing.isDefault) {
+    await prisma.userFavorite.upsert({
+      where: { userId_restaurantId: { userId: req.userId, restaurantId } },
+      create: { userId: req.userId, restaurantId },
+      update: {},
+    });
+  }
+
+  res.status(201).json({ entry });
+});
+
+// PATCH /api/users/me/favorite-lists/:id/entries/:rid
+// Update the per-entry note. Same ownership + visibility rules as POST.
+router.patch('/me/favorite-lists/:id/entries/:rid', async (req: Request, res: Response) => {
+  const listId       = parseListId(req.params.id);
+  const restaurantId = parseRestaurantId(req.params.rid);
+  if (!listId)       { res.status(400).json({ error: 'Invalid list id' }); return; }
+  if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
+
+  const existing = await loadOwnedList(listId, req.userId);
+  if (!existing) { res.status(404).json({ error: 'List not found' }); return; }
+
+  const { note } = req.body as { note?: unknown };
+  if (note !== undefined && note !== null) {
+    if (typeof note !== 'string') {
+      res.status(400).json({ error: 'note must be a string' }); return;
+    }
+    if (note.length > MAX_LIST_ENTRY_NOTE_LEN) {
+      res.status(400).json({ error: `note must be ${MAX_LIST_ENTRY_NOTE_LEN} characters or fewer` }); return;
+    }
+  }
+
+  try {
+    const updated = await prisma.favoriteListEntry.update({
+      where: { listId_restaurantId: { listId, restaurantId } },
+      data:  { note: note === undefined ? undefined : (note as string | null) },
+      select: { restaurantId: true, note: true, addedAt: true },
+    });
+    res.json({ entry: updated });
+  } catch (err: unknown) {
+    // P2025 = "An operation failed because it depends on one or more
+    // records that were required but not found." Surface as a 404 so
+    // the client can refresh and retry.
+    if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'P2025') {
+      res.status(404).json({ error: 'Entry not found' }); return;
+    }
+    throw err;
+  }
+});
+
+// DELETE /api/users/me/favorite-lists/:id/entries/:rid
+// Remove a restaurant from a list. Idempotent — removing something
+// that isn't there is a successful no-op.
+router.delete('/me/favorite-lists/:id/entries/:rid', async (req: Request, res: Response) => {
+  const listId       = parseListId(req.params.id);
+  const restaurantId = parseRestaurantId(req.params.rid);
+  if (!listId)       { res.status(400).json({ error: 'Invalid list id' }); return; }
+  if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
+
+  const existing = await loadOwnedList(listId, req.userId);
+  if (!existing) { res.status(404).json({ error: 'List not found' }); return; }
+
+  await prisma.favoriteListEntry.deleteMany({
+    where: { listId, restaurantId },
+  });
+
+  // Mirror to legacy user_favorites when this is the default list AND
+  // the restaurant isn't in any of the user's other lists. The latter
+  // matters because UserFavorite is a flat "is this a favorite?"
+  // bucket — if the user still has the restaurant in another list it
+  // shouldn't disappear from the legacy view.
+  if (existing.isDefault) {
+    const otherListMembership = await prisma.favoriteListEntry.findFirst({
+      where: {
+        restaurantId,
+        list: { userId: req.userId, NOT: { id: listId } },
+      },
+      select: { restaurantId: true },
+    });
+    if (!otherListMembership) {
+      await prisma.userFavorite.deleteMany({
+        where: { userId: req.userId, restaurantId },
+      });
+    }
+  }
+
+  res.json({ message: 'Removed from list' });
+});
+
+// ── Legacy-favorites sync helper ──────────────────────────────
+// Bring the legacy `user_favorites` table in line with the
+// current default list's entries. Called after default-list
+// promotion (POST .../default) so the legacy view reflects the
+// new default's contents without each individual entry-add/remove
+// having to know what the default's id is. Idempotent.
+async function syncLegacyFavorites(userId: number): Promise<void> {
+  const defaultList = await prisma.favoriteList.findFirst({
+    where: { userId, isDefault: true },
+    select: {
+      id: true,
+      entries: { select: { restaurantId: true } },
+    },
+  });
+  if (!defaultList) return;
+
+  const desired = new Set(defaultList.entries.map((e) => e.restaurantId));
+  const current = await prisma.userFavorite.findMany({
+    where: { userId },
+    select: { restaurantId: true },
+  });
+  const present = new Set(current.map((r) => r.restaurantId));
+
+  const toAdd    = [...desired].filter((id) => !present.has(id));
+  const toRemove = [...present].filter((id) => !desired.has(id));
+
+  await prisma.$transaction([
+    ...(toRemove.length > 0 ? [
+      prisma.userFavorite.deleteMany({
+        where: { userId, restaurantId: { in: toRemove } },
+      }),
+    ] : []),
+    ...(toAdd.length > 0 ? [
+      prisma.userFavorite.createMany({
+        data: toAdd.map((restaurantId) => ({ userId, restaurantId })),
+        skipDuplicates: true,
+      }),
+    ] : []),
+  ]);
+}
 
 // ── Options ───────────────────────────────────────────────────
 
@@ -624,10 +1274,11 @@ const VALID_CHOOSE_METHODS = new Set(['flip', 'spin', 'vote', 'surprise', 'direc
 
 // POST /api/users/me/accepted
 router.post('/me/accepted', async (req: Request, res: Response) => {
-  const { restaurantId, optionsSnapshot, chooseMethod } = req.body as {
+  const { restaurantId, optionsSnapshot, chooseMethod, excludeFromInsights } = req.body as {
     restaurantId?: number;
     optionsSnapshot?: unknown;
     chooseMethod?: unknown;
+    excludeFromInsights?: unknown;
   };
   if (!restaurantId) {
     res.status(400).json({ error: 'restaurantId is required' });
@@ -659,6 +1310,19 @@ router.post('/me/accepted', async (req: Request, res: Response) => {
     cleanMethod = chooseMethod;
   }
 
+  // Default false matches the column default. Allowing the create caller
+  // to set it up-front saves a follow-up PATCH for clients that already
+  // know a pick should be excluded (e.g. a future "I didn't really want
+  // this" affordance on the group-vote result modal).
+  let cleanExclude: boolean | undefined;
+  if (excludeFromInsights !== undefined && excludeFromInsights !== null) {
+    if (typeof excludeFromInsights !== 'boolean') {
+      res.status(400).json({ error: 'excludeFromInsights must be a boolean' });
+      return;
+    }
+    cleanExclude = excludeFromInsights;
+  }
+
   const record = await prisma.userAccepted.create({
     data: {
       userId: req.userId,
@@ -667,10 +1331,48 @@ router.post('/me/accepted', async (req: Request, res: Response) => {
       // omitting via spread keeps legacy clients (no snapshot) working unchanged.
       ...(cleanSnapshot !== undefined && { optionsSnapshot: cleanSnapshot }),
       chooseMethod: cleanMethod ?? null,
+      ...(cleanExclude !== undefined && { excludeFromInsights: cleanExclude }),
     },
     include: { restaurant: true },
   });
   res.status(201).json({ accepted: record });
+});
+
+// PATCH /api/users/me/accepted/:id
+//
+// Per-entry toggle for the InsightsPage opt-out. Body: `{ excludeFromInsights: boolean }`.
+// Ownership is enforced via `updateMany` with a `userId` filter — using
+// `update({ where: { id } })` alone would either succeed (wrong owner)
+// or throw P2025 on missing; updateMany returns `{ count }` which we
+// branch on to distinguish "missing" from "not yours" cleanly (we treat
+// both as 404 to avoid leaking row existence to other users).
+router.patch('/me/accepted/:id', async (req: Request, res: Response) => {
+  const acceptedId = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(acceptedId) || acceptedId <= 0) {
+    res.status(400).json({ error: 'accepted id must be a positive integer' });
+    return;
+  }
+
+  const { excludeFromInsights } = req.body as { excludeFromInsights?: unknown };
+  if (typeof excludeFromInsights !== 'boolean') {
+    res.status(400).json({ error: 'excludeFromInsights must be a boolean' });
+    return;
+  }
+
+  const { count } = await prisma.userAccepted.updateMany({
+    where: { id: acceptedId, userId: req.userId },
+    data: { excludeFromInsights },
+  });
+  if (count === 0) {
+    res.status(404).json({ error: 'Accepted entry not found' });
+    return;
+  }
+
+  const updated = await prisma.userAccepted.findUnique({
+    where: { id: acceptedId },
+    include: { restaurant: true },
+  });
+  res.json({ accepted: updated });
 });
 
 // ── Insights ──────────────────────────────────────────────────
@@ -725,6 +1427,14 @@ router.get('/me/insights', async (req: Request, res: Response) => {
     where: {
       userId,
       ...(sinceDate && { acceptedAt: { gte: sinceDate } }),
+      // Per-entry opt-out from insights. Excluded rows still appear in
+      // History (the user wants the visit logged) but drop out of every
+      // aggregation here — totals, breakdowns, weekday heatmap, cuisine
+      // trends, sparklines. The other UserAccepted reads below
+      // (previousPeriodCount, sparklineRows, neglectedFavorites'
+      // lastChosenRows) MUST also filter on this flag or the numbers
+      // disagree across panels.
+      excludeFromInsights: false,
     },
     select: {
       restaurantId: true,
@@ -916,7 +1626,10 @@ router.get('/me/insights', async (req: Request, res: Response) => {
     const favIds = favoriteRows.map((f) => f.restaurantId);
     const lastChosenRows = (await prisma.userAccepted.groupBy({
       by: ['restaurantId'],
-      where: { userId, restaurantId: { in: favIds } },
+      // Excluded picks shouldn't count as "you chose this" for the neglect
+      // calculation — a user who marks every visit to a place as off-the-record
+      // intends for the place to feel un-chosen here too.
+      where: { userId, restaurantId: { in: favIds }, excludeFromInsights: false },
       _max: { acceptedAt: true },
     })) ?? [];
     const lastChosen = new Map<number, Date>();
@@ -951,7 +1664,7 @@ router.get('/me/insights', async (req: Request, res: Response) => {
   // the oldest week, so the sparkline reads left-to-right oldest→newest.
   const sparklineStart = sparklineWindowStartUtc();
   const sparklineRows = (await prisma.userAccepted.findMany({
-    where: { userId, acceptedAt: { gte: sparklineStart } },
+    where: { userId, acceptedAt: { gte: sparklineStart }, excludeFromInsights: false },
     select: {
       acceptedAt: true,
       restaurant: { select: { cuisineType: true } },
@@ -991,7 +1704,7 @@ router.get('/me/insights', async (req: Request, res: Response) => {
     const prevStart = new Date(Date.now() - 2 * windowDays * DAY_MS);
     const prevEnd   = new Date(Date.now() - windowDays * DAY_MS);
     previousPeriodCount = await prisma.userAccepted.count({
-      where: { userId, acceptedAt: { gte: prevStart, lt: prevEnd } },
+      where: { userId, acceptedAt: { gte: prevStart, lt: prevEnd }, excludeFromInsights: false },
     }) ?? 0;
   }
 
@@ -1196,8 +1909,115 @@ const DETAIL_FIELD_MASK = [
   // tier, same SKU bucket as the rest of this mask.
   'regularOpeningHours',
 ].join(',');
-const STALE_DAYS = 30;
+// Bumped from 30 to 90 — restaurant photos/phone/website rarely
+// change inside a 90-day window, and refresh-places is the single
+// most-spent endpoint when a user has a long history of saved
+// restaurants. The 30-day default was over-aggressive given the
+// kind of data we cache; 90 days cuts refresh spend by ~67% with
+// effectively zero perceived staleness. If a specific row really
+// needs fresher data, the new on-demand-refresh-on-modal-open
+// pattern (planned Tier 2A) covers the hot path.
+const STALE_DAYS = 90;
 const MAX_PER_SESSION = 20; // cap API calls per login
+
+// Shared helper: fetch fresh Place Details from Google and apply
+// them to one Restaurant row. Returns the updated row on success,
+// or null on any failure (network / non-200 / shape mismatch).
+//
+// Used by:
+//   - POST /me/refresh-places (batch — refreshes up to N stale rows
+//                              for the user in one shot, on demand)
+//   - POST /restaurants/:id/refresh-if-stale (single-row — fired by
+//                              the detail modal on open, only when
+//                              the row is actually stale; cuts
+//                              Place Details spend in proportion to
+//                              what the user actually views)
+//
+// Pulled to module scope so both endpoints share one canonical
+// transform — previously the field-extraction logic lived inline in
+// refresh-places and would drift if duplicated.
+async function refreshOnePlace(
+  row: { id: number; googlePlaceId: string | null },
+  apiKey: string,
+  req: Request,
+): Promise<Awaited<ReturnType<typeof prisma.restaurant.update>> | null> {
+  if (!row.googlePlaceId) return null;
+  try {
+    const detailRes = await fetch(
+      `https://places.googleapis.com/v1/places/${row.googlePlaceId}`,
+      { headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': DETAIL_FIELD_MASK } },
+    );
+    if (!detailRes.ok) {
+      console.warn(`[refresh] Place Details failed for ${row.googlePlaceId}: ${detailRes.status}`);
+      trackGoogleCall(req, 'placeDetails', { status: 'error' });
+      return null;
+    }
+    trackGoogleCall(req, 'placeDetails');
+    const detail = await detailRes.json() as Record<string, unknown>;
+
+    const patch: Prisma.RestaurantUpdateInput = { googleDataUpdatedAt: new Date() };
+    if (typeof detail.rating === 'number')           patch.googleRating = detail.rating;
+    if (typeof detail.userRatingCount === 'number' && Number.isInteger(detail.userRatingCount))
+                                                      patch.ratingCount = detail.userRatingCount;
+    if (typeof detail.priceLevel === 'string' && detail.priceLevel in PLACE_PRICE_LEVEL_MAP)
+                                                      patch.priceLevel = PLACE_PRICE_LEVEL_MAP[detail.priceLevel];
+    if (typeof detail.takeout === 'boolean')          patch.takeout = detail.takeout;
+    if (typeof detail.delivery === 'boolean')         patch.delivery = detail.delivery;
+    if (typeof detail.internationalPhoneNumber === 'string') patch.phone = detail.internationalPhoneNumber;
+    if (typeof detail.websiteUri === 'string')        patch.website = detail.websiteUri;
+    const loc = detail.location as { latitude?: number; longitude?: number } | undefined;
+    if (loc && typeof loc.latitude === 'number'  && Number.isFinite(loc.latitude))  patch.lat = loc.latitude;
+    if (loc && typeof loc.longitude === 'number' && Number.isFinite(loc.longitude)) patch.lng = loc.longitude;
+    if (Array.isArray(detail.photos)) {
+      const photosSan = (detail.photos as Array<Record<string, unknown>>).slice(0, 10)
+        .filter((p) => typeof p?.name === 'string')
+        .map((p) => ({
+          name:     p.name,
+          widthPx:  typeof p.widthPx  === 'number' ? p.widthPx  : null,
+          heightPx: typeof p.heightPx === 'number' ? p.heightPx : null,
+        }));
+      if (photosSan.length > 0) patch.photos = photosSan as unknown as Prisma.InputJsonValue;
+    }
+    const rawHours = detail.regularOpeningHours;
+    if (rawHours && typeof rawHours === 'object') {
+      const obj = rawHours as Record<string, unknown>;
+      const periods: Array<{ open: { day: number; hour: number; minute: number };
+                             close: { day: number; hour: number; minute: number } | null }> = [];
+      const cleanPoint = (pt: unknown) => {
+        if (!pt || typeof pt !== 'object') return null;
+        const x = pt as Record<string, unknown>;
+        const day    = typeof x.day    === 'number' && x.day    >= 0 && x.day    <= 6  ? Math.floor(x.day)    : null;
+        const hour   = typeof x.hour   === 'number' && x.hour   >= 0 && x.hour   <= 23 ? Math.floor(x.hour)   : null;
+        const minute = typeof x.minute === 'number' && x.minute >= 0 && x.minute <= 59 ? Math.floor(x.minute) : null;
+        if (day === null || hour === null || minute === null) return null;
+        return { day, hour, minute };
+      };
+      const rawPeriods = Array.isArray(obj.periods) ? obj.periods : [];
+      for (const period of rawPeriods.slice(0, 30)) {
+        if (!period || typeof period !== 'object') continue;
+        const p = period as Record<string, unknown>;
+        const open  = cleanPoint(p.open);
+        if (!open) continue;
+        const close = cleanPoint(p.close);
+        periods.push({ open, close });
+      }
+      const rawDescs = Array.isArray(obj.weekdayDescriptions) ? obj.weekdayDescriptions : [];
+      const weekdayDescriptions = rawDescs
+        .slice(0, 7)
+        .filter((s: unknown): s is string => typeof s === 'string')
+        .map((s) => s.slice(0, 200));
+      if (periods.length > 0 || weekdayDescriptions.length > 0) {
+        patch.regularOpeningHours = ({ periods, weekdayDescriptions } as unknown) as Prisma.InputJsonValue;
+      }
+    }
+
+    return await prisma.restaurant.update({ where: { id: row.id }, data: patch });
+  } catch (err) {
+    console.warn(`[refresh] Error refreshing restaurant ${row.id} (${row.googlePlaceId}):`, err);
+    trackGoogleCall(req, 'placeDetails', { status: 'error' });
+    return null;
+  }
+}
 
 // POST /api/users/me/refresh-places
 // Finds this user's Google-sourced restaurants not updated in the last 30 days and refreshes them.
@@ -1217,6 +2037,15 @@ router.post('/me/refresh-places', externalApiLimiter, async (req: Request, res: 
       favorites: { select: { restaurantId: true } },
       options:   { select: { restaurantId: true } },
       accepted:  { select: { restaurantId: true } },
+      // Archived rows now ride along on the regular stale sweep so
+      // a row that gets unarchived months later doesn't surface with
+      // year-old data. The marginal cost is tiny (typical user has
+      // ~10 archived rows; 30-day stale-threshold caps the refresh
+      // rate; refresh-places is the cheapest of the Google API
+      // calls at ~$0.017/row) and stale-archived rows were the
+      // most common "where's my photos / phone / etc." complaint.
+      // Relation name on User is `archives` (plural), not `archived`.
+      archives:  { select: { restaurantId: true } },
     },
   });
 
@@ -1226,6 +2055,7 @@ router.post('/me/refresh-places', externalApiLimiter, async (req: Request, res: 
     ...userLinks.favorites.map((f) => f.restaurantId),
     ...userLinks.options.map((o) => o.restaurantId),
     ...userLinks.accepted.map((a) => a.restaurantId),
+    ...userLinks.archives.map((a) => a.restaurantId),
   ])];
 
   if (linkedIds.length === 0) { res.json({ updated: [] }); return; }
@@ -1238,6 +2068,18 @@ router.post('/me/refresh-places', externalApiLimiter, async (req: Request, res: 
       OR: [
         { googleDataUpdatedAt: null },
         { googleDataUpdatedAt: { lt: staleThreshold } },
+        // Critical-data backfill: rows with a placeId but no
+        // photos got their timestamp set by an earlier refresh
+        // pass that didn't capture photos (or by some other path
+        // that bumped the timestamp without populating media).
+        // Without this branch, those rows look "fresh" forever
+        // even though they're missing the most user-visible
+        // field. Cheap to add — every Google call returns photos
+        // for places that have any, so this self-heals on next
+        // visit. `Prisma.DbNull` matches the column's SQL-level
+        // NULL (the JsonNull sentinel matches a stored JSON `null`
+        // value, which is a different concept).
+        { photos: { equals: Prisma.DbNull } },
       ],
     },
     orderBy: { googleDataUpdatedAt: 'asc' }, // refresh oldest first
@@ -1247,104 +2089,107 @@ router.post('/me/refresh-places', externalApiLimiter, async (req: Request, res: 
 
   console.log(`[refresh] Refreshing ${stale.length} stale restaurant(s)`);
 
-  // Refresh each stale place in parallel. The old `for…await` loop
-  // serialized N Google Places round-trips (~200-400ms each); with
-  // MAX_PER_SESSION up to 20, that was 4-8s of pure latency. Promise.all
-  // collapses that to roughly the slowest single round-trip.
-  //
-  // Each iteration is a small contained task with its own try/catch — a
-  // failure on one place doesn't affect the others. Returning `null`
-  // marks a skip; filterMap below drops them.
-  const results = await Promise.all(stale.map(async (r) => {
-    try {
-      const detailRes = await fetch(
-        `https://places.googleapis.com/v1/places/${r.googlePlaceId}`,
-        { headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': DETAIL_FIELD_MASK } },
-      );
-      if (!detailRes.ok) {
-        console.warn(`[refresh] Place Details failed for ${r.googlePlaceId}: ${detailRes.status}`);
-        return null;
-      }
-      const detail = await detailRes.json() as Record<string, unknown>;
-
-      const patch: Prisma.RestaurantUpdateInput = { googleDataUpdatedAt: new Date() };
-      if (typeof detail.rating === 'number')           patch.googleRating = detail.rating;
-      if (typeof detail.userRatingCount === 'number' && Number.isInteger(detail.userRatingCount))
-                                                        patch.ratingCount = detail.userRatingCount;
-      if (typeof detail.priceLevel === 'string' && detail.priceLevel in PLACE_PRICE_LEVEL_MAP)
-                                                        patch.priceLevel = PLACE_PRICE_LEVEL_MAP[detail.priceLevel];
-      if (typeof detail.takeout === 'boolean')          patch.takeout = detail.takeout;
-      if (typeof detail.delivery === 'boolean')         patch.delivery = detail.delivery;
-      if (typeof detail.internationalPhoneNumber === 'string') patch.phone = detail.internationalPhoneNumber;
-      if (typeof detail.websiteUri === 'string')        patch.website = detail.websiteUri;
-      // Back-fill coords on rows created before the lat/lng columns
-      // existed (or rows whose initial create somehow missed them).
-      const loc = detail.location as { latitude?: number; longitude?: number } | undefined;
-      if (loc && typeof loc.latitude === 'number'  && Number.isFinite(loc.latitude))  patch.lat = loc.latitude;
-      if (loc && typeof loc.longitude === 'number' && Number.isFinite(loc.longitude)) patch.lng = loc.longitude;
-      // Photos are JSON. We normalize into the same shape as the
-      // materialize endpoint persists so frontend consumers see one
-      // schema regardless of which write path produced the row.
-      if (Array.isArray(detail.photos)) {
-        const photosSan = (detail.photos as Array<Record<string, unknown>>).slice(0, 10)
-          .filter((p) => typeof p?.name === 'string')
-          .map((p) => ({
-            name:     p.name,
-            widthPx:  typeof p.widthPx  === 'number' ? p.widthPx  : null,
-            heightPx: typeof p.heightPx === 'number' ? p.heightPx : null,
-          }));
-        if (photosSan.length > 0) patch.photos = photosSan as unknown as Prisma.InputJsonValue;
-      }
-      // Structured opening hours. Same shape constraints as the
-      // materialize-time sanitizer in restaurants.ts — kept inline here
-      // to avoid a cross-route import. Drops anything that doesn't
-      // shape-match.
-      const rawHours = detail.regularOpeningHours;
-      if (rawHours && typeof rawHours === 'object') {
-        const obj = rawHours as Record<string, unknown>;
-        const periods: Array<{ open: { day: number; hour: number; minute: number };
-                               close: { day: number; hour: number; minute: number } | null }> = [];
-        const cleanPoint = (pt: unknown) => {
-          if (!pt || typeof pt !== 'object') return null;
-          const x = pt as Record<string, unknown>;
-          const day    = typeof x.day    === 'number' && x.day    >= 0 && x.day    <= 6  ? Math.floor(x.day)    : null;
-          const hour   = typeof x.hour   === 'number' && x.hour   >= 0 && x.hour   <= 23 ? Math.floor(x.hour)   : null;
-          const minute = typeof x.minute === 'number' && x.minute >= 0 && x.minute <= 59 ? Math.floor(x.minute) : null;
-          if (day === null || hour === null || minute === null) return null;
-          return { day, hour, minute };
-        };
-        const rawPeriods = Array.isArray(obj.periods) ? obj.periods : [];
-        for (const period of rawPeriods.slice(0, 30)) {
-          if (!period || typeof period !== 'object') continue;
-          const p = period as Record<string, unknown>;
-          const open  = cleanPoint(p.open);
-          if (!open) continue;
-          const close = cleanPoint(p.close);
-          periods.push({ open, close });
-        }
-        const rawDescs = Array.isArray(obj.weekdayDescriptions) ? obj.weekdayDescriptions : [];
-        const weekdayDescriptions = rawDescs
-          .slice(0, 7)
-          .filter((s: unknown): s is string => typeof s === 'string')
-          .map((s) => s.slice(0, 200));
-        if (periods.length > 0 || weekdayDescriptions.length > 0) {
-          patch.regularOpeningHours = ({ periods, weekdayDescriptions } as unknown) as Prisma.InputJsonValue;
-        }
-      }
-      // googleReviews column stays in the schema but we no longer
-      // refresh it — see DETAIL_FIELD_MASK comment for the cost
-      // rationale. Existing rows with cached reviews are left alone.
-
-      return await prisma.restaurant.update({ where: { id: r.id }, data: patch });
-    } catch (err) {
-      console.warn(`[refresh] Error refreshing restaurant ${r.id} (${r.googlePlaceId}):`, err);
-      return null;
-    }
-  }));
+  // Refresh each stale place in parallel via the shared helper.
+  // Promise.all collapses N round-trips of ~200-400ms each into the
+  // slowest single round-trip. refreshOnePlace returns null on any
+  // failure (its own try/catch); we filter those out at the end.
+  // googleReviews column is intentionally not refreshed — see
+  // DETAIL_FIELD_MASK comment for the SKU rationale.
+  const results = await Promise.all(
+    stale.map((r) => refreshOnePlace(r, apiKey, req)),
+  );
   const updated = results.filter((r): r is NonNullable<typeof r> => r !== null);
 
   console.log(`[refresh] Updated ${updated.length} restaurant(s)`);
   res.json({ updated });
+});
+
+// POST /api/users/me/refresh-restaurant/:id
+// "Just-in-time" single-row refresh — fired by the detail modal on
+// open so we only spend Place Details quota on restaurants the user
+// is actually looking at. Replaces the eager "refresh every saved
+// restaurant" batching for the typical case where a user views 5
+// of their 50 saved rows in a given session.
+//
+// Three response shapes:
+//   1. `{ refreshed: true,  restaurant }`  — row was stale, we
+//      refreshed and return the updated row
+//   2. `{ refreshed: false, restaurant: null }` — row was fresh
+//      (last refresh < STALE_DAYS ago) OR not a Google Place row
+//      (custom rows have no upstream to refresh from)
+//   3. `{ refreshed: false, restaurant: null }` on error too — we
+//      degrade silently rather than failing the modal open
+//
+// Visibility-gated like the read paths: private rows visible only
+// to the creator. Auth required since this spends API quota.
+router.post('/me/refresh-restaurant/:id', externalApiLimiter, async (req: Request, res: Response) => {
+  const restaurantId = Number(req.params.id);
+  if (!Number.isInteger(restaurantId) || restaurantId <= 0) {
+    res.status(400).json({ error: 'Invalid restaurant ID' });
+    return;
+  }
+
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) { res.json({ refreshed: false, restaurant: null }); return; }
+
+  // Cheap precheck — pull only the columns we need to decide
+  // whether to spend a Google call. No findUniqueOrThrow; absent
+  // rows fall through to a 200 no-op so modal opens don't error.
+  const row = await prisma.restaurant.findUnique({
+    where: { id: restaurantId },
+    select: {
+      id: true,
+      googlePlaceId: true,
+      googleDataUpdatedAt: true,
+      // Pulled so the staleness check can ALSO trigger a refresh
+      // when photos are missing — see the "critical-data
+      // backfill" branch below.
+      photos: true,
+      private: true,
+      createdBy: true,
+    },
+  });
+  if (!row) { res.json({ refreshed: false, restaurant: null }); return; }
+
+  // Visibility: private rows only visible to creator. Match the
+  // GET /api/restaurants/:id behavior so the modal doesn't refresh
+  // a row it couldn't read.
+  if (row.private && row.createdBy !== req.userId) {
+    res.json({ refreshed: false, restaurant: null });
+    return;
+  }
+
+  // Custom (no googlePlaceId) rows have nothing to refresh — they
+  // were user-typed, not Google-sourced.
+  if (!row.googlePlaceId) {
+    res.json({ refreshed: false, restaurant: null });
+    return;
+  }
+
+  // Already-fresh rows skip the Google call entirely. This is the
+  // common path once a user has a warm cache: same row opened
+  // twice in a week pays for the first open, not the second.
+  //
+  // Exception: if `photos` is null we ALWAYS refresh, regardless
+  // of the timestamp. Rows from before the photos column was
+  // captured (or refreshed by an earlier pass that didn't request
+  // photos) carry a recent timestamp but null photos — without
+  // this branch they'd stay photo-less forever because the staleness
+  // check would skip them. Every Google call returns photos for
+  // places that have any, so this self-heals on first detail-modal
+  // open and is cheap (one call per stuck row, one time only).
+  const staleThreshold = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000);
+  const photosMissing = row.photos == null;
+  const timestampFresh = row.googleDataUpdatedAt && row.googleDataUpdatedAt > staleThreshold;
+  if (timestampFresh && !photosMissing) {
+    res.json({ refreshed: false, restaurant: null });
+    return;
+  }
+
+  // Stale → one Place Details call via the shared helper.
+  const updated = await refreshOnePlace(row, apiKey, req);
+  if (!updated) { res.json({ refreshed: false, restaurant: null }); return; }
+  res.json({ refreshed: true, restaurant: updated });
 });
 
 export default router;

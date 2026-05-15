@@ -1,20 +1,30 @@
-import { useState, useRef, useEffect, useMemo, lazy, Suspense } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useParams } from "react-router-dom";
 import {
   addUserAcceptance,
+  addUserOption,
   removeUserOption,
   updateUserFavorites,
 } from "../redux/slices/userInfoSlice";
-import RatingDisplay from "../components/RatingDisplay";
+import { showChosenCelebration } from "../redux/slices/celebrationSlice";
 import RestaurantCard from "../components/RestaurantCard";
+import HeartWithKebab from "../components/HeartWithKebab";
+import ListSelector from "../components/ListSelector";
 import useCurrentUser from "../hooks/useCurrentUser";
+import { useScrollListIndex } from "../hooks/useScrollListIndex";
 import { buildAcceptedStats, formatLastChosen } from "../utils/acceptedStats";
-
-import InfoRow from "../components/InfoRow";
-import { PRICE_LABELS } from "../utils/restaurantConstants";
-import { normalizeUrl } from "../utils/normalizeUrl";
-import RestaurantDetailModal from "../components/RestaurantDetailModal";
+import {
+  allLists as selectAllLists,
+  defaultList as selectDefaultList,
+  readActiveListIds,
+  writeActiveListIds,
+} from "../utils/favoriteLists";
+// PRICE_LABELS was previously consumed by the inline ChosenModal
+// in this file; that modal has been replaced by the global
+// <ChosenCelebration/> component (it pulls PRICE_LABELS itself),
+// so this page no longer needs the import.
+import RestaurantDetailModal, { RestaurantDetailPanel } from "../components/RestaurantDetailModal";
 // Lazy: the maps chunk (~13 KB gzip via vendor-maps) loads only when the
 // CompareMap is actually rendered — on most visits to this page the user
 // is comparing without the map open, so the chunk stays out of the cold-
@@ -31,159 +41,43 @@ const getUserRating = (reviews, id) => {
   return list?.length ? mean(list.map((r) => r.rating)) : null;
 };
 
-// ── Detail panel ─────────────────────────────────────────────
+// Action row for the inline RestaurantDetailPanel — replaces what
+// used to be the bottom buttons of the legacy DetailPanel. The
+// readOnly modal body hides its built-in Add/Favorite buttons, so we
+// pass this through `actions` to keep Compare-page-specific controls
+// available: a green "Choose Now" CTA and a Favorite heart toggle.
+const ComparePanelActions = ({ isFavorite, onChooseNow, onToggleFavorite }) => (
+  <>
+    <button
+      onClick={onChooseNow}
+      className="flex-1 rounded-lg py-2 text-sm font-semibold bg-green-600 text-white hover:bg-green-500 transition-colors"
+    >
+      Choose Now
+    </button>
+    <button
+      onClick={onToggleFavorite}
+      className={[
+        'flex-1 rounded-lg py-2 text-sm font-semibold border transition-colors',
+        isFavorite
+          ? 'bg-red-50 text-red-600 hover:bg-red-100 border-red-200'
+          : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-200',
+      ].join(' ')}
+    >
+      {isFavorite ? '♥ Unfavorite' : '♡ Favorite'}
+    </button>
+  </>
+);
 
-const cleanVal = (raw) => (raw && raw !== 'N/A') ? raw : null;
+// The local DetailPanel that used to live here was replaced by
+// RestaurantDetailPanel (the inline mode of RestaurantDetailModal).
+// Same visual content as the popup detail modal but rendered as a
+// grid cell on the Compare page instead of a centered Dialog.
 
-const DetailPanel = ({ id, userInfo, dispatch, onChooseNow, restaurantMap = {} }) => {
-  const r = restaurantMap[id];
-  if (!r) return null;
-
-  const reviews    = userInfo.reviews[sid(id)] || [];
-  const avgRating  = reviews.length ? mean(reviews.map((rv) => rv.rating)) : null;
-  const isFavorite = userInfo.favorites.map(sid).includes(sid(id));
-
-  const phone   = cleanVal(r.phone);
-  const website = cleanVal(r.website);
-  const yelp    = cleanVal(r.yelp);
-
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-5 flex flex-col h-full">
-
-      <div className="flex justify-between items-start gap-3 min-h-[4.5rem]">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-base font-bold text-gray-900 leading-snug line-clamp-2">{r.name}</h2>
-          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-            <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-semibold truncate max-w-[8rem]">
-              {r.type ?? '—'}
-            </span>
-            <RatingDisplay
-              restaurantId={id}
-              googleRating={r.rating ?? null}
-              personalRating={avgRating}
-              personalReviews={reviews}
-              restaurantName={r.name}
-            />
-          </div>
-        </div>
-        <button
-          onClick={() => dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))}
-          className={`text-xl leading-none shrink-0 mt-0.5 transition-colors ${
-            isFavorite ? "text-red-500" : "text-gray-300 hover:text-red-300"
-          }`}
-        >
-          ♥
-        </button>
-      </div>
-
-      <hr className="border-gray-100 my-3" />
-
-      <div className="grid grid-cols-2 gap-x-5 gap-y-3">
-        <InfoRow label="Price"   value={PRICE_LABELS[r.price] ?? '—'} />
-        <InfoRow label="Hours"   value={cleanVal(r.hours) ?? '—'} />
-        <InfoRow label="Phone"   value={phone ?? '—'}   href={phone ? `tel:${phone}` : undefined} />
-        <InfoRow label="Website" value={website ?? '—'} href={normalizeUrl(website)} external />
-        <InfoRow label="Yelp"    value={yelp ?? '—'}    href={normalizeUrl(yelp)}    external />
-      </div>
-
-      <div className="flex gap-2 mt-3">
-        <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-          r.takeout ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-400 line-through"
-        }`}>
-          Takeout
-        </span>
-        <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-          r.delivery ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-400 line-through"
-        }`}>
-          Delivery
-        </span>
-      </div>
-
-      <div className="flex-1" />
-
-      <div className="flex gap-2 mt-4">
-        <button
-          onClick={onChooseNow}
-          className="flex-1 rounded-lg py-2 text-xs font-semibold transition-colors bg-green-600 text-white hover:bg-green-500"
-        >
-          Choose Now
-        </button>
-        <button
-          onClick={() => dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))}
-          className={[
-            "flex-1 rounded-lg py-2 text-xs font-semibold transition-colors border",
-            isFavorite
-              ? "bg-red-50 text-red-600 hover:bg-red-100 border-red-200"
-              : "bg-white text-gray-600 hover:bg-gray-50 border-gray-200",
-          ].join(" ")}
-        >
-          {isFavorite ? "♥ Unfavorite" : "♡ Favorite"}
-        </button>
-      </div>
-
-      {reviews.length > 0 && (
-        <div className="border-t border-gray-100 mt-3 pt-3">
-          <p className="text-xs font-semibold text-gray-600 mb-2">
-            Your Reviews <span className="font-normal text-gray-400">({reviews.length})</span>
-          </p>
-          <div className="flex flex-col gap-1.5 max-h-32 overflow-y-auto pr-1">
-            {reviews.map((rv) => (
-              <div key={rv.content + rv.date} className="rounded-lg bg-gray-50 px-2.5 py-2">
-                <div className="flex justify-between items-center mb-0.5">
-                  <span className="text-xs font-bold text-amber-500">★ {rv.rating}</span>
-                  <span className="text-xs text-gray-400">{rv.date}</span>
-                </div>
-                <p className="text-xs text-gray-600 leading-relaxed">{rv.content}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-// ── Acceptance confirmation modal ─────────────────────────────
-
-const ChosenModal = ({ id, restaurantMap, onClose }) => {
-  const r = restaurantMap[id];
-  if (!r) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-black/40" aria-hidden="true" onClick={onClose} />
-      <div className="relative w-full max-w-sm rounded-2xl bg-white shadow-2xl overflow-hidden">
-        <div className="bg-green-50 border-b border-green-100 px-6 py-5 flex justify-between items-start">
-          <div>
-            <p className="text-xs font-semibold text-green-600 uppercase tracking-wider mb-1">
-              Tonight you're going to
-            </p>
-            <h2 className="text-2xl font-bold text-gray-900">{r.name}</h2>
-            <p className="text-sm text-gray-500 mt-0.5">{r.type}</p>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 shrink-0 mt-1 text-lg leading-none">
-            ✕
-          </button>
-        </div>
-        <div className="px-6 py-5 flex flex-col gap-3">
-          <div className="flex gap-4 text-sm text-gray-700">
-            <div><p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Price</p>{PRICE_LABELS[r.price] ?? '—'}</div>
-            <div><p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Hours</p>{r.hours ?? '—'}</div>
-          </div>
-          <div className="flex gap-2">
-            <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${r.takeout ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400 line-through'}`}>Takeout</span>
-            <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${r.delivery ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400 line-through'}`}>Delivery</span>
-          </div>
-          <button
-            onClick={onClose}
-            className="mt-1 w-full rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-500 transition-colors"
-          >
-            Let's go!
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
+// The page-local ChosenModal that used to live here was replaced by
+// the global <ChosenCelebration/> mounted in App.tsx. handleChooseNow
+// now dispatches showChosenCelebration() and that single shared
+// modal handles the "Tonight you're going to…" feedback for every
+// Choose-Now surface in the app.
 
 const MAX_COMPARE = 4;
 
@@ -202,7 +96,73 @@ const RestaurantPage = () => {
   const userInfo = useCurrentUser();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const allRestaurants = customRestaurants;
-  const { favorites, options, reviews } = userInfo;
+  const { options, reviews } = userInfo;
+
+  // ── Active favorite lists (Compare-page-scoped) ───────────────
+  // Multi-select: the favorites sidebar renders the UNION of every
+  // checked list's entries. First-load default is [defaultId]
+  // (mirrors the pre-multi-select behavior). Selection persists in
+  // sessionStorage per page so each surface (Search / Compare /
+  // Choose) remembers its own checkboxes independently.
+  const allFavoriteLists    = useSelector(selectAllLists);
+  const defaultFavoriteList = useSelector(selectDefaultList);
+  const [activeListIds, setActiveListIdsState] = useState(() => readActiveListIds('compare'));
+  useEffect(() => {
+    if (activeListIds == null && defaultFavoriteList?.id) {
+      const next = [defaultFavoriteList.id];
+      setActiveListIdsState(next);
+      writeActiveListIds('compare', next);
+    }
+  }, [activeListIds, defaultFavoriteList?.id]);
+  const setActiveListIds = useCallback((next) => {
+    setActiveListIdsState(next);
+    writeActiveListIds('compare', next);
+  }, []);
+
+  // Sticky pin for the in-progress kebab interaction. While a card's
+  // HeartWithKebab picker is open we keep that card visible in the
+  // sidebar regardless of whether it still belongs to the active
+  // list — otherwise unchecking the card's last list inside the
+  // picker would immediately remove the card from view, preventing
+  // the user from then checking a different list to move it. The
+  // pin clears on picker close, after which the sidebar re-filters
+  // and the card disappears if it's no longer in the active list.
+  const [stickyFavId, setStickyFavId] = useState(null);
+  const handlePickerOpen  = useCallback((id) => setStickyFavId(String(id)), []);
+  const handlePickerClose = useCallback((id) => {
+    setStickyFavId((prev) => (prev === String(id) ? null : prev));
+  }, []);
+
+  // Resolve the favorites list shown in the sidebar as the deduped
+  // UNION of every selected list's entries. `activeListIds` is null
+  // before the first-hydrate seeding lands — in that window we fall
+  // back to the legacy users[0].favorites array so the sidebar is
+  // never empty during a page load.
+  const favorites = useMemo(() => {
+    let base;
+    if (activeListIds == null) {
+      base = (userInfo.favorites ?? []).map(String);
+    } else if (activeListIds.length === 0) {
+      base = [];
+    } else {
+      const selected = new Set(activeListIds);
+      const seen = new Set();
+      for (const list of allFavoriteLists) {
+        if (!selected.has(list.id)) continue;
+        for (const entry of list.entries) seen.add(String(entry.restaurantId));
+      }
+      base = [...seen];
+    }
+    // Pin the in-progress card so unchecking its last list mid-edit
+    // doesn't yank it out of view before the user can move it.
+    if (stickyFavId && !base.includes(stickyFavId)) base = [...base, stickyFavId];
+    return base;
+  }, [activeListIds, allFavoriteLists, userInfo.favorites, stickyFavId]);
+
+  // O(1) lookup for "is this favorite already in the options list?" —
+  // drives the "+ Add to Options" vs "✓ In Options" state on each
+  // favorite card without re-scanning the options array per row.
+  const optionsSet = useMemo(() => new Set(options.map(sid)), [options]);
 
   // Precompute the user's accepted-history stats once per `accepted` change.
   // Four card sites below used to call `getMostRecentDate` per render, each
@@ -215,13 +175,37 @@ const RestaurantPage = () => {
   const [activeIds, setActiveIds] = useState(
     restaurantId ? [restaurantId] : []
   );
-  const [chosenId, setChosenId] = useState(null);
+  // chosenId state previously gated the inline ChosenModal; that
+  // modal is now the global <ChosenCelebration/> driven by Redux,
+  // so the local state is gone.
   const [detailId, setDetailId] = useState(null);
 
   // Two-way card↔marker hover sync. Same pattern as SearchPage — one
   // piece of state drives "which pin glows" AND "which card is ringed".
   // Local because it's purely visual ephemera.
   const [hoveredCompareId, setHoveredCompareId] = useState(null);
+
+  // Refs + scroll-position trackers for the desktop favorites and
+  // options sidebars so we can render a "3 / 7"-style position
+  // indicator next to each label. Favorites uses the rtl/ltr wrapper
+  // (scrollbar on left), so its cards live one level deeper than the
+  // scroll container; options is single-level so its cards are
+  // direct children. The hook's getItems argument bridges the two
+  // layouts.
+  const favScrollRef = useRef(null);
+  const optScrollRef = useRef(null);
+  const favActiveIdx = useScrollListIndex(
+    favScrollRef,
+    favorites.length,
+    (c) => c.firstElementChild?.children,
+  );
+  // Default getItems (= direct children) covers the options layout —
+  // cards are immediate children of optScrollRef. Hook ref-pins
+  // getItems internally so stable identity is no longer a footgun.
+  const optActiveIdx = useScrollListIndex(
+    optScrollRef,
+    options.length,
+  );
 
   // Keep `activeIds` in lock-step with the options list. `handleRemoveOption`
   // below only catches the in-page X button on the sidebar card; options
@@ -350,7 +334,11 @@ const RestaurantPage = () => {
       chooseMethod: 'direct',
     }));
     dispatch(removeUserOption(id));
-    setChosenId(id);
+    // Pop the shared global celebration instead of the page-local
+    // ChosenModal — keeps post-Choose-Now UX consistent with every
+    // other surface that fires Choose Now (detail modal, future
+    // coin-flip / roulette winners).
+    dispatch(showChosenCelebration(id));
   };
 
   const activeSet = new Set(activeIds.map(sid));
@@ -404,12 +392,25 @@ const RestaurantPage = () => {
                   >
                     ✕
                   </button>
-                  <DetailPanel
-                    id={mobileCurrentId}
-                    userInfo={userInfo}
-                    dispatch={dispatch}
-                    onChooseNow={() => handleChooseNow(mobileCurrentId)}
+                  {/* RestaurantDetailPanel = the modal body rendered
+                      inline (no Dialog wrapper). readOnly hides the
+                      modal's built-in write actions; we pass a
+                      Compare-specific Choose-Now + Favorite pair
+                      through `actions`. Dismiss lives outside the
+                      panel as the X-overhang button above. */}
+                  <RestaurantDetailPanel
+                    restaurantId={mobileCurrentId}
                     restaurantMap={allRestaurants}
+                    readOnly
+                    actions={(
+                      <ComparePanelActions
+                        isFavorite={userInfo.favorites.map(sid).includes(sid(mobileCurrentId))}
+                        onChooseNow={() => handleChooseNow(mobileCurrentId)}
+                        onToggleFavorite={() =>
+                          dispatch(updateUserFavorites({ restaurantId: mobileCurrentId, userId: userInfo.id }))
+                        }
+                      />
+                    )}
                   />
                 </div>
               )}
@@ -463,28 +464,66 @@ const RestaurantPage = () => {
 
           {mobileAddOpen && (
             <div className="mt-2 border border-gray-200 rounded-lg bg-white p-4 flex flex-col gap-4">
-              {favorites.length > 0 && (
+              {(favorites.length > 0 || allFavoriteLists.length > 0) && (
                 <div>
-                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                    Favorites
-                  </p>
-                  <div className="flex flex-col gap-2">
-                    {favorites.map((id) => (
-                      <RestaurantCard
-                        size="md"
-                        key={id}
-                        id={id}
-                        isActive={activeSet.has(sid(id))}
-                        personalRating={getUserRating(reviews, id)}
-                        lastChosen={formatLastChosen(acceptedStats, id)}
-                        onCardClick={() => handleCardClick(id)}
-                        onUnfavorite={() =>
-                          dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
-                        }
-                        onInfo={() => setDetailId(id)}
-                        restaurantMap={allRestaurants}
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                      Favorites
+                    </p>
+                    {allFavoriteLists.length > 0 && (
+                      <ListSelector
+                        value={activeListIds ?? []}
+                        onChange={setActiveListIds}
+                        defaultId={defaultFavoriteList?.id}
+                        align="right"
                       />
-                    ))}
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {favorites.map((id) => {
+                      const inOptions = optionsSet.has(sid(id));
+                      return (
+                        <RestaurantCard
+                          size="md"
+                          key={id}
+                          id={id}
+                          isActive={activeSet.has(sid(id))}
+                          personalRating={getUserRating(reviews, id)}
+                          lastChosen={formatLastChosen(acceptedStats, id)}
+                          onCardClick={() => handleCardClick(id)}
+                          cornerSlot={<HeartWithKebab restaurantId={id} size="md" onPickerOpen={handlePickerOpen} onPickerClose={handlePickerClose} />}
+                          onInfo={() => setDetailId(id)}
+                          restaurantMap={allRestaurants}
+                        >
+                          {/* + Add to Options bottom action so a
+                              favorited restaurant can graduate
+                              into the user's coin-flip pool
+                              directly from this sidebar. Once in
+                              options, the button flips to a
+                              disabled "In options" state — keeps
+                              the row's footprint stable and gives
+                              the user feedback that the action
+                              landed. stopPropagation prevents the
+                              click from bubbling to the card's
+                              "toggle comparison" handler. */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!inOptions) dispatch(addUserOption(id));
+                            }}
+                            disabled={inOptions}
+                            className={[
+                              'mt-2 w-full rounded-lg text-xs py-1 transition-all shadow-brand-sm',
+                              inOptions
+                                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                : 'bg-gradient-to-br from-orange-500 to-red-500 text-white hover:from-orange-400 hover:to-red-400',
+                            ].join(' ')}
+                          >
+                            {inOptions ? '✓ In Options' : '+ Add to Options'}
+                          </button>
+                        </RestaurantCard>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -538,7 +577,34 @@ const RestaurantPage = () => {
 
         {/* Left: Favorites */}
         <div className="w-full lg:w-52 lg:shrink-0">
-          <h2 className="text-lg font-bold text-gray-900 mb-3">Favorites</h2>
+          {/* Position-in-list indicator next to the label. Updates
+              live as the user scrolls the sidebar — the hook tracks
+              which card is closest to the container's vertical
+              center. Hidden when the list is empty so we don't
+              render "0 / 0". */}
+          <h2 className="text-lg font-bold text-gray-900 mb-2 flex items-baseline gap-2">
+            <span>Favorites</span>
+            {favorites.length > 0 && (
+              <span className="text-xs font-medium text-gray-400 tabular-nums">
+                {favActiveIdx + 1} / {favorites.length}
+              </span>
+            )}
+          </h2>
+          {/* ListSelector lets the user switch which list drives this
+              sidebar without leaving the Compare page. Hidden when
+              there are no lists yet (pre-hydrate / brand-new
+              account) — the sidebar then falls back to the legacy
+              favorites array via the `favorites` useMemo above. */}
+          {allFavoriteLists.length > 0 && (
+            <div className="mb-3">
+              <ListSelector
+                value={activeListIds ?? []}
+                onChange={setActiveListIds}
+                defaultId={defaultFavoriteList?.id}
+                align="left"
+              />
+            </div>
+          )}
           {favorites.length === 0 ? (
             <p className="text-xs text-gray-400 italic">No favorites yet.</p>
           ) : (
@@ -554,29 +620,60 @@ const RestaurantPage = () => {
             // viewport bottom edge below. overscroll-contain stops
             // wheel/touch scroll from bubbling to the page when
             // the user hits the top/bottom of the list.
-            <div className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-1">
-              {favorites.map((id) => (
-                <RestaurantCard
-                  size="md"
-                  key={id}
-                  id={id}
-                  isActive={activeSet.has(sid(id))}
-                  personalRating={getUserRating(reviews, id)}
-                  lastChosen={formatLastChosen(acceptedStats, id)}
-                  onCardClick={() => handleCardClick(id)}
-                  onUnfavorite={() =>
-                    dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
-                  }
-                  onInfo={() => setDetailId(id)}
-                  restaurantMap={allRestaurants}
-                  // Map↔card sync: hovering this card glows the matching
-                  // pin; hovering the pin rings this card via
-                  // isHighlighted (driven by hoveredCompareId).
-                  onMouseEnter={() => setHoveredCompareId(String(id))}
-                  onMouseLeave={() => setHoveredCompareId(null)}
-                  isHighlighted={String(hoveredCompareId) === String(id)}
-                />
-              ))}
+            //
+            // Scrollbar on the LEFT: outer container is direction:rtl
+            // so the browser paints the overflow scrollbar on the
+            // inline-start edge (visually left in our LTR locale);
+            // inner column resets direction:ltr so flex/text still
+            // flow normally. pl-2 puts an 8px gutter between the
+            // scrollbar and the card edges so they don't visually
+            // touch.
+            <div ref={favScrollRef} className="max-h-[80vh] overflow-y-auto overscroll-contain [direction:rtl]">
+              <div className="flex flex-col gap-3 pl-2 [direction:ltr]">
+              {favorites.map((id) => {
+                const inOptions = optionsSet.has(sid(id));
+                return (
+                  <RestaurantCard
+                    size="md"
+                    key={id}
+                    id={id}
+                    isActive={activeSet.has(sid(id))}
+                    personalRating={getUserRating(reviews, id)}
+                    lastChosen={formatLastChosen(acceptedStats, id)}
+                    onCardClick={() => handleCardClick(id)}
+                    cornerSlot={<HeartWithKebab restaurantId={id} size="md" onPickerOpen={handlePickerOpen} onPickerClose={handlePickerClose} />}
+                    onInfo={() => setDetailId(id)}
+                    restaurantMap={allRestaurants}
+                    // Map↔card sync: hovering this card glows the matching
+                    // pin; hovering the pin rings this card via
+                    // isHighlighted (driven by hoveredCompareId).
+                    onMouseEnter={() => setHoveredCompareId(String(id))}
+                    onMouseLeave={() => setHoveredCompareId(null)}
+                    isHighlighted={String(hoveredCompareId) === String(id)}
+                  >
+                    {/* See mobile favorites above for the rationale —
+                        same Add-to-Options bottom action so the user
+                        can promote a favorite into the coin-flip
+                        pool without leaving the Compare page. */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!inOptions) dispatch(addUserOption(id));
+                      }}
+                      disabled={inOptions}
+                      className={[
+                        'mt-2 w-full rounded-lg text-xs py-1 transition-all shadow-brand-sm',
+                        inOptions
+                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                          : 'bg-gradient-to-br from-orange-500 to-red-500 text-white hover:from-orange-400 hover:to-red-400',
+                      ].join(' ')}
+                    >
+                      {inOptions ? '✓ In Options' : '+ Add to Options'}
+                    </button>
+                  </RestaurantCard>
+                );
+              })}
+              </div>
             </div>
           )}
         </div>
@@ -640,12 +737,22 @@ const RestaurantPage = () => {
                       >
                         ✕
                       </button>
-                      <DetailPanel
-                        id={id}
-                        userInfo={userInfo}
-                        dispatch={dispatch}
-                        onChooseNow={() => handleChooseNow(id)}
+                      {/* See mobile DetailPanel above for the
+                          inline-mode rationale. Same setup: readOnly
+                          modal body + custom Compare actions. */}
+                      <RestaurantDetailPanel
+                        restaurantId={id}
                         restaurantMap={allRestaurants}
+                        readOnly
+                        actions={(
+                          <ComparePanelActions
+                            isFavorite={userInfo.favorites.map(sid).includes(sid(id))}
+                            onChooseNow={() => handleChooseNow(id)}
+                            onToggleFavorite={() =>
+                              dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
+                            }
+                          />
+                        )}
                       />
                     </div>
                   ))}
@@ -689,7 +796,17 @@ const RestaurantPage = () => {
 
         {/* Right: Options */}
         <div className="w-full lg:w-52 lg:shrink-0">
-          <h2 className="text-lg font-bold text-gray-900 mb-3">Options</h2>
+          {/* Mirrors the Favorites label above — same position-
+              indicator pattern, just driven by the options scroll
+              container instead. */}
+          <h2 className="text-lg font-bold text-gray-900 mb-3 flex items-baseline gap-2">
+            <span>Options</span>
+            {options.length > 0 && (
+              <span className="text-xs font-medium text-gray-400 tabular-nums">
+                {optActiveIdx + 1} / {options.length}
+              </span>
+            )}
+          </h2>
           {options.length === 0 ? (
             <p className="text-xs text-gray-400 italic">No options yet.</p>
           ) : (
@@ -700,8 +817,12 @@ const RestaurantPage = () => {
             // above for the rationale (md cards are taller than the
             // legacy sm cards, so the previous "scroll only past 6
             // entries" pattern made the column too tall on most
-            // screens).
-            <div className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-1">
+            // screens). Scrollbar stays on the right (the favorites
+            // column moved it to the left so the two columns
+            // mirror each other across the comparison-grid in the
+            // middle); pr-2 gives an 8px gutter between the cards
+            // and the scrollbar so they don't visually touch.
+            <div ref={optScrollRef} className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-2">
               {options.map((id) => (
                 <RestaurantCard
                   size="md"
@@ -728,13 +849,10 @@ const RestaurantPage = () => {
       </div>
     </div>
 
-    {chosenId && (
-      <ChosenModal
-        id={chosenId}
-        restaurantMap={allRestaurants}
-        onClose={() => setChosenId(null)}
-      />
-    )}
+    {/* Post-Choose-Now celebration moved to the global
+        <ChosenCelebration/> mounted in App.tsx — same UX, fired
+        via dispatch(showChosenCelebration(id)) instead of local
+        state. */}
     {detailId && (
       <RestaurantDetailModal
         restaurantId={detailId}

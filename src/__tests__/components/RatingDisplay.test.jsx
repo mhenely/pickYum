@@ -23,12 +23,15 @@ describe('RatingDisplay', () => {
       expect(screen.getByText(/3\.5/)).toBeInTheDocument();
     });
 
-    it('displays — when no rating is available', () => {
+    it('displays N/A when no rating is available', () => {
+      // Empty-state label was unified to N/A across all modes
+      // (was previously '—' here and '…' for community-pending);
+      // see RatingDisplay.jsx for the parity rationale.
       renderWithProviders(
         <RatingDisplay restaurantId="1" googleRating={null} personalRating={null} compact />,
         { preloadedState: { rating: ratingState } },
       );
-      expect(screen.getByText(/—/)).toBeInTheDocument();
+      expect(screen.getByText(/N\/A/)).toBeInTheDocument();
     });
 
     it('shows the mode initial (P for personal)', () => {
@@ -66,6 +69,27 @@ describe('RatingDisplay', () => {
         { preloadedState: { rating: ratingState } },
       );
       expect(screen.getByText('N/A')).toBeInTheDocument();
+    });
+
+    it('defaults to Google mode when no personal rating exists', () => {
+      // No personal rating → initial mode is Google, so the
+      // value shown is the googleRating without a click. Previously
+      // defaulted to 'personal' and showed N/A on first render,
+      // forcing the user to click Google to see the rating they
+      // could already have seen.
+      renderWithProviders(
+        <RatingDisplay restaurantId="4" googleRating={4.3} personalRating={null} />,
+        { preloadedState: { rating: ratingState } },
+      );
+      expect(screen.getByText('4.3')).toBeInTheDocument();
+    });
+
+    it('defaults to Personal mode when a personal rating exists', () => {
+      renderWithProviders(
+        <RatingDisplay restaurantId="5" googleRating={4.3} personalRating={4.8} />,
+        { preloadedState: { rating: ratingState } },
+      );
+      expect(screen.getByText('4.8')).toBeInTheDocument();
     });
   });
 });

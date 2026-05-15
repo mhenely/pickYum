@@ -4,6 +4,8 @@ import reducer, {
   removeUserOption,
   updateUserFavorites,
   addUserAcceptance,
+  setAcceptedExcludeFromInsights,
+  reconcileAcceptedRowId,
   archiveRestaurant,
   unarchiveRestaurant,
   incrementFlipCount,
@@ -61,6 +63,70 @@ describe('userInfoSlice', () => {
       const last = state.users[0].accepted[state.users[0].accepted.length - 1];
       expect(last.restaurantId).toBe('10');
       expect(last.date).toBeDefined();
+    });
+
+    it('defaults id=null and excludeFromInsights=false when caller omits them', () => {
+      // Optimistic appends from legacy callers don't yet know the server
+      // row id; both new fields default safely so the entry is valid in
+      // the slice's expanded shape.
+      const state = reducer(baseState, addUserAcceptance({ restaurantId: '11' }));
+      const last = state.users[0].accepted[state.users[0].accepted.length - 1];
+      expect(last.id).toBeNull();
+      expect(last.excludeFromInsights).toBe(false);
+    });
+
+    it('preserves caller-provided id and excludeFromInsights', () => {
+      const state = reducer(baseState, addUserAcceptance({
+        restaurantId: 12, id: 99, excludeFromInsights: true,
+      }));
+      const last = state.users[0].accepted[state.users[0].accepted.length - 1];
+      expect(last.id).toBe(99);
+      expect(last.excludeFromInsights).toBe(true);
+    });
+  });
+
+  describe('setAcceptedExcludeFromInsights', () => {
+    it('flips the flag on the entry matching the given server id', () => {
+      // Seed two entries with distinct server ids — toggle one, leave the
+      // other untouched.
+      const seeded = reducer(baseState, setUserData({
+        id: 1, email: 'a@b.c', username: 'a',
+        accepted: [
+          { id: 10, restaurantId: '5', date: '2024-01-01', excludeFromInsights: false },
+          { id: 11, restaurantId: '6', date: '2024-01-02', excludeFromInsights: false },
+        ],
+      }));
+      const next = reducer(seeded, setAcceptedExcludeFromInsights({ id: 11, excludeFromInsights: true }));
+      expect(next.users[0].accepted[0].excludeFromInsights).toBe(false);
+      expect(next.users[0].accepted[1].excludeFromInsights).toBe(true);
+    });
+
+    it('no-ops when the server id is not in state', () => {
+      const next = reducer(baseState, setAcceptedExcludeFromInsights({ id: 999, excludeFromInsights: true }));
+      // baseState has an empty accepted list — the action shouldn't add a
+      // phantom entry. The whole accepted slice should still be empty.
+      expect(next.users[0].accepted).toEqual([]);
+    });
+  });
+
+  describe('reconcileAcceptedRowId', () => {
+    it('backfills the server id onto the oldest no-id entry for the restaurant', () => {
+      // Simulate an optimistic append (id=null) followed by the listener
+      // backfilling the real id once POST /me/accepted returns.
+      const seeded = reducer(baseState, addUserAcceptance({ restaurantId: 7 }));
+      const next = reducer(seeded, reconcileAcceptedRowId({ restaurantId: 7, id: 555 }));
+      const target = next.users[0].accepted.find((a) => String(a.restaurantId) === '7');
+      expect(target.id).toBe(555);
+    });
+
+    it('only backfills the FIRST no-id entry — concurrent appends are FIFO-reconciled', () => {
+      // Two optimistic appends for the same restaurant before either
+      // response lands. First response should claim the first append.
+      const a = reducer(baseState, addUserAcceptance({ restaurantId: 8 }));
+      const b = reducer(a,         addUserAcceptance({ restaurantId: 8 }));
+      const next = reducer(b, reconcileAcceptedRowId({ restaurantId: 8, id: 100 }));
+      const ids = next.users[0].accepted.map((e) => e.id);
+      expect(ids).toEqual([100, null]);
     });
   });
 

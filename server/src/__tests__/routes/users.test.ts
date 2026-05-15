@@ -402,7 +402,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('returns empty when the user has no linked restaurants', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [], options: [], accepted: [],
+      favorites: [], options: [], accepted: [], archives: [],
     });
     const res = await request(buildApp())
       .post('/api/users/me/refresh-places')
@@ -415,7 +415,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('returns empty when no linked restaurants are stale', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [{ restaurantId: 1 }], options: [], accepted: [],
+      favorites: [{ restaurantId: 1 }], options: [], accepted: [], archives: [],
     });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([]);
     const res = await request(buildApp())
@@ -428,7 +428,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('refreshes a stale restaurant by fetching Place Details and merging fields', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [{ restaurantId: 1 }], options: [], accepted: [],
+      favorites: [{ restaurantId: 1 }], options: [], accepted: [], archives: [],
     });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([
       { id: 1, googlePlaceId: 'gp-1', name: 'Old Name' },
@@ -466,7 +466,7 @@ describe('POST /api/users/me/refresh-places', () => {
   it('continues past a failed Place Details lookup without aborting the batch', async () => {
     process.env.GOOGLE_PLACES_API_KEY = 'test-key';
     (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
-      favorites: [{ restaurantId: 1 }, { restaurantId: 2 }], options: [], accepted: [],
+      favorites: [{ restaurantId: 1 }, { restaurantId: 2 }], options: [], accepted: [], archives: [],
     });
     (mockPrisma.restaurant.findMany as jest.Mock).mockResolvedValue([
       { id: 1, googlePlaceId: 'gp-1', name: 'A' },
@@ -593,6 +593,98 @@ describe('POST /api/users/me/accepted', () => {
     expect(args.data.optionsSnapshot).toBeUndefined();
     expect(args.data.chooseMethod).toBeNull();
   });
+
+  it('persists excludeFromInsights when provided', async () => {
+    (mockPrisma.userAccepted.create as jest.Mock).mockResolvedValue({
+      id: 5, userId: 1, restaurantId: 5, acceptedAt: new Date(),
+      excludeFromInsights: true, restaurant: {},
+    });
+
+    const res = await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5, excludeFromInsights: true });
+
+    expect(res.status).toBe(201);
+    const args = (mockPrisma.userAccepted.create as jest.Mock).mock.calls[0][0];
+    expect(args.data.excludeFromInsights).toBe(true);
+  });
+
+  it('rejects a non-boolean excludeFromInsights', async () => {
+    const res = await request(buildApp())
+      .post('/api/users/me/accepted')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 5, excludeFromInsights: 'yes' });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('PATCH /api/users/me/accepted/:id', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .send({ excludeFromInsights: true });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 400 on a non-numeric id', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/not-a-number')
+      .set('Cookie', authCookie())
+      .send({ excludeFromInsights: true });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when excludeFromInsights is missing or not boolean', async () => {
+    const noBody = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({});
+    expect(noBody.status).toBe(400);
+
+    const badType = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ excludeFromInsights: 'true' });
+    expect(badType.status).toBe(400);
+  });
+
+  it('returns 404 when the row does not belong to the user (count === 0)', async () => {
+    // updateMany with the userId filter returns count=0 both for "row
+    // doesn't exist" and "row exists but belongs to someone else" —
+    // both surface as 404 to avoid leaking row existence across users.
+    (mockPrisma.userAccepted.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/9999')
+      .set('Cookie', authCookie())
+      .send({ excludeFromInsights: true });
+    expect(res.status).toBe(404);
+  });
+
+  it('updates excludeFromInsights and returns the refreshed row', async () => {
+    (mockPrisma.userAccepted.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (mockPrisma.userAccepted.findUnique as jest.Mock).mockResolvedValue({
+      id: 42, userId: 1, restaurantId: 7, acceptedAt: new Date(),
+      excludeFromInsights: true, restaurant: { id: 7, name: 'Group Pick' },
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ excludeFromInsights: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accepted.excludeFromInsights).toBe(true);
+    expect(mockPrisma.userAccepted.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 42, userId: 1 },
+        data: { excludeFromInsights: true },
+      }),
+    );
+  });
 });
 
 describe('GET /api/users/me/insights', () => {
@@ -661,6 +753,29 @@ describe('GET /api/users/me/insights', () => {
       topConsidered: [],
       oftenSkipped: [],
       recent: [],
+    });
+  });
+
+  it('filters out rows with excludeFromInsights=true at the WHERE clause', async () => {
+    // We don't need the rows themselves to do this test — just need to
+    // assert that the query Prisma sees includes the filter. The route
+    // sets `excludeFromInsights: false` in `where`; Prisma then excludes
+    // rows where the column is true. The behavioral promise is "excluded
+    // rows never reach the rollup," and the cheapest place to assert
+    // that is at the query boundary.
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+
+    await request(buildApp())
+      .get('/api/users/me/insights')
+      .set('Cookie', authCookie());
+
+    const findManyCalls = (mockPrisma.userAccepted.findMany as jest.Mock).mock.calls;
+    expect(findManyCalls.length).toBeGreaterThan(0);
+    // The main rollup query must carry the filter — drift here would
+    // silently re-include opted-out rows in totals/cuisine trends/etc.
+    expect(findManyCalls[0][0].where).toMatchObject({
+      userId: 1,
+      excludeFromInsights: false,
     });
   });
 
@@ -857,5 +972,305 @@ describe('GET /api/users/me/insights', () => {
     expect(res.body.recent).toHaveLength(2);
     expect(res.body.recent[0]).toMatchObject({ name: 'Solo',       eventId: null, groupId: null });
     expect(res.body.recent[1]).toMatchObject({ name: 'Group Pick', eventId: 42,   groupId: 7    });
+  });
+});
+
+// ── Multi-list favorites ──────────────────────────────────────
+//
+// Covers the new favorite-lists endpoints introduced for the
+// multi-list favorites sprint:
+//   GET    /me/favorite-lists
+//   POST   /me/favorite-lists
+//   PATCH  /me/favorite-lists/:id
+//   DELETE /me/favorite-lists/:id
+//   POST   /me/favorite-lists/:id/default
+//   POST   /me/favorite-lists/:id/entries
+//   DELETE /me/favorite-lists/:id/entries/:rid
+//   PATCH  /me/favorite-lists/positions
+//
+// jest-mock-extended returns undefined for unmocked prisma calls; we
+// set explicit mocks per test to keep the contract obvious. Several
+// endpoints make defensive bootstrap calls (ensureDefaultFavoriteList);
+// those tests stub findFirst → null then create → the new row.
+
+const sampleList = (overrides: Partial<Record<string, unknown>> = {}) => ({
+  id: 10,
+  userId: 1,
+  groupId: null,
+  name: 'My Favorites',
+  description: null,
+  color: null,
+  isDefault: true,
+  position: 0,
+  createdAt: new Date('2026-05-15T00:00:00Z'),
+  entries: [],
+  ...overrides,
+});
+
+describe('GET /api/users/me/favorite-lists', () => {
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).get('/api/users/me/favorite-lists');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns hydrated lists with entries in position order', async () => {
+    (mockPrisma.favoriteList.findMany as jest.Mock).mockResolvedValue([
+      sampleList(),
+      sampleList({ id: 11, name: 'Date Night', isDefault: false, position: 1 }),
+    ]);
+    const res = await request(buildApp())
+      .get('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(200);
+    expect(res.body.lists).toHaveLength(2);
+    expect(res.body.lists[0]).toMatchObject({ id: 10, name: 'My Favorites', isDefault: true });
+    expect(res.body.lists[1]).toMatchObject({ id: 11, name: 'Date Night',    isDefault: false });
+  });
+
+  it('bootstraps a default list when the user has none yet', async () => {
+    // First findMany returns []; ensureDefaultFavoriteList then queries
+    // findFirst (returns null → no existing default), create runs and
+    // returns the new row, and the second findMany picks it up.
+    (mockPrisma.favoriteList.findMany as jest.Mock)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([sampleList()]);
+    (mockPrisma.favoriteList.findFirst as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.favoriteList.create as jest.Mock).mockResolvedValue({ id: 10 });
+
+    const res = await request(buildApp())
+      .get('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(200);
+    expect(mockPrisma.favoriteList.create).toHaveBeenCalled();
+    expect(res.body.lists).toHaveLength(1);
+  });
+});
+
+describe('POST /api/users/me/favorite-lists', () => {
+  it('returns 400 for missing name', async () => {
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie())
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/name is required/i);
+  });
+
+  it('returns 400 for a non-allowlist color', async () => {
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie())
+      .send({ name: 'Date Night', color: '#123456' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/color must be one of/i);
+  });
+
+  it('returns 400 past the per-user list cap', async () => {
+    (mockPrisma.favoriteList.count as jest.Mock).mockResolvedValue(50);
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie())
+      .send({ name: 'Yet Another' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/at most/i);
+  });
+
+  it('creates a new list and returns the hydrated row', async () => {
+    (mockPrisma.favoriteList.count as jest.Mock).mockResolvedValue(1);
+    (mockPrisma.favoriteList.aggregate as jest.Mock).mockResolvedValue({ _max: { position: 0 } });
+    (mockPrisma.favoriteList.create as jest.Mock).mockResolvedValue(
+      sampleList({ id: 11, name: 'Date Night', isDefault: false, position: 1, color: '#ef4444' }),
+    );
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie())
+      .send({ name: 'Date Night', color: '#EF4444' });
+    expect(res.status).toBe(201);
+    expect(res.body.list).toMatchObject({ name: 'Date Night', color: '#ef4444', position: 1 });
+  });
+
+  it('translates P2002 to a 409 conflict', async () => {
+    (mockPrisma.favoriteList.count as jest.Mock).mockResolvedValue(1);
+    (mockPrisma.favoriteList.aggregate as jest.Mock).mockResolvedValue({ _max: { position: 0 } });
+    (mockPrisma.favoriteList.create as jest.Mock).mockRejectedValue({ code: 'P2002' });
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists')
+      .set('Cookie', authCookie())
+      .send({ name: 'Date Night' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already have a list/i);
+  });
+});
+
+describe('PATCH /api/users/me/favorite-lists/:id', () => {
+  it('404s when the list belongs to someone else', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, userId: 999, groupId: null, name: 'Theirs', isDefault: false, position: 0,
+    });
+    const res = await request(buildApp())
+      .patch('/api/users/me/favorite-lists/10')
+      .set('Cookie', authCookie())
+      .send({ name: 'Mine now' });
+    expect(res.status).toBe(404);
+  });
+
+  it('updates the list metadata and returns the new row', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, userId: 1, groupId: null, name: 'My Favorites', isDefault: true, position: 0,
+    });
+    (mockPrisma.favoriteList.update as jest.Mock).mockResolvedValue(
+      sampleList({ name: 'Best Spots', color: '#10b981' }),
+    );
+    const res = await request(buildApp())
+      .patch('/api/users/me/favorite-lists/10')
+      .set('Cookie', authCookie())
+      .send({ name: 'Best Spots', color: '#10B981' });
+    expect(res.status).toBe(200);
+    expect(res.body.list).toMatchObject({ name: 'Best Spots', color: '#10b981' });
+  });
+});
+
+describe('DELETE /api/users/me/favorite-lists/:id', () => {
+  it('400s on the default list', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, userId: 1, groupId: null, name: 'My Favorites', isDefault: true, position: 0,
+    });
+    const res = await request(buildApp())
+      .delete('/api/users/me/favorite-lists/10')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/default list/i);
+  });
+
+  it('400s when it would be the only list', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 11, userId: 1, groupId: null, name: 'Solo', isDefault: false, position: 0,
+    });
+    (mockPrisma.favoriteList.count as jest.Mock).mockResolvedValue(1);
+    const res = await request(buildApp())
+      .delete('/api/users/me/favorite-lists/11')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/only list/i);
+  });
+
+  it('deletes a non-default list with siblings remaining', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 11, userId: 1, groupId: null, name: 'Date Night', isDefault: false, position: 1,
+    });
+    (mockPrisma.favoriteList.count as jest.Mock).mockResolvedValue(2);
+    (mockPrisma.favoriteList.delete as jest.Mock).mockResolvedValue({});
+    const res = await request(buildApp())
+      .delete('/api/users/me/favorite-lists/11')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(200);
+    expect(mockPrisma.favoriteList.delete).toHaveBeenCalledWith({ where: { id: 11 } });
+  });
+});
+
+describe('POST /api/users/me/favorite-lists/:id/default', () => {
+  it('promotes a non-default list and demotes others atomically', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 11, userId: 1, groupId: null, name: 'Date Night', isDefault: false, position: 1,
+    });
+    // $transaction(fn) — beforeEach already routes the callback at
+    // mockPrisma so updateMany + update both hit the mock client.
+    (mockPrisma.favoriteList.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (mockPrisma.favoriteList.update as jest.Mock).mockResolvedValue(
+      sampleList({ id: 11, name: 'Date Night', isDefault: true }),
+    );
+    // syncLegacyFavorites fires post-response — stub the lookups so
+    // its fire-and-forget Promise resolves cleanly.
+    (mockPrisma.favoriteList.findFirst as jest.Mock).mockResolvedValue({ id: 11, entries: [] });
+    (mockPrisma.userFavorite.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists/11/default')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(200);
+    expect(res.body.list).toMatchObject({ id: 11, isDefault: true });
+    expect(mockPrisma.favoriteList.updateMany).toHaveBeenCalledWith({
+      where: { userId: 1, isDefault: true, NOT: { id: 11 } },
+      data:  { isDefault: false },
+    });
+  });
+});
+
+describe('POST /api/users/me/favorite-lists/:id/entries', () => {
+  it('400s for a non-integer restaurantId', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, userId: 1, groupId: null, name: 'My Favorites', isDefault: true, position: 0,
+    });
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists/10/entries')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 'not-a-number' });
+    expect(res.status).toBe(400);
+  });
+
+  it('upserts an entry and mirrors to UserFavorite on the default list', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, userId: 1, groupId: null, name: 'My Favorites', isDefault: true, position: 0,
+    });
+    (mockPrisma.favoriteListEntry.upsert as jest.Mock).mockResolvedValue({
+      restaurantId: 42, note: null, addedAt: new Date('2026-05-15T00:00:00Z'),
+    });
+    (mockPrisma.userFavorite.upsert as jest.Mock).mockResolvedValue({});
+
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists/10/entries')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 42 });
+    expect(res.status).toBe(201);
+    expect(res.body.entry).toMatchObject({ restaurantId: 42 });
+    // Default-list mirror — keeps legacy user_favorites + the
+    // /me/all derived favoriteIds in sync.
+    expect(mockPrisma.userFavorite.upsert).toHaveBeenCalled();
+  });
+
+  it('does NOT mirror to UserFavorite on a non-default list', async () => {
+    (mockPrisma.favoriteList.findUnique as jest.Mock).mockResolvedValue({
+      id: 11, userId: 1, groupId: null, name: 'Date Night', isDefault: false, position: 1,
+    });
+    (mockPrisma.favoriteListEntry.upsert as jest.Mock).mockResolvedValue({
+      restaurantId: 42, note: 'try omakase', addedAt: new Date(),
+    });
+    const res = await request(buildApp())
+      .post('/api/users/me/favorite-lists/11/entries')
+      .set('Cookie', authCookie())
+      .send({ restaurantId: 42, note: 'try omakase' });
+    expect(res.status).toBe(201);
+    expect(mockPrisma.userFavorite.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH /api/users/me/favorite-lists/positions', () => {
+  it('400s when the order array doesn\'t match the user\'s lists', async () => {
+    (mockPrisma.favoriteList.findMany as jest.Mock).mockResolvedValue([
+      { id: 10 }, { id: 11 },
+    ]);
+    const res = await request(buildApp())
+      .patch('/api/users/me/favorite-lists/positions')
+      .set('Cookie', authCookie())
+      .send({ order: [10, 99] });
+    expect(res.status).toBe(400);
+  });
+
+  it('rewrites positions when the order matches exactly', async () => {
+    (mockPrisma.favoriteList.findMany as jest.Mock).mockResolvedValue([
+      { id: 10 }, { id: 11 },
+    ]);
+    (mockPrisma.$transaction as jest.Mock).mockImplementation(async (arg: unknown) => {
+      // PATCH /positions uses the array-form transaction; let it
+      // resolve to a no-op array.
+      if (Array.isArray(arg)) return arg.map(() => ({}));
+      if (typeof arg === 'function') return arg(mockPrisma);
+      return undefined;
+    });
+    const res = await request(buildApp())
+      .patch('/api/users/me/favorite-lists/positions')
+      .set('Cookie', authCookie())
+      .send({ order: [11, 10] });
+    expect(res.status).toBe(200);
   });
 });

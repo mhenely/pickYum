@@ -38,19 +38,21 @@ beforeEach(() => {
 
 describe('loadUserData thunk', () => {
   it('hydrates users[0] and customRestaurants from the API response', async () => {
+    // /me/all returns the normalized shape: one deduped restaurants
+    // array + ID-only collection lists. apiVersion is forward-compat
+    // metadata for future mobile clients.
     (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
-      favorites: [
+      apiVersion: 1,
+      restaurants: [
         { id: 10, name: 'Pho 99', cuisineType: 'Vietnamese', priceLevel: 1, googleRating: '4.6', hours: '11 AM' },
-      ],
-      options: [
         { id: 11, name: 'Sushi Bar', cuisineType: 'Japanese', priceLevel: 3, googleRating: null },
       ],
-      accepted: [
-        { id: 99, restaurantId: 10, acceptedAt: '2024-05-01T12:00:00Z', restaurant: { id: 10, name: 'Pho 99', cuisineType: 'Vietnamese', priceLevel: 1 } },
-      ],
-      archived: [],
+      favoriteIds:     [10],
+      optionIds:       [11],
+      archivedIds:     [],
+      acceptedEntries: [{ restaurantId: 10, acceptedAt: '2024-05-01T12:00:00Z' }],
       reviews: [
-        { id: 7, restaurantId: 10, rating: '4.5', content: 'Solid', createdAt: '2024-04-01T00:00:00Z', restaurant: { id: 10, name: 'Pho 99' } },
+        { id: 7, restaurantId: 10, rating: '4.5', content: 'Solid', createdAt: '2024-04-01T00:00:00Z' },
       ],
     });
 
@@ -60,7 +62,11 @@ describe('loadUserData thunk', () => {
     const state = store.getState().userInfo;
     expect(state.users[0].favorites).toEqual(['10']);
     expect(state.users[0].options).toEqual(['11']);
-    expect(state.users[0].accepted).toEqual([{ restaurantId: '10', date: '2024-05-01T12:00:00Z' }]);
+    // Shape extended with `id` (server row id, needed for the InsightsPage
+    // toggle) and `excludeFromInsights` (per-entry opt-out flag).
+    expect(state.users[0].accepted).toEqual([
+      { id: null, restaurantId: '10', date: '2024-05-01T12:00:00Z', excludeFromInsights: false },
+    ]);
 
     // Reviews are keyed by restaurantId, with id (server-issued integer) preserved
     expect(state.users[0].reviews['10']).toBeDefined();
@@ -79,7 +85,10 @@ describe('loadUserData thunk', () => {
 
   it('is guarded by isDataLoaded — second call is a no-op', async () => {
     (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
-      favorites: [], options: [], accepted: [], archived: [], reviews: [],
+      apiVersion: 1,
+      restaurants: [],
+      favoriteIds: [], optionIds: [], archivedIds: [],
+      acceptedEntries: [], reviews: [],
     });
 
     const store = buildStore();
@@ -93,8 +102,11 @@ describe('loadUserData thunk', () => {
 
   it('coerces restaurant ids to strings to match string-keyed Redux collections', async () => {
     (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
-      favorites: [{ id: 42, name: 'X', cuisineType: null, priceLevel: null, googleRating: null }],
-      options: [], accepted: [], archived: [], reviews: [],
+      apiVersion: 1,
+      restaurants: [{ id: 42, name: 'X', cuisineType: null, priceLevel: null, googleRating: null }],
+      favoriteIds: [42],
+      optionIds: [], archivedIds: [],
+      acceptedEntries: [], reviews: [],
     });
 
     const store = buildStore();

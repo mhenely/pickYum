@@ -40,6 +40,17 @@ function invalidateCache(prefix: string) {
   }
 }
 
+// Targeted invalidator for the InsightsPage cache. Most writes intentionally
+// skip insights (see INVALIDATION_SAFE_PATHS) because favoriting/options
+// changes don't affect aggregates. But a small set of mutations DO change
+// insights output (e.g. toggling excludeFromInsights on an accepted row)
+// and call this directly so the next InsightsPage visit refetches fresh.
+function invalidateInsightsCache() {
+  for (const key of GET_CACHE.keys()) {
+    if (key.startsWith('/api/users/me/insights')) GET_CACHE.delete(key);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase();
 
@@ -126,6 +137,17 @@ export interface ApiRestaurant {
   // the readable hours table in the detail modal. Null when Google
   // omits it OR when the row is custom user-typed.
   regularOpeningHours: RegularOpeningHours | null;
+  // Custom-row opt-out for the post-search Place-match scan. When
+  // true, the frontend's "this Google result might be your 'Joe's
+  // Pizza'" check skips this row. Always false on Google-sourced
+  // rows (the scan only considers customs anyway). Toggled via
+  // PATCH /api/restaurants/:id/match-settings.
+  excludeFromPlaceMatching: boolean;
+  // ISO timestamp of the last successful Place Details refresh (or
+  // materialize). Surfaced as "Google data updated 2 months ago" on
+  // the detail modal so users know when fields like photos / phone
+  // / hours were last sourced. Null for custom rows + legacy rows.
+  googleDataUpdatedAt: string | null;
   // googleReviews column still exists in the DB (legacy rows have
   // cached review data) but is no longer requested or surfaced in the
   // UI. The Places API `reviews` field is Enterprise-tier; users now
@@ -150,7 +172,58 @@ export interface ApiAccepted {
   id: number;
   restaurantId: number;
   acceptedAt: string;
+  // Per-entry opt-out from the InsightsPage aggregation. Excluded rows
+  // remain in History (badge + "Include in insights" toggle); they're
+  // simply dropped from totals, breakdowns, sparklines, etc. Default
+  // false for every existing row (column has NOT NULL DEFAULT false).
+  excludeFromInsights: boolean;
   restaurant: ApiRestaurant;
+}
+
+// Slim accept-row shape used inside /me/all's `acceptedEntries`.
+// Unlike ApiAccepted (which is used by /me/accepted's CRUD endpoints
+// where the join makes sense), the /me/all path resolves the
+// restaurant via the deduped top-level `restaurants` array so we
+// only ship { id, restaurantId, acceptedAt, excludeFromInsights } per
+// event. Power users have hundreds of accepts; shipping the joined
+// restaurant per row would 4× the payload, so this is the slot where
+// dedup saves the most. `id` is included so the client can target a
+// specific row with PATCH /me/accepted/:id without a separate fetch.
+export interface ApiAcceptedEntry {
+  id: number;
+  restaurantId: number;
+  acceptedAt: string;
+  excludeFromInsights: boolean;
+}
+
+// ── Multi-list favorites ──────────────────────────────────────────
+// A user-named favorite list (Date Night, Tokyo 2026, etc.). The
+// `entries` field is inlined for all list reads so callers don't
+// need a follow-up fetch — each entry resolves its restaurant
+// against the same /me/all `restaurants[]` deduped pool used
+// everywhere else.
+export interface ApiFavoriteListEntry {
+  restaurantId: number;
+  note: string | null;
+  addedAt: string;
+}
+
+export interface ApiFavoriteList {
+  id: number;
+  name: string;
+  description: string | null;
+  // Lowercase hex (e.g. "#ff8800"), or null for the default neutral
+  // chip color. Server validates against an allowlist palette.
+  color: string | null;
+  // Exactly one list per user is marked default. The heart icon
+  // toggles membership in this list regardless of how many lists
+  // the user has.
+  isDefault: boolean;
+  // Ascending sort key for management/selector display. Reorder is
+  // a full rewrite of all positions, not a swap.
+  position: number;
+  createdAt: string;
+  entries: ApiFavoriteListEntry[];
 }
 
 // Google Places photo reference. The actual image lives at Google's
@@ -381,12 +454,28 @@ export const api = {
       request<{ accepted: ApiAccepted[] }>('/api/users/me/accepted'),
     addAccepted: (
       restaurantId: number,
-      opts: { optionsSnapshot?: string[]; chooseMethod?: ChooseMethod } = {},
+      opts: { optionsSnapshot?: string[]; chooseMethod?: ChooseMethod; excludeFromInsights?: boolean } = {},
     ) =>
       request<{ accepted: ApiAccepted }>('/api/users/me/accepted', {
         method: 'POST',
         body: JSON.stringify({ restaurantId, ...opts }),
       }),
+    // Per-entry toggle for the InsightsPage opt-out. Returns the updated
+    // row so callers can reconcile optimistic state with the server's
+    // canonical version. The mutation invalidates the /me/insights cache
+    // entries via the standard 3-segment prefix match (`/api/users/me`),
+    // so the next InsightsPage visit refetches fresh aggregates.
+    setAcceptedExcludeFromInsights: async (acceptedId: number, excludeFromInsights: boolean) => {
+      const result = await request<{ accepted: ApiAccepted }>(
+        `/api/users/me/accepted/${acceptedId}`,
+        { method: 'PATCH', body: JSON.stringify({ excludeFromInsights }) },
+      );
+      // The generic /api/users/me prefix sweep deliberately skips
+      // /me/insights for performance. This particular write DOES affect
+      // insights, so we manually drop the cached aggregates here.
+      invalidateInsightsCache();
+      return result;
+    },
     // `since` filters acceptances to a sliding window. Defaults to all-time.
     // The 5-second GET cache is keyed on the full path, so each window picks
     // up its own cache entry — no extra invalidation logic needed.
@@ -398,15 +487,85 @@ export const api = {
       request('/api/users/me/archived/' + id, { method: 'POST' }),
     unarchiveRestaurant: (id: number) =>
       request('/api/users/me/archived/' + id, { method: 'DELETE' }),
+    // The /me/all endpoint ships a NORMALIZED payload: one deduped
+    // `restaurants` array + ID-only collection lists. Frontend joins
+    // back via `restaurants[].id`. Replaces a previous shape that
+    // nested ApiRestaurant under each collection row and silently
+    // dropped accepted-only restaurants because the accepted slot
+    // was thin.
+    //
+    // `apiVersion` is incremented when this shape breaks in a
+    // non-additive way — clients use it to gate "please update."
+    //   v1 → original deduped shape (restaurants[] + per-collection
+    //        ID arrays).
+    //   v2 → adds `favoriteLists[]` (multi-list favorites).
+    //        `favoriteIds` stays as a derived view of the default
+    //        list's entries during the migration; will be dropped
+    //        in a future minor bump.
+    // Mirrored by ME_ALL_API_VERSION in the server route.
     getAll: () =>
       request<{
-        favorites: ApiRestaurant[];
-        options: ApiRestaurant[];
-        accepted: ApiAccepted[];
-        archived: ApiRestaurant[];
-        reviews: ApiReview[];
-        addresses: SavedAddress[];
+        apiVersion: number;
+        restaurants:     ApiRestaurant[];
+        favoriteIds:     number[];
+        optionIds:       number[];
+        archivedIds:     number[];
+        acceptedEntries: ApiAcceptedEntry[];
+        reviews:         ApiReview[];
+        addresses:       SavedAddress[];
+        favoriteLists:   ApiFavoriteList[];
       }>('/api/users/me/all'),
+
+    // ── Multi-list favorites ────────────────────────────────────
+    // Every authed account has at least one list (the default,
+    // auto-created on registration). Heart-icon toggles still target
+    // the default list; explicit list-picker UI uses these endpoints
+    // for non-default lists.
+    listFavoriteLists: () =>
+      request<{ lists: ApiFavoriteList[] }>('/api/users/me/favorite-lists'),
+    createFavoriteList: (body: { name: string; description?: string | null; color?: string | null }) =>
+      request<{ list: ApiFavoriteList }>('/api/users/me/favorite-lists', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    updateFavoriteList: (
+      id: number,
+      body: { name?: string; description?: string | null; color?: string | null },
+    ) =>
+      request<{ list: ApiFavoriteList }>(`/api/users/me/favorite-lists/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    deleteFavoriteList: (id: number) =>
+      request<{ message: string }>(`/api/users/me/favorite-lists/${id}`, { method: 'DELETE' }),
+    // Promotes this list to default in one shot — server demotes
+    // any other default in the same transaction.
+    promoteFavoriteList: (id: number) =>
+      request<{ list: ApiFavoriteList }>(`/api/users/me/favorite-lists/${id}/default`, {
+        method: 'POST',
+      }),
+    // Rewrites every list's position. Body must list every list id
+    // the user owns exactly once — partial reorders are 400'd.
+    reorderFavoriteLists: (order: number[]) =>
+      request<{ message: string }>('/api/users/me/favorite-lists/positions', {
+        method: 'PATCH',
+        body: JSON.stringify({ order }),
+      }),
+    addFavoriteListEntry: (listId: number, body: { restaurantId: number; note?: string | null }) =>
+      request<{ entry: ApiFavoriteListEntry }>(
+        `/api/users/me/favorite-lists/${listId}/entries`,
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+    removeFavoriteListEntry: (listId: number, restaurantId: number) =>
+      request<{ message: string }>(
+        `/api/users/me/favorite-lists/${listId}/entries/${restaurantId}`,
+        { method: 'DELETE' },
+      ),
+    updateFavoriteListEntry: (listId: number, restaurantId: number, body: { note: string | null }) =>
+      request<{ entry: ApiFavoriteListEntry }>(
+        `/api/users/me/favorite-lists/${listId}/entries/${restaurantId}`,
+        { method: 'PATCH', body: JSON.stringify(body) },
+      ),
     getReviews: () =>
       request<{ reviews: ApiReview[] }>('/api/users/me/reviews'),
     addReview: (body: { restaurantId: number; rating: number; content?: string }) =>
@@ -415,6 +574,16 @@ export const api = {
       request('/api/users/me/reviews/' + id, { method: 'DELETE' }),
     refreshPlaces: () =>
       request<{ updated: ApiRestaurant[] }>('/api/users/me/refresh-places', { method: 'POST' }),
+    // "Just-in-time" single-row refresh. The detail modal fires this on
+    // open so we only spend Place Details quota on restaurants the user
+    // is actually viewing — cuts refresh spend ~80% vs the eager batch.
+    // Always resolves; { refreshed: false, restaurant: null } when the
+    // row was fresh, custom (no googlePlaceId), or any error occurred.
+    refreshRestaurant: (restaurantId: number) =>
+      request<{ refreshed: boolean; restaurant: ApiRestaurant | null }>(
+        `/api/users/me/refresh-restaurant/${restaurantId}`,
+        { method: 'POST' },
+      ),
     recordFlip: () =>
       request<{ flipCount: number }>('/api/users/me/flip', { method: 'POST' }),
     removeFromHistory: (restaurantId: number) =>
@@ -463,6 +632,26 @@ export const api = {
     getReviews: (id: number) =>
       request<{ reviews: CommunityReview[]; averageRating: number | null; communityRating: number | null }>(
         `/api/restaurants/${id}/reviews`,
+      ),
+    // Toggle the post-search Place-match scan's opt-out for a custom
+    // restaurant. Server validates ownership + that the row is
+    // actually custom (no googlePlaceId) — returns 403/400 otherwise.
+    setMatchSettings: (id: number, body: { excludeFromPlaceMatching: boolean }) =>
+      request<{ restaurant: { id: number; excludeFromPlaceMatching: boolean } }>(
+        `/api/restaurants/${id}/match-settings`,
+        { method: 'PATCH', body: JSON.stringify(body) },
+      ),
+    // Merge a custom row into a Google Place row. Caller is expected
+    // to have materialized the Place first (via restaurants.create
+    // above) so `placeRestaurantId` exists. Server migrates all of
+    // this user's collection references from the custom row to the
+    // place row, then deletes the custom row if it was private. The
+    // returned `mergedRestaurantId` is the Place row's id — caller
+    // updates Redux to swap references.
+    linkToPlace: (customId: number, body: { placeRestaurantId: number }) =>
+      request<{ mergedRestaurantId: number }>(
+        `/api/restaurants/${customId}/link-to-place`,
+        { method: 'POST', body: JSON.stringify(body) },
       ),
   },
   places: {

@@ -312,4 +312,192 @@ router.get('/:id/reviews', async (req: Request, res: Response) => {
   res.json({ reviews, averageRating, communityRating, total, page, pages: Math.ceil(total / limit) });
 });
 
+// PATCH /api/restaurants/:id/match-settings
+// Toggle a custom row's opt-out from the post-search Place-match
+// scan. Only the row's creator can modify it (custom rows are
+// user-owned), and only custom rows (no googlePlaceId) accept the
+// toggle — there's no useful flag state for Google-sourced rows
+// since they can't match themselves.
+router.patch('/:id/match-settings', requireAuth, async (req: Request, res: Response) => {
+  const restaurantId = parseId(req.params.id);
+  if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
+
+  const { excludeFromPlaceMatching } = req.body as { excludeFromPlaceMatching?: unknown };
+  if (typeof excludeFromPlaceMatching !== 'boolean') {
+    res.status(400).json({ error: 'excludeFromPlaceMatching must be a boolean' });
+    return;
+  }
+
+  const row = await prisma.restaurant.findUnique({
+    where:  { id: restaurantId },
+    select: { id: true, createdBy: true, googlePlaceId: true },
+  });
+  if (!row) { res.status(404).json({ error: 'Restaurant not found' }); return; }
+  if (row.createdBy !== req.userId) { res.status(403).json({ error: 'Only the creator can modify match settings' }); return; }
+  if (row.googlePlaceId) {
+    res.status(400).json({ error: 'Match settings only apply to custom restaurants' });
+    return;
+  }
+
+  const updated = await prisma.restaurant.update({
+    where: { id: restaurantId },
+    data:  { excludeFromPlaceMatching },
+    select: { id: true, excludeFromPlaceMatching: true },
+  });
+  res.json({ restaurant: updated });
+});
+
+// POST /api/restaurants/:customId/link-to-place
+// Merge a custom row into a Google Place row. The user has confirmed
+// that their custom "Joe's Pizza" is the same physical restaurant as
+// a Google search result. This endpoint migrates all of the user's
+// references (favorites/options/accepted/archives/reviews) from the
+// custom row to the Place row, then deletes the custom row.
+//
+// Body: { placeRestaurantId: number } — the canonical Place row's
+// id. The caller is expected to have materialized the Place first
+// (via POST /api/restaurants), so the row exists. We don't accept
+// raw Place data here because materialize already validates +
+// sanitizes that flow; reusing it keeps one code path for "ingest
+// Google data."
+//
+// Wrapped in a transaction so a half-migrated state can't be left
+// behind if any step fails. The custom row is deleted last so the
+// FK migrations land while it still exists. Unique constraints on
+// (userId, restaurantId) for favorites/options/archives mean we
+// could conflict if the user already had BOTH the custom and the
+// Place in the same collection — handled via `skipDuplicates` on
+// each migration (delete from old, ignore if already present in new).
+router.post('/:customId/link-to-place', requireAuth, async (req: Request, res: Response) => {
+  const customId = parseId(req.params.customId);
+  if (!customId) { res.status(400).json({ error: 'Invalid custom restaurant ID' }); return; }
+
+  const { placeRestaurantId } = req.body as { placeRestaurantId?: unknown };
+  const placeId = typeof placeRestaurantId === 'number' && Number.isInteger(placeRestaurantId) && placeRestaurantId > 0
+    ? placeRestaurantId : null;
+  if (!placeId) { res.status(400).json({ error: 'placeRestaurantId is required' }); return; }
+  if (placeId === customId) { res.status(400).json({ error: 'Cannot link a row to itself' }); return; }
+
+  // Validate both rows exist + the custom row is owned by this user
+  // and actually custom (no googlePlaceId).
+  const [custom, place] = await Promise.all([
+    prisma.restaurant.findUnique({
+      where:  { id: customId },
+      select: { id: true, createdBy: true, googlePlaceId: true, private: true },
+    }),
+    prisma.restaurant.findUnique({
+      where:  { id: placeId },
+      select: { id: true, googlePlaceId: true },
+    }),
+  ]);
+  if (!custom) { res.status(404).json({ error: 'Custom restaurant not found' }); return; }
+  if (!place)  { res.status(404).json({ error: 'Place restaurant not found' });  return; }
+  if (custom.createdBy !== req.userId) {
+    res.status(403).json({ error: 'Only the creator can link a custom restaurant' });
+    return;
+  }
+  if (custom.googlePlaceId) {
+    res.status(400).json({ error: 'Source must be a custom (non-Google) row' });
+    return;
+  }
+  if (!place.googlePlaceId) {
+    res.status(400).json({ error: 'Target must be a Google Place row' });
+    return;
+  }
+
+  // Migrate all of THIS USER's references from custom → place. The
+  // unique constraints on the user-collection tables (userId,
+  // restaurantId) mean "already exists" is the failure mode we have
+  // to handle. Strategy: delete custom-side rows that would collide
+  // first, then update the rest. Done per collection.
+  await prisma.$transaction(async (tx) => {
+    const userId = req.userId!;
+
+    // Favorites: if user already has BOTH (custom and place) as
+    // favorites, drop the custom-side row. Otherwise re-point it.
+    const collidingFav = await tx.userFavorite.findUnique({
+      where: { userId_restaurantId: { userId, restaurantId: placeId } },
+      select: { userId: true },
+    });
+    if (collidingFav) {
+      await tx.userFavorite.deleteMany({ where: { userId, restaurantId: customId } });
+    } else {
+      await tx.userFavorite.updateMany({
+        where: { userId, restaurantId: customId },
+        data:  { restaurantId: placeId },
+      });
+    }
+
+    // Options: same pattern.
+    const collidingOpt = await tx.userOption.findUnique({
+      where: { userId_restaurantId: { userId, restaurantId: placeId } },
+      select: { userId: true },
+    });
+    if (collidingOpt) {
+      await tx.userOption.deleteMany({ where: { userId, restaurantId: customId } });
+    } else {
+      await tx.userOption.updateMany({
+        where: { userId, restaurantId: customId },
+        data:  { restaurantId: placeId },
+      });
+    }
+
+    // Archives: same pattern.
+    const collidingArc = await tx.userArchive.findUnique({
+      where: { userId_restaurantId: { userId, restaurantId: placeId } },
+      select: { userId: true },
+    });
+    if (collidingArc) {
+      await tx.userArchive.deleteMany({ where: { userId, restaurantId: customId } });
+    } else {
+      await tx.userArchive.updateMany({
+        where: { userId, restaurantId: customId },
+        data:  { restaurantId: placeId },
+      });
+    }
+
+    // Accepted: no unique constraint (each accept is a separate
+    // event), so we can blanket-update all of them. The user's
+    // accept history will now show both their custom-era and
+    // place-era picks under the unified Place row.
+    await tx.userAccepted.updateMany({
+      where: { userId, restaurantId: customId },
+      data:  { restaurantId: placeId },
+    });
+
+    // Reviews: same — multiple reviews per user-restaurant are
+    // allowed at the schema level.
+    await tx.review.updateMany({
+      where: { userId, restaurantId: customId },
+      data:  { restaurantId: placeId },
+    });
+
+    // Delete the custom row IF it was private to this user (the
+    // common case — most customs are private). Public custom rows
+    // (shared via groups) get left alone since other users may
+    // still reference them; their /me/all just stops referencing
+    // it for the merging user.
+    if (custom.private) {
+      // Defensive: only delete if no other user references it. The
+      // FKs are onDelete: SetNull or Cascade depending on the table,
+      // so the delete is safe, but we want to avoid yanking a row
+      // out from under a co-creator who somehow ended up with the
+      // same private row.
+      const otherRefs = await Promise.all([
+        tx.userFavorite.count({ where: { restaurantId: customId } }),
+        tx.userOption.count({ where: { restaurantId: customId } }),
+        tx.userArchive.count({ where: { restaurantId: customId } }),
+        tx.userAccepted.count({ where: { restaurantId: customId } }),
+        tx.review.count({ where: { restaurantId: customId } }),
+      ]);
+      const stillReferenced = otherRefs.some((n) => n > 0);
+      if (!stillReferenced) {
+        await tx.restaurant.delete({ where: { id: customId } });
+      }
+    }
+  });
+
+  res.json({ mergedRestaurantId: placeId });
+});
+
 export default router;

@@ -6,6 +6,7 @@ import {
   addUserOption,
   removeUserOption,
   addUserAcceptance,
+  reconcileAcceptedRowId,
   removeUserReview,
   removeFromHistory,
   updateUserInfo,
@@ -62,11 +63,19 @@ listen({
   },
 });
 
-// Session restore: user already identified; load their data from API
+// Session restore: user already identified; populate identity
+// immediately (mirroring the login path) so components that read
+// userInfo.username / .email — the delete-account confirm modal, the
+// change-username placeholder, etc. — have correct values before
+// loadUserData's network round-trip resolves. Previously, only
+// loadUserData was dispatched here, which meant any UI rendered
+// before the GET /me/all promise settled saw the slice's empty
+// initial values (id: null, email: '', username: '').
 listen({
   actionCreator: checkAuth.fulfilled,
   effect: (_action, api_) => {
     try { localStorage.removeItem('pickyum_guest'); } catch { /* ignore */ }
+    api_.dispatch(setUserData(emptyUserData(_action.payload)));
     api_.dispatch(loadUserData(_action.payload));
   },
 });
@@ -90,7 +99,25 @@ listen({
   },
 });
 
-// Favorites toggle — check previous state to know add vs remove
+// Favorites toggle. The action originates from the heart icon
+// (now `<HeartWithKebab>`) and toggles the user's DEFAULT FavoriteList
+// membership server-side. The Redux reducer has already updated
+// `users[0].favorites` for legacy consumers AND mirrored the entry
+// into `favoriteLists.byId[defaultId]`, so the listener's job is
+// purely to persist the change.
+//
+// Routing logic:
+//   - Authed + default list exists → POST/DELETE the new
+//     /me/favorite-lists/:id/entries endpoint. This also mirrors
+//     server-side into `user_favorites`, so the legacy table stays
+//     consistent for any reader (insights, /me/all derivation, etc).
+//   - Authed + no default list yet → fall back to the legacy
+//     /me/favorites endpoint. Should be effectively impossible
+//     post-rollout (ensureDefaultFavoriteList is called on register
+//     and /me/favorite-lists hydration), but the fallback prevents
+//     a heart click from being a silent no-op if the new hierarchy
+//     is somehow absent.
+//   - Guests → handled by the early isGuest() return.
 listen({
   actionCreator: updateUserFavorites,
   effect: async (action, listenerApi) => {
@@ -105,11 +132,19 @@ listen({
       const state = listenerApi.getState();
       if (!state.userInfo.customRestaurants[String(restaurantId)]) return;
     }
+    const defaultId = listenerApi.getState().userInfo.favoriteLists?.defaultId ?? null;
+    const numericId = Number(restaurantId);
     try {
-      if (wasFavorited) {
-        await api.users.removeFavorite(Number(restaurantId));
+      if (defaultId) {
+        if (wasFavorited) {
+          await api.users.removeFavoriteListEntry(defaultId, numericId);
+        } else {
+          await api.users.addFavoriteListEntry(defaultId, { restaurantId: numericId });
+        }
+      } else if (wasFavorited) {
+        await api.users.removeFavorite(numericId);
       } else {
-        await api.users.addFavorite(Number(restaurantId));
+        await api.users.addFavorite(numericId);
       }
     } catch (err) {
       console.error('Failed to sync favorite:', err);
@@ -158,7 +193,14 @@ listen({
     if (_serverHandled) return;
     if (!isDbId(restaurantId)) return;
     try {
-      await api.users.addAccepted(Number(restaurantId), { optionsSnapshot, chooseMethod });
+      const { accepted } = await api.users.addAccepted(
+        Number(restaurantId),
+        { optionsSnapshot, chooseMethod },
+      );
+      // Backfill the server row id onto the optimistic local entry so
+      // the InsightsPage toggle can target this row without waiting for
+      // the next /me/all refresh. Skipped on POST failure (catch below).
+      listenerApi.dispatch(reconcileAcceptedRowId({ restaurantId, id: accepted.id }));
     } catch (err) {
       console.error('Failed to sync accepted:', err);
     }

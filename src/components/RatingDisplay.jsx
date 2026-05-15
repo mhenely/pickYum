@@ -25,7 +25,15 @@ const formatRatingCount = (n) => {
 
 const RatingDisplay = ({ restaurantId, googleRating, googleRatingCount, personalRating, personalReviews, restaurantName, compact = false }) => {
   const dispatch = useDispatch();
-  const [mode, setMode] = useState('personal');
+  // Initial mode favors the rating most likely to have data:
+  //   - personalRating present → 'personal' (the user's own view of
+  //     the place is more meaningful to them than an aggregate)
+  //   - otherwise              → 'google'   (universally available
+  //     for Google-sourced rows; saves a click on every card the
+  //     user hasn't reviewed yet)
+  // Once mounted, user-initiated mode changes persist — the lazy
+  // initializer runs only on first render.
+  const [mode, setMode] = useState(() => personalRating != null ? 'personal' : 'google');
   const [reviewsOpen, setReviewsOpen] = useState(false);
 
   // Scoped subscriptions: each card subscribes only to its OWN entry, not
@@ -55,9 +63,14 @@ const RatingDisplay = ({ restaurantId, googleRating, googleRatingCount, personal
   const displayValue = activeRating != null ? activeRating : null;
 
   if (compact) {
+    // Empty-state label intentionally matches every mode now —
+    // 'N/A' for personal/community/google when there's no value.
+    // Previously the community-pending case showed '…' which was
+    // visually inconsistent with the personal "no reviews" case
+    // and made transient loads look like distinct states.
     const label = displayValue != null
       ? displayValue.toFixed(1)
-      : (mode === 'community' && isPending ? '…' : '—');
+      : 'N/A';
     // Compact variant shows ratingCount in parentheses after the
     // star+value when we're on Google mode. Skip on personal/community
     // for the same reasons as the full variant above.
@@ -100,7 +113,9 @@ const RatingDisplay = ({ restaurantId, googleRating, googleRatingCount, personal
           </span>
         ) : (
           <span className="text-xs text-gray-400 italic">
-            {mode === 'community' && isPending ? '…' : 'N/A'}
+            {/* Unified empty-state label across all modes — see
+                compact branch above for the parity rationale. */}
+            N/A
           </span>
         )}
         {countLabel && (

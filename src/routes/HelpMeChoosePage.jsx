@@ -1,5 +1,5 @@
 import { useDispatch, useSelector } from "react-redux";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { Link, useBlocker } from "react-router-dom";
 
 import {
@@ -7,19 +7,31 @@ import {
   addUserOption,
   addCustomRestaurant,
   removeUserOption,
-  updateUserFavorites,
   incrementFlipCount,
 } from "../redux/slices/userInfoSlice";
+import { showChosenCelebration } from "../redux/slices/celebrationSlice";
 import { api } from "../lib/api";
 import useCurrentUser from "../hooks/useCurrentUser";
+import { useScrollListIndex } from "../hooks/useScrollListIndex";
 import RouletteWheel from "../components/RouletteWheel";
 import CreateSessionModal from "../components/CreateSessionModal";
 import { buildAcceptedStats, formatLastChosen } from "../utils/acceptedStats";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
 import RestaurantDetailModal from "../components/RestaurantDetailModal";
-import AcceptModal from "../components/AcceptModal";
+// AcceptModal was replaced by the global <ChosenCelebration/> mounted
+// in App.tsx — coin-flip, roulette, and surprise-me all dispatch
+// showChosenCelebration() now so users see the same "Tonight you're
+// going to…" feedback across every commit-to-a-restaurant surface.
 import RestaurantCard from "../components/RestaurantCard";
+import HeartWithKebab from "../components/HeartWithKebab";
+import ListSelector from "../components/ListSelector";
 import ResultBanner from "../components/ResultBanner";
+import {
+  allLists as selectAllLists,
+  defaultList as selectDefaultList,
+  readActiveListIds,
+  writeActiveListIds,
+} from "../utils/favoriteLists";
 import "./HelpMeChoosePage.css";
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -58,7 +70,76 @@ const isOpenNow = (hoursStr) => {
 const HelpMeChoosePage = () => {
   const dispatch = useDispatch();
   const userInfo = useCurrentUser();
-  const { favorites, options, reviews } = userInfo;
+  const { options, reviews } = userInfo;
+
+  // ── Active favorite list (Choose-page-scoped) ────────────────
+  // The favorites strip shows the active list's entries. Default
+  // is the user's primary list; users can switch via the
+  // ListSelector in the strip header. Active-list state persists
+  // in sessionStorage keyed per page so Choose / Compare / Search
+  // can each remember a different active list within the session.
+  const allFavoriteLists    = useSelector(selectAllLists);
+  const defaultFavoriteList = useSelector(selectDefaultList);
+  const [activeListIds, setActiveListIdsState] = useState(() => readActiveListIds('choose'));
+  useEffect(() => {
+    if (activeListIds == null && defaultFavoriteList?.id) {
+      const next = [defaultFavoriteList.id];
+      setActiveListIdsState(next);
+      writeActiveListIds('choose', next);
+    }
+  }, [activeListIds, defaultFavoriteList?.id]);
+  const setActiveListIds = useCallback((next) => {
+    setActiveListIdsState(next);
+    writeActiveListIds('choose', next);
+  }, []);
+
+  // Sticky pin for the in-progress kebab interaction — see the
+  // matching block on Compare (RestaurantPage) for the rationale.
+  // Keeps a card visible in the strip while its picker is open so
+  // unchecking its last list mid-edit doesn't yank the card out
+  // before the user can move it to another list.
+  const [stickyFavId, setStickyFavId] = useState(null);
+  const handlePickerOpen  = useCallback((id) => setStickyFavId(String(id)), []);
+  const handlePickerClose = useCallback((id) => {
+    setStickyFavId((prev) => (prev === String(id) ? null : prev));
+  }, []);
+
+  // Resolve the favorites collection as the deduped UNION of every
+  // selected list's entries. Pre-hydrate (activeListIds null) we
+  // fall back to the legacy users[0].favorites array so the strip
+  // never blanks during initial load.
+  const favorites = useMemo(() => {
+    let base;
+    if (activeListIds == null) {
+      base = (userInfo.favorites ?? []).map(String);
+    } else if (activeListIds.length === 0) {
+      base = [];
+    } else {
+      const selected = new Set(activeListIds);
+      const seen = new Set();
+      for (const list of allFavoriteLists) {
+        if (!selected.has(list.id)) continue;
+        for (const entry of list.entries) seen.add(String(entry.restaurantId));
+      }
+      base = [...seen];
+    }
+    if (stickyFavId && !base.includes(stickyFavId)) base = [...base, stickyFavId];
+    return base;
+  }, [activeListIds, allFavoriteLists, userInfo.favorites, stickyFavId]);
+
+  // Ref + scroll-position tracker for the favorites sidebar so the
+  // header can render a "3 / 7"-style indicator alongside the
+  // label. Layout is `<scroll rtl>{<col ltr>{cards}</col>}</scroll>`
+  // (scrollbar on the left), so cards live one level deeper than
+  // the scroll container — passes a getItems that walks the inner
+  // ltr wrapper. The options grid wraps multi-row instead of
+  // scrolling vertically, so it doesn't get an indicator.
+  const favScrollRef = useRef(null);
+  const favActiveIdx = useScrollListIndex(
+    favScrollRef,
+    favorites.length,
+    (c) => c.firstElementChild?.children,
+  );
 
   // O(N) precompute over the user's accepted history; row maps below read
   // last-chosen and counts in O(1) per card. Was N row × M accepted scans
@@ -183,7 +264,11 @@ const HelpMeChoosePage = () => {
   };
 
   // ── Accept modal ──────────────────────────────────────────
-  const [acceptedModalId, setAcceptedModalId] = useState(null);
+  // acceptedModalId state was previously driving the local
+  // AcceptModal here; that modal is now the global
+  // <ChosenCelebration/> driven by celebrationSlice, so the local
+  // state is gone — handlers dispatch showChosenCelebration()
+  // directly instead.
 
   // ── Info modal ────────────────────────────────────────────
   const [detailId, setDetailId] = useState(null);
@@ -298,7 +383,11 @@ const HelpMeChoosePage = () => {
     setFlipResult(null);
     setFlipComplete(false);
     setSparkles([]);
-    setAcceptedModalId(coinWinnerId);
+    // Pop the global "Tonight you're going to…" celebration. Same
+    // UX as the Compare-page Choose-Now and the detail-modal
+    // Choose-Now action — fires from celebrationSlice, rendered by
+    // <ChosenCelebration/> at the app root.
+    dispatch(showChosenCelebration(coinWinnerId));
   };
 
   const handleCoinRemove = () => {
@@ -339,7 +428,8 @@ const HelpMeChoosePage = () => {
       chooseMethod: 'spin',
     }));
     dispatch(removeUserOption(rouletteWinnerId));
-    setAcceptedModalId(rouletteWinnerId);
+    // See handleCoinAccept above — same global-celebration pop.
+    dispatch(showChosenCelebration(rouletteWinnerId));
     setRouletteWinnerId(null);
   };
 
@@ -406,23 +496,52 @@ const HelpMeChoosePage = () => {
         <div className="w-full lg:w-64 lg:shrink-0 flex flex-col gap-5">
 
           <div>
-            <h2 className="text-lg font-bold text-gray-900 mb-3">Favorites</h2>
+            {/* Position-in-list indicator next to the label,
+                driven by useScrollListIndex. Hidden when empty so
+                we don't render "0 / 0". */}
+            <h2 className="text-lg font-bold text-gray-900 mb-2 flex items-baseline gap-2">
+              <span>Favorites</span>
+              {favorites.length > 0 && (
+                <span className="text-xs font-medium text-gray-400 tabular-nums">
+                  {favActiveIdx + 1} / {favorites.length}
+                </span>
+              )}
+            </h2>
+            {/* ListSelector lets the user pick which list drives the
+                strip below. Hidden until lists hydrate; the strip
+                falls back to the legacy favorites array in the
+                meantime so the page is never blank during load. */}
+            {allFavoriteLists.length > 0 && (
+              <div className="mb-3">
+                <ListSelector
+                  value={activeListIds ?? []}
+                  onChange={setActiveListIds}
+                  defaultId={defaultFavoriteList?.id}
+                  align="left"
+                />
+              </div>
+            )}
             {favorites.length === 0 && (
               <p className="text-xs text-gray-400 italic">No favorites yet.</p>
             )}
-            {/* Cap at roughly 6 cards when the favorites list is long, so it
-                doesn't push the entire Choose page taller. These sm cards
-                carry an extra "+ Add to Options" button (~36px) so we use a
-                larger max-height than the Compare page's identical-purpose
-                cap. overscroll-contain prevents wheel/touch scroll from
-                escaping to the page once the user reaches the edge. */}
-            // Always-scroll at 80vh — md cards (~150px each + Add
-            // button) outgrow the page faster than the legacy sm
-            // variant, so the previous "scroll only past 6 entries"
-            // pattern stretched the page on most screens. Viewport-
-            // relative cap scales with monitor size; overscroll-
-            // contain stops the scroll from escaping to the page.
-            <div className="flex flex-col gap-3 max-h-[80vh] overflow-y-auto overscroll-contain pr-1">
+            {/* Always-scroll at 80vh. md cards (~150px each + Add
+                button) outgrow the page faster than the legacy sm
+                variant did, so the previous "scroll only past 6
+                entries" pattern stretched the page on most screens.
+                Viewport-relative cap scales with monitor size;
+                overscroll-contain stops the scroll from escaping
+                to the page when the user hits the top/bottom.
+
+                Scrollbar on the LEFT (instead of the default right):
+                outer container has direction:rtl, which makes the
+                browser draw the overflow scrollbar on the inline-
+                start edge — visually the left side in our LTR
+                locale. The inner column resets direction:ltr so
+                cards and flex layout still render normally. pl-2
+                puts an 8px gutter between the scrollbar and the
+                card edges so they don't visually touch. */}
+            <div ref={favScrollRef} className="max-h-[80vh] overflow-y-auto overscroll-contain [direction:rtl]">
+              <div className="flex flex-col gap-3 pl-2 [direction:ltr]">
               {favorites.map((id) => {
                 const rating = getUserRating(reviews, id);
                 return (
@@ -433,9 +552,7 @@ const HelpMeChoosePage = () => {
                     restaurantMap={allRestaurants}
                     personalRating={rating}
                     lastChosen={formatLastChosen(acceptedStats, id)}
-                    onUnfavorite={() =>
-                      dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
-                    }
+                    cornerSlot={<HeartWithKebab restaurantId={id} size="md" onPickerOpen={handlePickerOpen} onPickerClose={handlePickerClose} />}
                     onInfo={() => setDetailId(id)}
                   >
                     <button
@@ -447,6 +564,7 @@ const HelpMeChoosePage = () => {
                   </RestaurantCard>
                 );
               })}
+              </div>
             </div>
           </div>
 
@@ -487,7 +605,10 @@ const HelpMeChoosePage = () => {
                 chooseMethod: 'surprise',
               }));
               dispatch(removeUserOption(randomId));
-              setAcceptedModalId(randomId);
+              // Same celebration pop as flip/spin/Choose-Now — keeps
+              // the "surprise me" surface aligned with every other
+              // commit-to-a-restaurant flow.
+              dispatch(showChosenCelebration(randomId));
             }}
             disabled={flipPool.length < 1}
             className="w-full rounded-lg border-2 border-purple-500 py-2.5 px-4 font-semibold text-sm text-purple-600 hover:bg-purple-500 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -873,14 +994,11 @@ const HelpMeChoosePage = () => {
       </div>
     </div>
 
-    {acceptedModalId && (
-      <AcceptModal
-        restaurantId={acceptedModalId}
-        userInfo={userInfo}
-        onClose={() => setAcceptedModalId(null)}
-        restaurantMap={allRestaurants}
-      />
-    )}
+    {/* AcceptModal previously rendered here for the post-accept
+        feedback; replaced by the global <ChosenCelebration/> in
+        App.tsx — coin flip, roulette, and surprise-me all dispatch
+        showChosenCelebration() to pop the same modal users see
+        from every other commit-to-a-restaurant flow. */}
 
     {showGroupModal && (
       <CreateSessionModal

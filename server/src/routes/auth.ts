@@ -10,6 +10,7 @@ import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { sendEmail, verifyEmailTemplate, passwordResetTemplate } from '../lib/email';
 import { issueToken, consumeToken } from '../lib/emailTokens';
+import { ensureDefaultFavoriteList } from '../lib/favoriteLists';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -275,6 +276,15 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
   // resend later via /api/auth/resend-verification.
   sendVerificationEmail(user.id, user.email).catch((err) =>
     logger.error({ err, userId: user.id }, 'failed to send verification email at registration'),
+  );
+
+  // Bootstrap the user's default "My Favorites" list. Fire-and-forget so a
+  // transient DB hiccup here doesn't fail the registration response — the
+  // GET /me/favorite-lists endpoint also calls ensureDefaultFavoriteList as
+  // a fallback, so the worst case is "first GET fixes it up." The registry
+  // is idempotent and self-healing either way.
+  ensureDefaultFavoriteList(user.id).catch((err) =>
+    logger.error({ err, userId: user.id }, 'failed to bootstrap default favorite list at registration'),
   );
 
   const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, { expiresIn: SESSION_DURATION });

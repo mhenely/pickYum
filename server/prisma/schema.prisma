@@ -34,6 +34,13 @@ model User {
   emailVerifiedAt DateTime? @map("email_verified_at")
   flipCount       Int       @default(0) @map("flip_count")
   avatarUrl       String?   @map("avatar_url")
+  // Admin role gate. Default 'user' for every account; flip to
+  // 'admin' manually (DB-level, or via a future admin-management
+  // UI) to grant access to /api/admin/* endpoints. Kept as a string
+  // rather than a Prisma enum so adding new roles later (e.g.
+  // 'support', 'readOnly') doesn't require a migration — values
+  // outside the known set are treated as 'user' by `requireAdmin`.
+  role            String    @default("user") @db.VarChar(16)
   // User's preferred starting location for nearby restaurant searches.
   createdAt       DateTime  @default(now()) @map("created_at")
 
@@ -42,6 +49,12 @@ model User {
   accepted           UserAccepted[]
   reviews            Review[]
   archives           UserArchive[]
+  // Multi-list favorites. `favorites` (UserFavorite[]) above is the
+  // legacy single-list relation; we keep both during the multi-list
+  // rollout. New code reads from favoriteLists; UserFavorite is the
+  // safety net and gets dropped in a follow-up migration after the
+  // sprint has been in prod long enough.
+  favoriteLists      FavoriteList[] @relation("UserFavoriteLists")
   createdRestaurants Restaurant[]   @relation("CreatedBy")
   oauthAccounts      OAuthAccount[]
   emailTokens        EmailToken[]
@@ -61,10 +74,10 @@ model User {
   receivedGroupInvites   GroupInvite[]      @relation("ReceivedGroupInvites")
   sentGroupInvites       GroupInvite[]      @relation("SentGroupInvites")
 
-  hostedTrips           Trip[]         @relation("TripHost")
-  tripMemberships       TripMember[]
-  receivedTripInvites   TripInvite[]   @relation("ReceivedTripInvites")
-  sentTripInvites       TripInvite[]   @relation("SentTripInvites")
+  hostedTrips         Trip[]       @relation("TripHost")
+  tripMemberships     TripMember[]
+  receivedTripInvites TripInvite[] @relation("ReceivedTripInvites")
+  sentTripInvites     TripInvite[] @relation("SentTripInvites")
 
   @@map("users")
 }
@@ -81,8 +94,8 @@ model User {
 model SavedAddress {
   id        Int      @id @default(autoincrement())
   userId    Int      @map("user_id")
-  label     String   // free-form ("Home", "Mom's", "Office") — capped server-side
-  address   String   // the address itself — capped server-side
+  label     String // free-form ("Home", "Mom's", "Office") — capped server-side
+  address   String // the address itself — capped server-side
   isDefault Boolean  @default(false) @map("is_default")
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -112,7 +125,7 @@ model SavedAddress {
 
 model Trip {
   id          Int       @id @default(autoincrement())
-  name        String    // user-given, e.g. "Italy 2026"
+  name        String // user-given, e.g. "Italy 2026"
   // Free-form display string for the destination ("Rome, Italy"). Not
   // geocoded here — the trip uses Anchors (below) for the actual map
   // queries; this string is purely UI label.
@@ -159,7 +172,7 @@ model TripMember {
 model TripAnchor {
   id        Int      @id @default(autoincrement())
   tripId    Int      @map("trip_id")
-  label     String   // "Hotel", "Conference center"
+  label     String // "Hotel", "Conference center"
   address   String
   isPrimary Boolean  @default(false) @map("is_primary")
   createdAt DateTime @default(now()) @map("created_at")
@@ -189,9 +202,9 @@ model TripInvite {
   status      TripInviteStatus @default(PENDING)
   createdAt   DateTime         @default(now()) @map("created_at")
 
-  trip      Trip @relation(fields: [tripId],      references: [id], onDelete: Cascade)
-  invited   User @relation("ReceivedTripInvites", fields: [invitedId],   references: [id], onDelete: Cascade)
-  invitedBy User @relation("SentTripInvites",     fields: [invitedById], references: [id], onDelete: Cascade)
+  trip      Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  invited   User @relation("ReceivedTripInvites", fields: [invitedId], references: [id], onDelete: Cascade)
+  invitedBy User @relation("SentTripInvites", fields: [invitedById], references: [id], onDelete: Cascade)
 
   @@unique([tripId, invitedId])
   @@index([invitedId])
@@ -280,20 +293,20 @@ model OAuthAccount {
 }
 
 model Restaurant {
-  id                  Int       @id @default(autoincrement())
-  googlePlaceId       String?   @unique @map("google_place_id")
-  name                String
-  cuisineType         String?   @map("cuisine_type")
-  priceLevel          Int?      @map("price_level")
-  hours               String?
-  phone               String?
-  website             String?
-  address             String?
-  yelpUrl             String?   @map("yelp_url")
-  takeout             Boolean   @default(false)
-  delivery            Boolean   @default(false)
-  googleRating        Decimal?  @map("google_rating") @db.Decimal(2, 1)
-  communityRating     Decimal?  @map("community_rating") @db.Decimal(4, 2)
+  id                       Int       @id @default(autoincrement())
+  googlePlaceId            String?   @unique @map("google_place_id")
+  name                     String
+  cuisineType              String?   @map("cuisine_type")
+  priceLevel               Int?      @map("price_level")
+  hours                    String?
+  phone                    String?
+  website                  String?
+  address                  String?
+  yelpUrl                  String?   @map("yelp_url")
+  takeout                  Boolean   @default(false)
+  delivery                 Boolean   @default(false)
+  googleRating             Decimal?  @map("google_rating") @db.Decimal(2, 1)
+  communityRating          Decimal?  @map("community_rating") @db.Decimal(4, 2)
   // Geo coords for map rendering. Null when (a) the row is a custom
   // user-typed entry with no street address resolved, or (b) the row was
   // created before this column existed and hasn't been refreshed yet.
@@ -301,8 +314,8 @@ model Restaurant {
   // back-filled lazily by the refresh-places route as stale rows come up.
   // db.DoublePrecision avoids precision drift across haversine math; full
   // float64 covers the ~1e-7 degree precision Google returns.
-  lat                 Float?    @db.DoublePrecision
-  lng                 Float?    @db.DoublePrecision
+  lat                      Float?    @db.DoublePrecision
+  lng                      Float?    @db.DoublePrecision
   // Cached Google Places "Pro tier" fields. Captured at materialize-time
   // from the Places nearby/text-search response and refreshed by the
   // periodic refresh-places sweep. Skipped for custom user-typed rows
@@ -317,9 +330,9 @@ model Restaurant {
   // `googleReviews` — Enterprise-tier reviews snapshot. JSON array with
   //            author attribution (required by Google's TOS at display
   //            time). May lag fresh Google data by up to one refresh cycle.
-  photos              Json?     @map("photos")
-  ratingCount         Int?      @map("rating_count")
-  googleReviews       Json?     @map("google_reviews")
+  photos                   Json?     @map("photos")
+  ratingCount              Int?      @map("rating_count")
+  googleReviews            Json?     @map("google_reviews")
   // Structured weekly opening hours from Google Places `regularOpeningHours`.
   // JSON shape: { periods: Array<{ open: Point, close: Point }>,
   //               weekdayDescriptions: string[] (7 entries, Mon-Sun) }
@@ -329,26 +342,41 @@ model Restaurant {
   // boolean Google returns); weekdayDescriptions powers the readable
   // hours table in the detail modal. Null for custom user-typed rows
   // and rows that pre-date this column.
-  regularOpeningHours Json?     @map("regular_opening_hours")
-  googleDataUpdatedAt DateTime? @map("google_data_updated_at")
-  createdBy           Int?      @map("created_by")
+  regularOpeningHours      Json?     @map("regular_opening_hours")
+  googleDataUpdatedAt      DateTime? @map("google_data_updated_at")
+  // Custom-row-only opt-out flag for the Search page's post-search
+  // match scan. When true, this row is skipped when looking for
+  // "this Google result might be your custom 'Joe's Pizza'"
+  // suggestions. Set by the user via the "Stop asking" button on
+  // the match-confirm modal OR a toggle on the row's detail modal.
+  // Always meaningless for Google-sourced rows (their googlePlaceId
+  // disqualifies them from the scan anyway). The link-to-place
+  // merge flow either deletes the custom row or upgrades it to a
+  // Google row, so the flag is self-cleaning during merge.
+  excludeFromPlaceMatching Boolean   @default(false) @map("exclude_from_place_matching")
+  createdBy                Int?      @map("created_by")
   // When true, the row is visible only to its creator (or to members of any
   // group that has already incorporated it via a GroupFavorite or
   // GroupEventOption — at that point we auto-publish, see groups.ts).
   // Google-sourced entries (those with googlePlaceId) are always public.
   // Custom user-typed entries (no googlePlaceId) default to private.
-  private             Boolean   @default(false)
-  createdAt           DateTime  @default(now()) @map("created_at")
+  private                  Boolean   @default(false)
+  createdAt                DateTime  @default(now()) @map("created_at")
 
-  creator           User?              @relation("CreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
-  favoritedBy       UserFavorite[]
-  optionedBy        UserOption[]
-  acceptedBy        UserAccepted[]
-  archivedBy        UserArchive[]
-  reviews           Review[]
-  recommendations   Recommendation[]
-  groupEventOptions GroupEventOption[]
-  groupFavorites    GroupFavorite[]
+  creator             User?               @relation("CreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  favoritedBy         UserFavorite[]
+  // Membership in multi-list favorites. The back-relation lets a
+  // Restaurant cascade-delete its FavoriteListEntry rows (the entry
+  // table itself owns the FK + cascade) and keeps Prisma's referential
+  // map complete for future eager-load queries.
+  favoriteListEntries FavoriteListEntry[]
+  optionedBy          UserOption[]
+  acceptedBy          UserAccepted[]
+  archivedBy          UserArchive[]
+  reviews             Review[]
+  recommendations     Recommendation[]
+  groupEventOptions   GroupEventOption[]
+  groupFavorites      GroupFavorite[]
 
   @@index([cuisineType])
   @@index([googleDataUpdatedAt])
@@ -408,14 +436,19 @@ model UserAccepted {
   // flip/spin/surprise/direct picks and for pre-rollout group acceptances
   // (we can't backfill historical rows safely).
   eventId         Int?     @map("event_id")
+  // Per-entry opt-out from the InsightsPage aggregation. Lets a user keep
+  // a group/trip pick (or any solo pick they want to disown) in the visible
+  // History log while excluding it from taste-profile signal. Default false
+  // preserves legacy behavior — only entries the user explicitly flips
+  // ever drop out of insights. The /me/insights query filters on this column;
+  // /me/all + /me/accepted still return excluded rows so History can render
+  // them with an "off-the-record" badge.
+  excludeFromInsights Boolean @default(false) @map("exclude_from_insights")
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   restaurant Restaurant  @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   event      GroupEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
 
-  @@index([userId, acceptedAt])
-  @@index([restaurantId])
-  @@index([eventId])
   // Idempotency guard for group/trip accept-result writes. Lets the route
   // use `createMany({ skipDuplicates: true })` to batch all participants'
   // acceptances in one INSERT instead of N round-trips. The constraint is
@@ -423,6 +456,9 @@ model UserAccepted {
   // flip/spin acceptances (eventId = null) can accumulate as normal —
   // only event-bound acceptances are deduped.
   @@unique([userId, eventId])
+  @@index([userId, acceptedAt])
+  @@index([restaurantId])
+  @@index([eventId])
   @@map("user_accepted")
 }
 
@@ -519,11 +555,16 @@ model Group {
   archivedAt DateTime? @map("archived_at")
   createdAt  DateTime  @default(now()) @map("created_at")
 
-  host      User            @relation("GroupHost", fields: [hostId], references: [id], onDelete: Cascade)
-  members   GroupMember[]
-  events    GroupEvent[]
-  invites   GroupInvite[]
-  favorites GroupFavorite[]
+  host          User            @relation("GroupHost", fields: [hostId], references: [id], onDelete: Cascade)
+  members       GroupMember[]
+  events        GroupEvent[]
+  invites       GroupInvite[]
+  favorites     GroupFavorite[]
+  // Multi-list favorites for groups. The schema supports group-owned
+  // FavoriteList rows today (polymorphic owner column via the XOR
+  // check constraint) but v1 of the multi-list sprint only exposes
+  // user-owned lists; this relation is the future-proofing hook.
+  favoriteLists FavoriteList[]  @relation("GroupFavoriteLists")
 
   @@index([hostId])
   @@map("groups")
@@ -535,36 +576,36 @@ model Group {
 // name "GroupEvent" persists for backward-compat with sessions / results /
 // insights code that pre-dated trips.
 model GroupEvent {
-  id             Int              @id @default(autoincrement())
+  id                 Int              @id @default(autoincrement())
   // Nullable when the event belongs to a Trip instead of a Group. The CHECK
   // constraint in the migration guarantees exactly one of (groupId, tripId)
   // is non-null; Prisma can't express that, so trust the DB.
-  groupId        Int?             @map("group_id")
+  groupId            Int?             @map("group_id")
   // Set for trip meal events; null for group events. Cascade matches groupId.
-  tripId         Int?             @map("trip_id")
+  tripId             Int?             @map("trip_id")
   // Optional meal-slot tag — only used by trip events to disambiguate two
   // meals on the same day. Always null on group events.
-  mealSlot       MealSlot?        @map("meal_slot")
+  mealSlot           MealSlot?        @map("meal_slot")
   // For trip events, the SUBSET of trip members invited to this meal. NULL
   // means "all current members" (the default UX choice when the creator
   // doesn't bother picking participants). On group events this is always
   // null — group events implicitly invite every group member.
-  participantUserIds Int[]        @map("participant_user_ids")
-  name           String
-  status         GroupEventStatus @default(OPEN)
-  voteMethod     GroupVoteMethod  @default(SIMPLE) @map("vote_method")
+  participantUserIds Int[]            @map("participant_user_ids")
+  name               String
+  status             GroupEventStatus @default(OPEN)
+  voteMethod         GroupVoteMethod  @default(SIMPLE) @map("vote_method")
   // The member who proposed this event. Nullable: legacy rows from before
   // any-member event creation rolled out have no recorded creator, and we
   // SetNull (not Cascade) so deleting a user doesn't wipe their event history
   // from the group's archive.
-  createdById    Int?             @map("created_by_id")
-  sessionId      String?          @map("session_id")
-  votingStartsAt DateTime?        @map("voting_starts_at")
-  scheduledFor   DateTime?        @map("scheduled_for")
-  createdAt      DateTime         @default(now()) @map("created_at")
+  createdById        Int?             @map("created_by_id")
+  sessionId          String?          @map("session_id")
+  votingStartsAt     DateTime?        @map("voting_starts_at")
+  scheduledFor       DateTime?        @map("scheduled_for")
+  createdAt          DateTime         @default(now()) @map("created_at")
 
   group       Group?             @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  trip        Trip?              @relation(fields: [tripId],  references: [id], onDelete: Cascade)
+  trip        Trip?              @relation(fields: [tripId], references: [id], onDelete: Cascade)
   createdBy   User?              @relation("GroupEventCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   options     GroupEventOption[]
   result      GroupEventResult?
@@ -678,4 +719,111 @@ model GroupFavorite {
   @@index([groupId])
   @@index([restaurantId])
   @@map("group_favorites")
+}
+
+// Per-user/day/endpoint aggregate of Google Places API spend. Each row
+// is a daily counter for one user + one endpoint kind ("nearby",
+// "photo", "placeDetails", etc.). Written by trackGoogleCall in
+// lib/apiUsage at every Google call site; queried by future admin
+// dashboard endpoints + per-user rate-limit decisions.
+//
+// userId is intentionally NOT a FK to User — usage history should
+// survive a user deletion (anonymized as the same userId, which is
+// fine for cost analysis). userId = 0 buckets all anonymous calls
+// (the public photo proxy is the main one).
+//
+// est_cost_cents is our internal estimate based on SKU tiers
+// (Decimal(10, 4) gives us four decimal places of precision per
+// entry, more than enough for fractional-cent SKUs like geocode @
+// $0.005 = 0.5 cents). Compare against the Google Cloud Billing API
+// for ground truth periodically.
+model ApiUsage {
+  userId       Int      @map("user_id")
+  day          DateTime @map("day") @db.Date
+  endpoint     String   @map("endpoint") @db.VarChar(32)
+  callCount    Int      @default(0) @map("call_count")
+  cacheHits    Int      @default(0) @map("cache_hits")
+  estCostCents Decimal  @default(0) @map("est_cost_cents") @db.Decimal(10, 4)
+
+  @@id([userId, day, endpoint])
+  @@index([day])
+  @@map("api_usage")
+}
+
+// ── Multi-list favorites ──────────────────────────────────────────
+//
+// A user (and, in the future, a group) can have many named lists.
+// Each list contains many restaurants. Replaces the flat
+// `user_favorites` table — that table is kept during the v1 rollout
+// as a shadow / safety net and gets dropped in a later migration.
+//
+// Owner column is polymorphic: exactly one of (userId, groupId) is
+// non-null, enforced by a Postgres CHECK constraint added in raw SQL
+// (Prisma can't express XOR natively). Group ownership is plumbed
+// through the schema today but the API surface for groups doesn't
+// ship in v1.
+//
+// `isDefault` is the user's primary list and is what the heart icon
+// toggles regardless of how many lists they have. Server guarantees
+// exactly one default per owner via application logic (promotion
+// clears any other default in the same transaction).
+model FavoriteList {
+  id          Int      @id @default(autoincrement())
+  // Exactly one of userId / groupId is non-null. See the migration's
+  // raw `favorite_lists_owner_xor` CHECK constraint for the enforce-
+  // ment; Prisma drift-detection will keep the column shapes in sync.
+  userId      Int?     @map("user_id")
+  groupId     Int?     @map("group_id")
+  name        String // user-given label, e.g. "Date Night"
+  // Optional free-form description, capped server-side (~280 chars).
+  description String?
+  // 7-char hex including leading "#" (e.g. "#FF8800"). Server
+  // validates against the brand palette allowlist; null = use the
+  // default neutral chip color in the UI.
+  color       String?  @db.VarChar(7)
+  isDefault   Boolean  @default(false) @map("is_default")
+  // User-controlled ordering for selectors / management. App sorts
+  // ascending. Not unique — reorder rewrites every row's position
+  // rather than swapping pairs, so collisions during the rewrite
+  // would be a needless headache.
+  position    Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user    User?               @relation("UserFavoriteLists", fields: [userId], references: [id], onDelete: Cascade)
+  group   Group?              @relation("GroupFavoriteLists", fields: [groupId], references: [id], onDelete: Cascade)
+  entries FavoriteListEntry[]
+
+  // Per-user uniqueness on name prevents "Date Night" being created
+  // twice for the same owner. Case-sensitive — the UI does a
+  // case-insensitive dedup check before submit so the user sees a
+  // clear error instead of a 409.
+  @@unique([userId, name])
+  // Same constraint for group-owned lists (unused in v1 but ready
+  // for the group-lists follow-up).
+  @@unique([groupId, name])
+  @@index([userId])
+  @@index([groupId])
+  @@map("favorite_lists")
+}
+
+// Membership row — one restaurant in one list. Composite PK
+// (listId, restaurantId) means a restaurant appears at most once per
+// list but can live in many lists. Cascade on both sides so deleting
+// a list or a restaurant cleans up its entries automatically.
+model FavoriteListEntry {
+  listId       Int      @map("list_id")
+  restaurantId Int      @map("restaurant_id")
+  // Free-form per-entry note, e.g. "go for happy hour" or "try the
+  // omakase." Distinct from the global per-restaurant note in
+  // userInfo.notes (which applies regardless of which list the row
+  // belongs to). Capped server-side at ~280 chars.
+  note         String?
+  addedAt      DateTime @default(now()) @map("added_at")
+
+  list       FavoriteList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  restaurant Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@id([listId, restaurantId])
+  @@index([restaurantId])
+  @@map("favorite_list_entries")
 }

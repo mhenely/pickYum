@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { checkAuth } from '../redux/slices/authSlice';
 import { addUserAcceptance } from '../redux/slices/userInfoSlice';
+import { showChosenCelebration } from '../redux/slices/celebrationSlice';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { sessionApi } from '../lib/sessionApi';
@@ -1089,6 +1090,15 @@ const GroupSessionPage = () => {
         restaurantId: Number(session.result),
         _serverHandled: true,
       }));
+    }
+    // Pop the global "Tonight you're going to…" celebration for the
+    // winning restaurant. <ChosenCelebration/> is mounted in App.tsx
+    // ABOVE the router, so the Redux flag survives the navigate()
+    // below — the user lands on the next page with the celebration
+    // already showing. Fires for trip-event accepts too (they don't
+    // write UserAccepted, but the celebration is UX, not data).
+    if (session?.result) {
+      dispatch(showChosenCelebration(Number(session.result)));
     }
     // Back-nav: trip meals go back to the trip page, group sessions go to
     // /socials (which is the trip+group hub). Falls through to /socials for

@@ -1,7 +1,16 @@
 import { useState, useMemo, useRef, useEffect, useCallback, lazy, Suspense } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import RestaurantDetailModal from "../components/RestaurantDetailModal";
-import { addUserOption, updateUserFavorites, addCustomRestaurant } from "../redux/slices/userInfoSlice";
+import { addUserOption, addCustomRestaurant } from "../redux/slices/userInfoSlice";
+import HeartWithKebab from "../components/HeartWithKebab";
+import ListSelector from "../components/ListSelector";
+import ListManagementModal from "../components/ListManagementModal";
+import {
+  allLists as selectAllLists,
+  defaultList as selectDefaultList,
+  readActiveListIds,
+  writeActiveListIds,
+} from "../utils/favoriteLists";
 import {
   setNearbyResults, setLocationInput, setRadiusMeters, setSearchCuisineType, clearNearby,
   togglePriceFilter, clearPriceFilters, toggleOpenNow, setOpenAtTime,
@@ -16,6 +25,8 @@ import RestaurantCard from "../components/RestaurantCard";
 // state and the saved-restaurants view never trigger the network.
 const NearbyMap = lazy(() => import("../components/NearbyMap"));
 import { buildAcceptedStats, formatLastChosen } from "../utils/acceptedStats";
+import { findCustomMatches } from "../utils/restaurantMatch";
+import MatchSuggestionsBanner from "../components/MatchSuggestionsBanner";
 import { api } from "../lib/api";
 // Still imported for the filter UI (price chip selector, etc.) — the card
 // component handles its own PRICE_LABELS lookup internally.
@@ -172,6 +183,43 @@ export default function SearchPage() {
   // the user expand when they want to grep their existing picks.
   const [savedExpanded, setSavedExpanded] = useState(false);
 
+  // ── Your Lists view ───────────────────────────────────────────
+  // The "Saved Restaurants" section was a grab-bag of every-
+  // restaurant-Redux-has-seen. With multi-list favorites it's
+  // repurposed as the user's primary favorites surface: check any
+  // combination of lists via the ListSelector and see the union of
+  // those lists' entries below.
+  //
+  // Selection is session-scoped — stored as a JSON array of list ids
+  // in sessionStorage so it survives navigation within a session but
+  // doesn't leak across logins / browser closes. First-load default
+  // is [defaultListId] (mirrors the pre-multi-select behavior of
+  // showing just the user's primary list).
+  const allFavoriteLists = useSelector(selectAllLists);
+  const defaultFavoriteList = useSelector(selectDefaultList);
+  const [manageListsOpen, setManageListsOpen] = useState(false);
+  const [activeListIds, setActiveListIdsState] = useState(() => readActiveListIds('search'));
+
+  // Seed the selection to [defaultId] once lists hydrate, IF the
+  // user hasn't already made a selection this session. `null`
+  // distinguishes "not yet initialized" (seed) from `[]` (user
+  // explicitly cleared everything — leave it empty).
+  useEffect(() => {
+    if (activeListIds == null && defaultFavoriteList?.id) {
+      const next = [defaultFavoriteList.id];
+      setActiveListIdsState(next);
+      writeActiveListIds('search', next);
+    }
+  }, [activeListIds, defaultFavoriteList?.id]);
+
+  // Persist + flip in one helper so the ListSelector callback is
+  // identity-stable across renders. The selector is a checkbox UI
+  // so `next` is always a number array.
+  const setActiveListIds = useCallback((next) => {
+    setActiveListIdsState(next);
+    writeActiveListIds('search', next);
+  }, []);
+
   // Two-way card↔marker sync. `hoveredPlaceId` recolors the matching pin
   // when hovering a card AND adds a ring to the matching card when
   // hovering a pin — both paths set this same state. Local because it's
@@ -186,9 +234,10 @@ export default function SearchPage() {
   // re-render all 10 per pointer step; now only the 2 whose isHighlighted
   // boolean flipped re-render.
   const handleCardClickWithId      = useCallback((id) => setDetailId(id), []);
-  const handleFavoriteToggleWithId = useCallback((id) => {
-    dispatch(updateUserFavorites({ restaurantId: id, userId: currentUser?.id }));
-  }, [dispatch, currentUser?.id]);
+  // handleFavoriteToggleWithId used to power the saved-section heart
+  // toggle. The heart is now <HeartWithKebab>, which dispatches the
+  // same Redux action internally — the dedicated callback is no
+  // longer needed at this scope.
   const handleMouseEnterWithId     = useCallback((id) => {
     setHoveredPlaceId(id);
     // Opportunistic prefetch: kick off materialization when the user first
@@ -411,6 +460,17 @@ export default function SearchPage() {
   const canSearch    = locationInput.trim().length > 0 && radiusMeters !== null;
   const isNearbyMode = nearbyResults !== null;
 
+  // Post-search Place-match suggestions — scans the user's CUSTOM
+  // restaurants for fuzzy-name matches against the current search
+  // results, after filtering out customs that opted out of matching.
+  // Memoized on (nearbyResults, customRestaurants) so it recomputes
+  // exactly when either side changes. Empty array hides the banner
+  // entirely. See utils/restaurantMatch.js for the matching algorithm.
+  const matchSuggestions = useMemo(() => {
+    if (!nearbyResults || nearbyResults.length === 0) return [];
+    return findCustomMatches(customRestaurants, nearbyResults);
+  }, [nearbyResults, customRestaurants]);
+
   // ── Handlers ──────────────────────────────────────────────────
 
   const handleNearbySearch = async () => {
@@ -605,24 +665,65 @@ export default function SearchPage() {
   // memo re-derives it for every row.
   const normalizedCuisineFilter = cuisineFilter === "All" ? null : normalizeCuisine(cuisineFilter);
 
+  // Sticky pin for the in-progress kebab interaction — keeps the
+  // card visible in the Your Lists grid while its picker is open
+  // so unchecking the active list mid-edit doesn't yank the card
+  // out before the user can move it elsewhere.
+  const [stickyFavId, setStickyFavId] = useState(null);
+  const handlePickerOpen  = useCallback((id) => setStickyFavId(String(id)), []);
+  const handlePickerClose = useCallback((id) => {
+    setStickyFavId((prev) => (prev === String(id) ? null : prev));
+  }, []);
+
+  // Resolve the union of every selected list's entries as a
+  // deduped array of string ids (downstream customRestaurants[id]
+  // lookups stringify their keys). `activeListIds` is null while
+  // we wait for the first-hydrate seeding effect to land; treat
+  // that as an empty selection rather than blanking the grid. The
+  // pinned id is folded in last so an in-progress card stays
+  // visible even when the user unchecks its last list mid-edit.
+  const activeListEntryIds = useMemo(() => {
+    const selected = new Set(activeListIds ?? []);
+    const seen = new Set();
+    for (const list of allFavoriteLists) {
+      if (!selected.has(list.id)) continue;
+      for (const entry of list.entries) seen.add(String(entry.restaurantId));
+    }
+    if (stickyFavId) seen.add(stickyFavId);
+    return [...seen];
+  }, [activeListIds, allFavoriteLists, stickyFavId]);
+
+  // `localResults` is the saved-section's grid source. Previously it
+  // pulled every entry of customRestaurants (i.e. anything Redux had
+  // ever seen, including non-favorited rows from history / nearby
+  // hover prefetches). Now it pulls the ACTIVE FAVORITE LIST's
+  // entries — that's the user-facing definition of "their saved
+  // restaurants." Same filter logic applies on top.
+  //
+  // The shape stays a [id, r] tuple so downstream sortedLocal /
+  // grid rendering doesn't need to change.
   const localResults = useMemo(
     () => {
       const filters = new Set(priceFiltersArray);
-      return Object.entries(customRestaurants).filter(([, r]) => {
-        if (query && !r.name.toLowerCase().startsWith(query.toLowerCase())) return false;
-        if (normalizedCuisineFilter && normalizeCuisine(r.type) !== normalizedCuisineFilter) return false;
-        if (filters.size > 0 && !filters.has(r.price)) return false;
+      const out = [];
+      for (const id of activeListEntryIds) {
+        const r = customRestaurants[String(id)];
+        if (!r) continue; // entry references a row not in Redux yet (shouldn't happen after /me/all)
+        if (query && !r.name.toLowerCase().startsWith(query.toLowerCase())) continue;
+        if (normalizedCuisineFilter && normalizeCuisine(r.type) !== normalizedCuisineFilter) continue;
+        if (filters.size > 0 && !filters.has(r.price)) continue;
         if (openAtTime) {
-          if (!isLocalOpenAt(r.hours, openAtTime)) return false;
+          if (!isLocalOpenAt(r.hours, openAtTime)) continue;
         } else if (openNowFilter) {
-          if (!isLocalOpenNow(r.hours)) return false;
+          if (!isLocalOpenNow(r.hours)) continue;
         }
-        if (deliveryFilter && !r.delivery) return false;
-        if (takeoutFilter && !r.takeout)   return false;
-        return true;
-      });
+        if (deliveryFilter && !r.delivery) continue;
+        if (takeoutFilter && !r.takeout) continue;
+        out.push([String(id), r]);
+      }
+      return out;
     },
-    [customRestaurants, query, normalizedCuisineFilter, priceFiltersArray, openAtTime, openNowFilter, deliveryFilter, takeoutFilter],
+    [activeListEntryIds, customRestaurants, query, normalizedCuisineFilter, priceFiltersArray, openAtTime, openNowFilter, deliveryFilter, takeoutFilter],
   );
 
   const filteredNearby = useMemo(
@@ -996,6 +1097,30 @@ export default function SearchPage() {
             Takeout
           </button>
         </div>
+
+        {/* Sort — lives in the filter panel (always visible) so it
+            applies to both nearby AND saved sections uniformly,
+            regardless of which is currently rendered. The previous
+            two-control setup (one in the nearby header + one in the
+            saved header, both dispatching the same Redux state)
+            disappeared entirely when the user collapsed the saved
+            section without a nearby search active. Single source
+            of truth here. */}
+        <div className="flex flex-wrap items-center gap-2 ml-auto">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider shrink-0">Sort by</span>
+          <select
+            value={sortBy}
+            onChange={(e) => dispatch(setSortBy(e.target.value))}
+            className="rounded-md border-0 py-1 pl-2.5 pr-8 text-sm text-gray-700 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-orange-500"
+          >
+            <option value="none">Default</option>
+            <option value="google-desc">Google Rating ↑</option>
+            <option value="personal-desc">Your Rating ↑</option>
+            <option value="community-desc">Community Rating ↑</option>
+            <option value="distance-asc">Distance: Nearest</option>
+            <option value="distance-desc">Distance: Farthest</option>
+          </select>
+        </div>
       </div>
 
       {/* ── Name / cuisine search row ────────────────────────── */}
@@ -1060,6 +1185,15 @@ export default function SearchPage() {
         </div>
       )}
 
+      {/* ── Possible-match suggestions ──────────────────────────
+          Sits ABOVE the results grid so the user notices it before
+          scrolling through results. The component renders nothing
+          when matchSuggestions is empty, so this slot collapses
+          silently for users with no custom-restaurant overlaps. */}
+      {isNearbyMode && matchSuggestions.length > 0 && (
+        <MatchSuggestionsBanner matches={matchSuggestions} />
+      )}
+
       {/* ── Nearby results section (Places API) ──────────────── */}
       {/* Discovery is the primary intent on this page, so Nearby renders
           BEFORE the user's Saved Restaurants section. Saved is collapsed by
@@ -1090,23 +1224,10 @@ export default function SearchPage() {
                   {mapVisible ? 'Hide map' : 'Show map'}
                 </button>
               )}
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-gray-500 font-medium whitespace-nowrap">Sort by:</label>
-                <select
-                  value={sortBy}
-                  onChange={(e) => dispatch(setSortBy(e.target.value))}
-                  // pr-8 leaves room for the browser's native chevron so option
-              // text doesn't sit underneath it.
-              className="rounded-md border-0 py-1 pl-2.5 pr-8 text-sm text-gray-700 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-orange-500"
-                >
-                  <option value="none">Default</option>
-                  <option value="google-desc">Google Rating ↑</option>
-                  <option value="personal-desc">Your Rating ↑</option>
-                  <option value="community-desc">Community Rating ↑</option>
-                  <option value="distance-asc">Distance: Nearest</option>
-                  <option value="distance-desc">Distance: Farthest</option>
-                </select>
-              </div>
+              {/* Sort control moved to the filter panel (always visible)
+                  so it stays accessible whether or not a nearby search
+                  is active. Single Redux-backed select drives both
+                  nearby + saved sections. */}
             </div>
           </div>
 
@@ -1262,52 +1383,60 @@ export default function SearchPage() {
         </div>
       )}
 
-      {/* ── Saved restaurants section ────────────────────────── */}
-      {/* Collapsed by default. Hidden entirely when the user has nothing
-          saved yet (brand-new users). Header is a toggle button that flips
-          the chevron and reveals the sort dropdown + grid. */}
-      {Object.keys(customRestaurants).length > 0 && (
+      {/* ── Your Lists section (replaces Saved Restaurants) ────── */}
+      {/* Surfaces the user's favorite lists. Previously this section
+          showed every restaurant Redux had ever seen — too broad to
+          be useful. Now it shows the active list's entries, with a
+          ListSelector to switch between lists (or "All favorites"
+          for the union view). Hidden entirely until lists hydrate. */}
+      {allFavoriteLists.length > 0 && (
         <div className="mb-8">
-          <button
-            type="button"
-            onClick={() => setSavedExpanded((v) => !v)}
-            aria-expanded={savedExpanded}
-            className="w-full flex items-center gap-2 mb-3 text-left rounded-lg hover:bg-gray-50 transition-colors px-2 py-1.5 -mx-2"
-          >
-            <span className={`text-gray-400 transition-transform inline-block ${savedExpanded ? 'rotate-90' : ''}`}>▸</span>
-            <span className="text-sm font-semibold text-gray-700">Saved Restaurants</span>
-            <span className="text-sm font-normal text-gray-400">({sortedLocal.length})</span>
-            {!savedExpanded && (
-              <span className="ml-auto text-xs text-gray-400">Click to expand</span>
-            )}
-          </button>
+          <div className="w-full flex items-center gap-2 mb-3 px-2 -mx-2">
+            <button
+              type="button"
+              onClick={() => setSavedExpanded((v) => !v)}
+              aria-expanded={savedExpanded}
+              className="flex items-center gap-2 text-left rounded-lg hover:bg-gray-50 transition-colors px-2 py-1.5 -mx-2"
+            >
+              <span className={`text-gray-400 transition-transform inline-block ${savedExpanded ? 'rotate-90' : ''}`}>▸</span>
+              <span className="text-sm font-semibold text-gray-700">Your Lists</span>
+              <span className="text-sm font-normal text-gray-400">({sortedLocal.length})</span>
+            </button>
+            {/* Selector + Manage live in the header so the user can
+                switch lists / open management without expanding the
+                section first. */}
+            <div className="ml-auto flex items-center gap-2">
+              <ListSelector
+                value={activeListIds ?? []}
+                onChange={setActiveListIds}
+                defaultId={defaultFavoriteList?.id}
+                align="right"
+              />
+              <button
+                type="button"
+                onClick={() => setManageListsOpen(true)}
+                className="text-xs px-2 py-1.5 text-orange-600 hover:bg-orange-50 rounded-md border border-orange-200"
+              >
+                Manage
+              </button>
+            </div>
+          </div>
 
           {savedExpanded && (
             <>
-              <div className="flex items-center justify-end mb-3 gap-2">
-                <label className="text-xs text-gray-500 font-medium whitespace-nowrap">Sort by:</label>
-                <select
-                  value={sortBy}
-                  onChange={(e) => dispatch(setSortBy(e.target.value))}
-                  // pr-8 leaves room for the browser's native chevron so option
-                  // text doesn't sit underneath it.
-                  className="rounded-md border-0 py-1 pl-2.5 pr-8 text-sm text-gray-700 shadow-sm ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-inset focus:ring-orange-500"
-                >
-                  <option value="none">Default</option>
-                  <option value="google-desc">Google Rating ↑</option>
-                  <option value="personal-desc">Your Rating ↑</option>
-                  <option value="community-desc">Community Rating ↑</option>
-                </select>
-              </div>
-
               {sortedLocal.length === 0 ? (
-                <p className="text-gray-500 text-sm">No saved restaurants match your search.</p>
+                <p className="text-gray-500 text-sm">
+                  {activeListEntryIds.length === 0
+                    ? (activeListIds && activeListIds.length === 0
+                        ? 'No lists are selected. Pick one or more lists above to see their restaurants.'
+                        : 'The selected list(s) are empty. Heart restaurants from search results to add them.')
+                    : 'No restaurants in the selected list(s) match your filters.'}
+                </p>
               ) : (
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {/* RestaurantCard looks the row up via `restaurantMap`, so the
                       value half of the entry is intentionally unused here. */}
                   {sortedLocal.map(([id]) => {
-                    const isFavorited = currentUser.favorites.map(String).includes(String(id));
                     const isSelected  = currentUser.options.map(String).includes(String(id));
                     const personalReviews = currentUser.reviews[String(id)];
                     const personalRating  = personalReviews?.length
@@ -1325,8 +1454,11 @@ export default function SearchPage() {
                         // memoized RestaurantCard actually bails out instead
                         // of re-rendering every saved card on every keystroke.
                         onCardClickWithId={handleCardClickWithId}
-                        isFavorited={isFavorited}
-                        onFavoriteToggleWithId={handleFavoriteToggleWithId}
+                        // HeartWithKebab is multi-list-aware: heart toggles
+                        // default-list membership; kebab opens the picker
+                        // for users with 2+ lists. Replaces the previous
+                        // onFavoriteToggle + isFavorited pair.
+                        cornerSlot={<HeartWithKebab restaurantId={id} size="md" onPickerOpen={handlePickerOpen} onPickerClose={handlePickerClose} />}
                       >
                         <button
                           onClick={(e) => { e.stopPropagation(); dispatch(addUserOption(id)); }}
@@ -1344,6 +1476,8 @@ export default function SearchPage() {
           )}
         </div>
       )}
+
+      <ListManagementModal open={manageListsOpen} onClose={() => setManageListsOpen(false)} />
 
       {detailId && (
         <RestaurantDetailModal

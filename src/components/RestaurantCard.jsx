@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react";
+import { memo } from "react";
 import RatingDisplay from "./RatingDisplay";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
 import { placePhotoUrl } from "../lib/api";
@@ -29,110 +29,33 @@ const prettyUrl = (url) => {
   }
 };
 
-// ── Photo carousel ───────────────────────────────────────────────────────
-// Google Places returns up to ~5 photos per restaurant. The previous
-// card showed only photos[0]; this swaps in a horizontal scroll-snap
-// carousel so users can swipe through all of them. Pagination dots are
-// clickable and reflect the currently-snapped slide.
+// ── Photo hero (single image) ────────────────────────────────────────────
+// Cards render ONLY the first photo of any place — the multi-photo
+// carousel that used to live here was promoted exclusively to the
+// detail modal. Rationale (cost): cards are the highest-volume photo
+// surface in the app (30+ per nearby search × 1-3 photos preloaded per
+// carousel was 60-90 photo calls per search). Cards now load exactly
+// one photo each, and the full gallery experience moves to the detail
+// modal — a single user-initiated click that justifies its own photo
+// budget. Users who want to flip through photos open the modal.
 //
-// COST NOTE: each rendered <img> triggers a /api/places/photo call
-// which costs us one Google API hit. To keep cost proportional to
-// engagement, we only render the active slide and its immediate
-// neighbors initially — other slides exist as empty placeholders until
-// the user interacts (scrolls or taps a dot). Native loading="lazy"
-// doesn't help here because off-screen carousel slides have bounding
-// rects inside the document viewport (overflow clipping doesn't
-// participate in the lazy-load decision).
-function PhotoCarousel({ photos, maxWidthPx, photoBoxClass, restaurantName }) {
-  const valid = photos.filter((p) => p?.name);
-  const [active, setActive] = useState(0);
-  // Track which slide indices have been "activated" — the active slide
-  // plus its neighbors. A Set so add() is idempotent. Initialized with
-  // just slide 0 (and 1 when present) so first paint is one photo per
-  // card, matching the old single-photo cost profile.
-  const [loaded, setLoaded] = useState(() => {
-    const init = new Set([0]);
-    if (valid.length > 1) init.add(1);
-    return init;
-  });
-  const trackRef = useRef(null);
-
-  if (valid.length === 0) return null;
-
-  // Expand `loaded` to include `i` and its neighbors so a swipe doesn't
-  // hit a blank slide while the next photo is mid-fetch. Returns the
-  // updated Set to satisfy React's immutable-state contract.
-  const markLoaded = (i) => {
-    setLoaded((prev) => {
-      const next = new Set(prev);
-      next.add(i);
-      if (i > 0) next.add(i - 1);
-      if (i < valid.length - 1) next.add(i + 1);
-      return next;
-    });
-  };
-
-  // Snap-aware scroll handler — turns the user's swipe gesture into the
-  // matching active index. `clientWidth` is the slide width (each slide
-  // is w-full of the track).
-  const handleScroll = () => {
-    const t = trackRef.current;
-    if (!t) return;
-    const idx = Math.round(t.scrollLeft / t.clientWidth);
-    if (idx !== active) {
-      setActive(idx);
-      markLoaded(idx);
-    }
-  };
-
-  const jumpTo = (i) => {
-    const t = trackRef.current;
-    if (t) t.scrollTo({ left: t.clientWidth * i, behavior: 'smooth' });
-    setActive(i);
-    markLoaded(i);
-  };
-
+// If no photos exist (custom user-typed row or a pre-rollout legacy
+// row), the wrapper renders nothing — the card just skips the photo
+// region. The wrapping `photoBoxClass` handles all the layout (height,
+// edge-to-edge via negative margins, rounded corners).
+function PhotoHero({ photos, maxWidthPx, photoBoxClass, restaurantName }) {
+  const first = photos.find((p) => p?.name);
+  if (!first) return null;
   return (
     <div className={photoBoxClass}>
-      <div
-        ref={trackRef}
-        onScroll={handleScroll}
-        className="absolute inset-0 flex overflow-x-auto snap-x snap-mandatory [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {valid.map((p, i) => (
-          <div
-            key={`${p.name}-${i}`}
-            className="relative h-full w-full shrink-0 snap-start bg-gray-100"
-          >
-            {loaded.has(i) && (
-              <img
-                src={placePhotoUrl(p, maxWidthPx)}
-                // alt only on the first image — duplicating it across
-                // every slide makes screen readers re-announce the same
-                // restaurant name on each swipe, which is noisy.
-                alt={i === 0 ? restaurantName : ''}
-                className="absolute inset-0 h-full w-full object-cover"
-                onError={(e) => { e.currentTarget.style.display = 'none'; }}
-              />
-            )}
-          </div>
-        ))}
-      </div>
-      {valid.length > 1 && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-1 flex items-center justify-center gap-1 px-2">
-          {valid.map((_, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={(e) => { e.stopPropagation(); jumpTo(i); }}
-              aria-label={`Show photo ${i + 1} of ${valid.length}`}
-              className={`pointer-events-auto h-1.5 rounded-full shadow transition-all ${
-                i === active ? 'w-4 bg-white' : 'w-1.5 bg-white/70 hover:bg-white'
-              }`}
-            />
-          ))}
-        </div>
-      )}
+      <img
+        src={placePhotoUrl(first, maxWidthPx)}
+        alt={restaurantName}
+        className="absolute inset-0 h-full w-full object-cover"
+        // Hide on load failure so a 404 / expired photo ref doesn't
+        // leave a broken-image icon on the card.
+        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+      />
     </div>
   );
 }
@@ -160,10 +83,15 @@ function PhotoCarousel({ photos, maxWidthPx, photoBoxClass, restaurantName }) {
 //
 // Corner action precedence (only one slot, so they're mutually exclusive):
 //   1. openNow pill            — read-only state, takes priority for nearby
-//   2. onFavoriteToggle / isFavorited — Search saved variant (toggle)
-//   3. onUnfavorite            — Compare/Choose favorites (red heart, click
-//                                un-favorites; no isFavorited needed)
-//   4. onRemove                — Compare/Choose options (gray ✕)
+//   2. cornerSlot              — caller-provided node (e.g. <HeartWithKebab>);
+//                                wins over every built-in heart variant so
+//                                multi-list-aware callers can drop in their
+//                                own heart implementation without touching
+//                                this file. Skipped only when openNow takes
+//                                precedence.
+//   3. onFavoriteToggle / isFavorited — legacy Search saved variant (toggle)
+//   4. onUnfavorite            — legacy Compare/Choose favorites (red heart)
+//   5. onRemove                — Compare/Choose options (gray ✕)
 
 // Per-size visual scale. Structural parity: both variants render the SAME
 // blocks (photo, name, meta, address, distance, ratings, badges, action).
@@ -239,7 +167,12 @@ const RestaurantCard = ({
   onInfo,
   onInfoWithId,
 
-  // Corner action — mutually exclusive; precedence in the comment above
+  // Corner action — mutually exclusive; precedence in the comment above.
+  // `cornerSlot` short-circuits everything below it (heart / unfav heart)
+  // so a caller can drop in <HeartWithKebab> or any other corner UI
+  // without changing this file. openNow pill still wins (it's a state
+  // indicator, not an action).
+  cornerSlot,
   onFavoriteToggle,
   onFavoriteToggleWithId,
   isFavorited,
@@ -342,6 +275,8 @@ const RestaurantCard = ({
 
   // Pick which corner element wins. openNow takes priority when present
   // (Search nearby — and those rows have no favorite/remove available).
+  // cornerSlot is the multi-list-aware path (HeartWithKebab); when
+  // provided, it short-circuits the legacy heart variants below.
   const cornerEl = (() => {
     if (openNow != null) {
       return (
@@ -352,6 +287,7 @@ const RestaurantCard = ({
         </span>
       );
     }
+    if (cornerSlot) return cornerSlot;
     if (resolvedFavToggle) {
       return (
         <button
@@ -413,14 +349,12 @@ const RestaurantCard = ({
         !isActive && !isDragOver && !isWinner && !isHighlighted ? 'border-gray-200' : '',
       ].join(' ')}
     >
-      {/* Photo carousel — top of card, edge-to-edge via negative margins
-          baked into photoBoxClass. Renders only when Google Places
-          returned at least one photo; custom user-typed and pre-rollout
-          rows skip the photo region entirely. Multiple photos snap-
-          scroll horizontally; only the active slide + neighbors actually
-          fetch (see PhotoCarousel comments for cost rationale). */}
+      {/* Photo hero — top of card, edge-to-edge via the negative-
+          margin photoBoxClass. Single image only (the first photo);
+          the full carousel experience lives in the detail modal. See
+          PhotoHero comments for the cost-shape rationale. */}
       {Array.isArray(r.photos) && r.photos.length > 0 && (
-        <PhotoCarousel
+        <PhotoHero
           photos={r.photos}
           maxWidthPx={s.photoMaxWidthPx}
           photoBoxClass={s.photoBoxClass}

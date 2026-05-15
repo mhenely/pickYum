@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Dialog, DialogPanel } from '@headlessui/react';
 import { XMarkIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { useDispatch, useSelector } from 'react-redux';
-import { addUserOption, removeUserOption, updateUserFavorites, setRestaurantNote, persistAddReview, removeUserReview } from '../redux/slices/userInfoSlice';
+import { addUserOption, removeUserOption, setRestaurantNote, persistAddReview, removeUserReview, addUserAcceptance, setMatchOptOut, updateCustomRestaurant, toggleAcceptedExcludeFromInsights } from '../redux/slices/userInfoSlice';
+import { showChosenCelebration } from '../redux/slices/celebrationSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
 import InfoRow from './InfoRow';
+import HeartWithKebab from './HeartWithKebab';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import { googleMapsUrl } from '../utils/googleMapsUrl';
@@ -71,10 +73,17 @@ function PhotoGallery({ photos, restaurantName }) {
             >
               <ChevronRightIcon className="h-5 w-5" />
             </button>
-            {/* Position counter — "3 / 5" in the bottom-right corner.
+            {/* Position counter — "3 / 5" in the top-right corner.
                 Helps users know how many photos are in the carousel
-                without having to scan the thumbnail strip. */}
-            <span className="absolute bottom-2 right-2 rounded-full bg-black/50 px-2 py-0.5 text-[10px] font-medium text-white tabular-nums">
+                without having to scan the thumbnail strip. Lives in
+                the TOP-right (not bottom) because the thumbnail
+                strip below the hero butts right up against the
+                hero's bottom edge, leaving no visual breathing room
+                for a bottom-right chip — it ended up looking like
+                it was sitting ON the thumbnails. Top-right is also
+                a more conventional spot for photo counters
+                (matches Google Maps / Instagram / Airbnb). */}
+            <span className="absolute top-2 right-2 rounded-full bg-black/50 px-2 py-0.5 text-[10px] font-medium text-white tabular-nums">
               {safeActive + 1} / {valid.length}
             </span>
           </>
@@ -184,6 +193,41 @@ function OpenStatusBadge({ status }) {
   );
 }
 
+// Module-scope Set tracking which restaurants we've already asked
+// the server to refresh-if-stale during this browser session.
+// Without this, opening the same detail modal twice in a session
+// would fire two refresh-restaurant POSTs (and risk two Place
+// Details API calls if the row crossed the stale threshold between
+// opens). Session-scoped — clears on page reload, which is fine:
+// the server's STALE_DAYS check is the real cost guard, this is
+// just an extra layer of "don't spam the endpoint."
+const refreshAttempted = new Set();
+
+// Coarse "time ago" string for the Google-data-freshness hint on the
+// detail modal. Surfaces "Updated 3 days ago" / "2 weeks ago" /
+// "3 months ago". Returns an empty string for null timestamps OR
+// values < 7 days old — fresh data doesn't need a freshness label,
+// only-stale data does (we want users to know when fields like
+// photos / hours / phone might be out of date, not to crow about
+// recent updates).
+function formatGoogleDataAge(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return '';
+  const days = Math.floor((Date.now() - then) / (24 * 60 * 60 * 1000));
+  if (days < 7) return '';
+  if (days < 30) {
+    const weeks = Math.floor(days / 7);
+    return `${weeks} week${weeks === 1 ? '' : 's'} ago`;
+  }
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    return `${months} month${months === 1 ? '' : 's'} ago`;
+  }
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? '' : 's'} ago`;
+}
+
 // Adapt the server's /api/restaurants/:id shape (canonical Restaurant
 // row, with rating as Decimal-stringified, type as `cuisineType`,
 // price as `priceLevel`, etc.) into the in-memory shape the modal
@@ -235,6 +279,14 @@ const RestaurantDetailModal = ({
   // "Add Review" card button so the user lands directly in the form
   // instead of having to click through. Ignored in readOnly mode.
   defaultShowReviewForm = false,
+  // When true, renders the body as an inline panel (no Dialog
+  // wrapper, no backdrop, no fixed positioning, no close button) so
+  // the same content can flow as a column in a Compare-page grid.
+  // The parent provides height context via h-full; the body's
+  // internal scroll container takes over once content exceeds the
+  // cell. `onClose` is unused in inline mode — dismiss is handled
+  // externally by the surrounding page.
+  inline = false,
 }) => {
   const dispatch = useDispatch();
   const userInfo = useCurrentUser();
@@ -261,6 +313,62 @@ const RestaurantDetailModal = ({
       .catch(() => { /* fall through to fallback below */ });
     return () => { cancelled = true; };
   }, [restaurantId, restaurantMap]);
+
+  // ── On-demand refresh-if-stale ──────────────────────────────
+  // Fire `refresh-restaurant/:id` on modal mount so the Google
+  // data on the row the user is *actively looking at* gets
+  // refreshed if it's stale (>STALE_DAYS old). Server is the gate:
+  // already-fresh rows return a no-op without spending API quota,
+  // custom rows are skipped entirely. Client just throttles repeat
+  // calls within the same session.
+  //
+  // The on-modal-open pattern means refresh spend tracks user
+  // intent — viewing 5 of 50 saved restaurants in a month costs 5
+  // refresh calls, not 50. Replaces the eager "batch-refresh all
+  // stale rows on app boot" pattern (refresh-places still exists
+  // for manual/admin sweeps but isn't auto-fired).
+  //
+  // Read-only contexts (guest viewers, group voting modal) skip
+  // the refresh — they have no auth to spend quota on the user's
+  // behalf, and the row would belong to a different user anyway.
+  useEffect(() => {
+    if (isReadOnly) return;
+    const numId = Number(restaurantId);
+    if (!numId) return;
+    if (refreshAttempted.has(numId)) return;
+    refreshAttempted.add(numId);
+
+    let cancelled = false;
+    api.users.refreshRestaurant(numId)
+      .then(({ refreshed, restaurant }) => {
+        if (cancelled || !refreshed || !restaurant) return;
+        // Mirror the server's update into Redux so cards / modals
+        // re-render with the fresh data. Same field shape the
+        // loader uses (cuisineType → type, priceLevel → price,
+        // googleRating → rating Number, etc.) — see slice loader.
+        dispatch(updateCustomRestaurant({
+          id: String(restaurant.id),
+          data: {
+            name:    restaurant.name,
+            type:    restaurant.cuisineType ?? null,
+            price:   restaurant.priceLevel  ?? null,
+            rating:  restaurant.googleRating != null ? Number(restaurant.googleRating) : null,
+            ratingCount: restaurant.ratingCount ?? null,
+            phone:   restaurant.phone   ?? null,
+            website: restaurant.website ?? null,
+            takeout:  !!restaurant.takeout,
+            delivery: !!restaurant.delivery,
+            lat: restaurant.lat ?? null,
+            lng: restaurant.lng ?? null,
+            photos: Array.isArray(restaurant.photos) ? restaurant.photos : [],
+            regularOpeningHours: restaurant.regularOpeningHours ?? null,
+            googleDataUpdatedAt: restaurant.googleDataUpdatedAt ?? null,
+          },
+        }));
+      })
+      .catch(() => { /* non-fatal — stale data is better than a thrown modal */ });
+    return () => { cancelled = true; };
+  }, [restaurantId, isReadOnly, dispatch]);
 
   // Resolution priority: in-memory map (Redux) → freshly fetched →
   // caller-provided snapshot fallback. The fetched row carries
@@ -310,10 +418,43 @@ const RestaurantDetailModal = ({
   const [showReviewForm, setShowReviewForm] = useState(
     defaultShowReviewForm && !isReadOnly,
   );
+
+  // Ref on the Reviews section so we can auto-scroll the modal body
+  // there when `defaultShowReviewForm` is set. Without this, opening
+  // the modal via "Add Review" lands the user at the top of the
+  // photo gallery and they have to scroll past everything to find
+  // the form. See the effect below for the scroll trigger.
+  const reviewsSectionRef = useRef(null);
+
+  // On mount (and whenever the caller flips defaultShowReviewForm
+  // mid-open, which doesn't happen in current callers but is cheap
+  // to handle), bring the Reviews section to the top of the
+  // scrollable body. requestAnimationFrame waits one paint so the
+  // layout is finalized — without it, the photo gallery's lazy
+  // images haven't laid out yet and the scroll target moves after
+  // we've already jumped to it. `block: 'start'` aligns the
+  // section's top edge with the visible top of the scroll
+  // container; `behavior: 'instant'` skips the smooth-scroll
+  // animation since the user explicitly asked to land here and
+  // doesn't want to wait through a 300ms scroll. scrollIntoView
+  // only scrolls the nearest scrollable ancestor (the modal body
+  // with `overflow-y-auto`), so the page itself doesn't move.
+  useEffect(() => {
+    if (!defaultShowReviewForm || isReadOnly) return;
+    const id = requestAnimationFrame(() => {
+      reviewsSectionRef.current?.scrollIntoView({ block: 'start', behavior: 'instant' });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [defaultShowReviewForm, isReadOnly]);
   const [reviewContent, setReviewContent] = useState('');
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewDate, setReviewDate] = useState(() => new Date().toLocaleDateString());
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  // Moved above the `if (!r) return null` early-return below so React's
+  // hooks rule (must be called in the same order every render) is
+  // never violated when the resolved row is briefly absent. The
+  // setter is consumed by handleToggleMatchOptOut further down.
+  const [matchToggleBusy, setMatchToggleBusy] = useState(false);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -376,7 +517,10 @@ const RestaurantDetailModal = ({
 
   const reviews   = userInfo.reviews[sid(restaurantId)] || [];
   const avgRating = reviews.length ? mean(reviews.map((rv) => rv.rating)) : null;
-  const isFavorite = userInfo.favorites.map(sid).includes(sid(restaurantId));
+  // isFavorite used to drive the action-row Favorite/Unfavorite
+  // button; that's replaced by <HeartWithKebab> in the modal header,
+  // which manages its own state. Leave the favorited derivation out
+  // of this function entirely.
   const isSelected = userInfo.options.map(sid).includes(sid(restaurantId));
   const noteDirty = noteText !== savedNote;
 
@@ -420,6 +564,34 @@ const RestaurantDetailModal = ({
     dispatch(setRestaurantNote({ restaurantId: sid(restaurantId), text: noteText }));
   };
 
+  // ── Match-opt-out toggle (custom rows only) ──────────────────
+  // The toggle below the personal note lets owners proactively opt
+  // out of the Search page's Place-match scan for THIS custom row
+  // (use case: "Cooking at home" will never have a Google match,
+  // user doesn't want to see prompts about it). Server enforces
+  // ownership + custom-row constraints; we mirror in Redux on
+  // success so the next search reflects immediately. Optimistic
+  // toggle reverted on API error.
+  // (matchToggleBusy state is declared above the early-return at
+  //  line ~445 to keep the hooks order consistent.)
+  const handleToggleMatchOptOut = async (nextValue) => {
+    if (matchToggleBusy) return;
+    setMatchToggleBusy(true);
+    // Optimistic update — UI reflects the new state before the
+    // round-trip lands. Revert on failure.
+    dispatch(setMatchOptOut({ id: sid(restaurantId), excludeFromPlaceMatching: nextValue }));
+    try {
+      await api.restaurants.setMatchSettings(Number(restaurantId), {
+        excludeFromPlaceMatching: nextValue,
+      });
+    } catch (err) {
+      console.warn('[match-opt-out] save failed:', err);
+      dispatch(setMatchOptOut({ id: sid(restaurantId), excludeFromPlaceMatching: !nextValue }));
+    } finally {
+      setMatchToggleBusy(false);
+    }
+  };
+
   const handleSubmitReview = async () => {
     if (!reviewContent.trim()) return;
     setReviewSubmitting(true);
@@ -437,15 +609,16 @@ const RestaurantDetailModal = ({
     setReviewSubmitting(false);
   };
 
-  return (
-    <Dialog open onClose={onClose} className="relative z-50">
-      {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
-
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-lg rounded-xl bg-white shadow-xl flex flex-col max-h-[90vh]">
-
-          {/* ── Photo hero / gallery strip ───────────────────────
+  // ── Panel body content ─────────────────────────────────────
+  // Identical in both modes. Hooks must live above this point;
+  // everything below is rendered into one of two shells (modal or
+  // inline) selected at the bottom of the function. Keeping the JSX
+  // in a const (rather than extracting to a sub-component) avoids
+  // re-running every hook in this 400-line component every time we
+  // toggle the wrapper.
+  const body = (
+    <>
+      {/* ── Photo hero / gallery strip ───────────────────────
               Renders only when Google Places returned photos. First
               photo is rendered larger as a hero; remaining photos
               (up to 4 more) sit beneath in a thumbnail row that
@@ -477,12 +650,29 @@ const RestaurantDetailModal = ({
                 )}
               </div>
             </div>
-            <button
-              onClick={onClose}
-              className="ml-4 shrink-0 text-gray-400 hover:text-gray-600 transition-colors"
-            >
-              <XMarkIcon className="h-6 w-6" />
-            </button>
+            <div className="ml-4 shrink-0 flex items-center gap-2">
+              {/* HeartWithKebab in the modal header — primary
+                  favoriting affordance for the detail view, visible
+                  on every entry point that opens the modal (Search,
+                  Compare, Choose, History, etc.). Hidden in
+                  read-only contexts (group voting, public sharing)
+                  where editing favorites makes no sense. */}
+              {!readOnly && (
+                <HeartWithKebab restaurantId={sid(restaurantId)} size="md" />
+              )}
+              {/* Close-X is hidden in inline mode — the Compare page
+                  renders its own dismiss button as an overhang
+                  outside the panel, and inline panels don't have a
+                  "close" affordance in the modal sense. */}
+              {!inline && (
+                <button
+                  onClick={onClose}
+                  className="text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <XMarkIcon className="h-6 w-6" />
+                </button>
+              )}
+            </div>
           </div>
 
           {/* ── Scrollable body ──────────────────────────────── */}
@@ -595,6 +785,23 @@ const RestaurantDetailModal = ({
               )}
             </div>
 
+            {/* "Google data updated X ago" hint — only shown when the
+                row is meaningfully stale (>7 days). With STALE_DAYS
+                bumped to 90, this sets user expectations that
+                photos / phone / hours could be a few months old.
+                On-modal-open auto-refresh (above) will refresh the
+                row in the background when applicable, but the hint
+                still appears for the rest of this render cycle. */}
+            {(() => {
+              const ago = formatGoogleDataAge(r.googleDataUpdatedAt);
+              if (!ago) return null;
+              return (
+                <p className="text-[11px] text-gray-400 italic -mt-2">
+                  Google data updated {ago}
+                </p>
+              );
+            })()}
+
             {/* Service availability */}
             <div className="flex gap-2">
               <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
@@ -640,19 +847,48 @@ const RestaurantDetailModal = ({
                     >
                       {isSelected ? 'Remove from Options' : 'Add to Options'}
                     </button>
+                    {/* Choose Now — direct-accept shortcut that
+                        commits this restaurant without going through
+                        the coin-flip / roulette flow. Universal
+                        action available anywhere the default modal
+                        opens (Search, History, Insights, Socials,
+                        Compare via card-click info, etc.) so the
+                        user can decide on the spot.
+                        Mechanics: records an acceptance with
+                        chooseMethod='direct', removes the row from
+                        options if it was there, and closes the
+                        modal. optionsSnapshot is the user's current
+                        options list at choose time — same shape
+                        Compare uses for `activeIds`.
+                        Skipped when actions or readOnly takes over
+                        the row, since those paths replace the
+                        default action set entirely. */}
                     <button
-                      onClick={() =>
-                        dispatch(updateUserFavorites({ restaurantId: sid(restaurantId), userId: userInfo.id }))
-                      }
-                      className={[
-                        'flex-1 rounded-lg py-2 text-sm font-semibold transition-colors border',
-                        isFavorite
-                          ? 'bg-red-50 text-red-600 hover:bg-red-100 border-red-200'
-                          : 'bg-white text-gray-600 hover:bg-gray-50 border-gray-200',
-                      ].join(' ')}
+                      onClick={() => {
+                        dispatch(addUserAcceptance({
+                          restaurantId: sid(restaurantId),
+                          optionsSnapshot: userInfo.options.map(sid),
+                          chooseMethod: 'direct',
+                        }));
+                        if (isSelected) dispatch(removeUserOption(sid(restaurantId)));
+                        // Pop the shared celebration before closing the
+                        // detail modal — the global <ChosenCelebration/>
+                        // renders on top so the user gets the same
+                        // "Tonight you're going to…" feedback as the
+                        // Compare-page Choose-Now flow.
+                        dispatch(showChosenCelebration(sid(restaurantId)));
+                        onClose?.();
+                      }}
+                      className="flex-1 rounded-lg py-2 text-sm font-semibold bg-green-600 text-white hover:bg-green-500 transition-colors"
                     >
-                      {isFavorite ? '♥ Unfavorite' : '♡ Favorite'}
+                      Choose Now
                     </button>
+                    {/* The header now hosts <HeartWithKebab>, which
+                        covers default-list toggle AND multi-list
+                        management — so the action-row Favorite
+                        button is gone. Keeping both was redundant
+                        and the header position is more discoverable
+                        for users coming in from any entry point. */}
                   </>
                 ))}
                 {/* History-page operations live in the modal so the
@@ -684,6 +920,67 @@ const RestaurantDetailModal = ({
                 )}
               </div>
             )}
+
+            {/* ── Insights opt-out ─────────────────────────────────
+                Per-entry toggle for the InsightsPage aggregation.
+                Visible only in history context (any of the history
+                operations is bound). Mirrors the HistoryRowKebab
+                action — same semantic ("does this place shape my
+                taste profile?") but with room here for the helper
+                copy that explains why a user might want to opt out.
+                The kebab path is the fast lane; this is the
+                discoverable, labeled lane. */}
+            {(onArchive || onUnarchive || onDelete) && (() => {
+              // Pulled inline (rather than at the top of the component)
+              // because the history-context branch is the only consumer
+              // and this keeps the section's logic colocated with its UI.
+              const acceptedRows = userInfo.accepted.filter(
+                (a) => String(a.restaurantId) === String(restaurantId),
+              );
+              if (acceptedRows.length === 0) return null;
+              const anyExcluded = acceptedRows.some((a) => a.excludeFromInsights);
+              const targets    = acceptedRows.filter((a) => a.id != null);
+              const canToggle  = targets.length > 0;
+              const handleFlip = () => {
+                const next = !anyExcluded;
+                for (const row of targets) {
+                  // Skip rows already in the target state — see
+                  // HistoryRowKebab for the same optimization.
+                  if (row.excludeFromInsights !== next) {
+                    dispatch(toggleAcceptedExcludeFromInsights({
+                      acceptedId: row.id,
+                      excludeFromInsights: next,
+                    }));
+                  }
+                }
+              };
+              return (
+                <div className="border-t border-gray-100 pt-3 mt-2">
+                  <label className="flex items-start gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      // Checked = "count in insights" (i.e. NOT excluded). The
+                      // semantic match between the box and the label matters —
+                      // a user reading "Count this in my insights" expects the
+                      // checkbox to mean "yes, count it."
+                      checked={!anyExcluded}
+                      onChange={handleFlip}
+                      disabled={!canToggle}
+                      className="mt-0.5 accent-orange-500 disabled:opacity-50"
+                    />
+                    <span>
+                      <span className="font-medium">Count this in my insights</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        Group and trip picks you didn’t choose yourself can be left
+                        out of your taste profile. Unchecking keeps this in your
+                        history but drops it from totals, cuisine trends, and the
+                        weekday heatmap.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              );
+            })()}
 
             {/* ── Recommend section (authenticated, write-mode only) ── */}
             {isAuthenticated && !isReadOnly && (
@@ -794,8 +1091,10 @@ const RestaurantDetailModal = ({
               </div>
             )}
 
-            {/* Reviews — tabbed: Yours / Community */}
-            <div className="border-t border-gray-100 pt-4">
+            {/* Reviews — tabbed: Yours / Community.
+                ref captured for the auto-scroll behavior triggered
+                by `defaultShowReviewForm` (see effect at top). */}
+            <div ref={reviewsSectionRef} className="border-t border-gray-100 pt-4">
 
               {/* Tab bar — Yours / Community. The previous "Google" tab
                   pulled review text directly from the Places API
@@ -1001,11 +1300,69 @@ const RestaurantDetailModal = ({
                 )}
               </div>
             )}
+
+            {/* Match-opt-out toggle. Shown only for custom rows
+                (no googlePlaceId) when the modal isn't read-only.
+                Lets users proactively silence the Place-match
+                scan for rows that will never have a Google
+                equivalent ("Cooking at home", "Office potluck").
+                Bidirectional — they can re-enable from the same
+                control. Optimistic — Redux mirror flips first,
+                API call rolls back on failure. */}
+            {!isReadOnly && r && !r.googlePlaceId && (
+              <div className="border-t border-gray-100 pt-4">
+                <label className="flex items-start gap-2 text-sm text-gray-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={r.excludeFromPlaceMatching === true}
+                    onChange={(e) => handleToggleMatchOptOut(e.target.checked)}
+                    disabled={matchToggleBusy}
+                    className="mt-0.5 h-4 w-4 rounded border-gray-300 text-orange-500 focus:ring-orange-400"
+                  />
+                  <span>
+                    Don't suggest Google matches for this restaurant
+                    <span className="block text-[11px] text-gray-400 mt-0.5">
+                      Useful for entries that won't have a Google listing (e.g. home cooking).
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
+    </>
+  );
+
+  // Inline mode: render as a flat panel sized by its grid cell.
+  // `h-full` fills the cell so 2-up / 2x2 grids land at equal
+  // heights; `overflow-hidden` clips the rounded corners on the
+  // photo gallery and contains the body's internal scroll.
+  if (inline) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm flex flex-col h-full overflow-hidden">
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <Dialog open onClose={onClose} className="relative z-50">
+      {/* Backdrop */}
+      <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
+
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="w-full max-w-lg rounded-xl bg-white shadow-xl flex flex-col max-h-[90vh]">
+          {body}
         </DialogPanel>
       </div>
     </Dialog>
   );
 };
+
+// Convenience export — same component in inline mode. Lets the
+// Compare page write `<RestaurantDetailPanel ... />` without having
+// to remember to thread `inline` through every call site.
+export const RestaurantDetailPanel = (props) => (
+  <RestaurantDetailModal {...props} inline />
+);
 
 export default RestaurantDetailModal;
