@@ -10,6 +10,7 @@ import {
   defaultList as selectDefaultList,
   readActiveListIds,
   writeActiveListIds,
+  pruneStaleListIds,
 } from "../utils/favoriteLists";
 import {
   setNearbyResults, setLocationInput, setRadiusMeters, setSearchCuisineType, clearNearby,
@@ -204,13 +205,34 @@ export default function SearchPage() {
   // user hasn't already made a selection this session. `null`
   // distinguishes "not yet initialized" (seed) from `[]` (user
   // explicitly cleared everything — leave it empty).
+  //
+  // Also prunes sessionStorage ids that don't match any of the
+  // currently-hydrated lists — defends against logout-then-login-as-
+  // different-account in the same tab leaving the previous account's
+  // list ids in sessionStorage. Without this, ListSelector would
+  // render "No matching lists" and the user would have to manually
+  // pick again to recover.
   useEffect(() => {
     if (activeListIds == null && defaultFavoriteList?.id) {
       const next = [defaultFavoriteList.id];
       setActiveListIdsState(next);
       writeActiveListIds('search', next);
+      return;
     }
-  }, [activeListIds, defaultFavoriteList?.id]);
+    if (Array.isArray(activeListIds) && allFavoriteLists.length > 0) {
+      const { pruned, changed } = pruneStaleListIds(activeListIds, allFavoriteLists);
+      if (changed) {
+        // If pruning emptied the selection, fall back to default-only.
+        // Otherwise honor whatever survived. Either way we write back
+        // so the next read sees the cleaned value.
+        const next = pruned.length === 0 && defaultFavoriteList?.id
+          ? [defaultFavoriteList.id]
+          : pruned;
+        setActiveListIdsState(next);
+        writeActiveListIds('search', next);
+      }
+    }
+  }, [activeListIds, defaultFavoriteList?.id, allFavoriteLists]);
 
   // Persist + flip in one helper so the ListSelector callback is
   // identity-stable across renders. The selector is a checkbox UI

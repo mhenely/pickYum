@@ -1,3 +1,5 @@
+import { MeIdentitySchema, MeDataSchema, SetAcceptedExcludeResponseSchema } from './api.schemas';
+
 const BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
 
 const GET_CACHE = new Map<string, { data: unknown; expiresAt: number }>();
@@ -88,6 +90,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+// Schema-validating variant of `request`. Same caching + invalidation
+// semantics, but parses the response through a zod schema and throws a
+// `ZodError` (with a usable error path) on any shape drift. Use this
+// for new endpoints; existing endpoints migrate when convenient.
+//
+// The schema enforces required fields + types but does NOT use
+// `.strict()` — additive shape changes (new optional fields) stay
+// forward-compatible. A future server can add `apiVersion: 3` with
+// new fields and old clients keep working.
+//
+// On parse failure the throw goes through the same code path as a 5xx
+// response — global error handlers / syncWithFeedback retry / Sentry
+// capture all still apply. Pino on the server, Sentry on the browser.
+async function requestParsed<T>(
+  path: string,
+  schema: import('zod').ZodType<T>,
+  init?: RequestInit,
+): Promise<T> {
+  const raw = await request<unknown>(path, init);
+  const result = schema.safeParse(raw);
+  if (!result.success) {
+    const err = new Error(
+      `[api] Response shape mismatch on ${path}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+    ) as Error & { status: number; path: string };
+    err.status = 502; // upstream contract failure
+    err.path = path;
+    throw err;
+  }
+  return result.data;
+}
+
 export interface AuthUser {
   id: number;
   email: string;
@@ -116,13 +149,23 @@ export interface ApiRestaurant {
   hours: string | null;
   phone: string | null;
   website: string | null;
-  yelpUrl: string | null;
+  // yelpUrl is no longer selected by the server (no UI consumes it
+  // — see server's RESTAURANT_CARD_SELECT). Kept on the interface as
+  // optional+nullable so a future server build that brings it back
+  // stays type-compatible without a coordinated client update. The
+  // zod schema mirrors this `.optional()`.
+  yelpUrl?: string | null;
   takeout: boolean;
   delivery: boolean;
   googleRating: string | null;
   // Number of Google ratings backing the average. Lets the UI show
   // "4.5 (800 ratings)". Null for custom rows or pre-rollout records.
   ratingCount: number | null;
+  // Free-form display address — set at create time from Google's
+  // formattedAddress (Place-backed rows) or from the user's input on
+  // custom create. Null when neither source provided one. Rendered in
+  // the detail modal contact grid and the Search card.
+  address: string | null;
   // Geo coords, captured at create time for Google-Place-backed rows or
   // back-filled by refresh-places. Null for custom user-typed entries.
   // Consumers (e.g. CompareMap) skip rows where either is null.
@@ -466,8 +509,12 @@ export const api = {
     // entries via the standard 3-segment prefix match (`/api/users/me`),
     // so the next InsightsPage visit refetches fresh aggregates.
     setAcceptedExcludeFromInsights: async (acceptedId: number, excludeFromInsights: boolean) => {
-      const result = await request<{ accepted: ApiAccepted }>(
+      // Schema-validated — surfaces a 502-class error if the server's
+      // response shape drifts from the documented contract. See
+      // api.schemas.ts for the zod definition.
+      const result = await requestParsed(
         `/api/users/me/accepted/${acceptedId}`,
+        SetAcceptedExcludeResponseSchema,
         { method: 'PATCH', body: JSON.stringify({ excludeFromInsights }) },
       );
       // The generic /api/users/me prefix sweep deliberately skips
@@ -515,6 +562,24 @@ export const api = {
         addresses:       SavedAddress[];
         favoriteLists:   ApiFavoriteList[];
       }>('/api/users/me/all'),
+
+    // ── Split endpoints (preferred — see also getAll's deprecation note) ──
+    // /me/identity is the FAST critical-path payload: user identity +
+    // defaultListId + favoriteIds for heart fills. Two cheap queries
+    // server-side; ~30ms p50. Fire this first; the app shell can render
+    // correctly the moment it returns.
+    //
+    // /me/data is the HEAVIER extended payload: everything else (full
+    // deduped restaurants, options, accepted history, archives, reviews,
+    // addresses, all favorite lists). Fire in parallel with /me/identity
+    // when the user lands on a page that needs collection data
+    // (Compare / Choose / History / Insights). The two are independent —
+    // History rendering doesn't need identity beyond what's already in
+    // Redux from checkAuth.
+    // Schema-validated. The TS shape comes from the zod inference so
+    // there's no chance of TS-vs-runtime drift here.
+    getIdentity: () => requestParsed('/api/users/me/identity', MeIdentitySchema),
+    getData:     () => requestParsed('/api/users/me/data',     MeDataSchema),
 
     // ── Multi-list favorites ────────────────────────────────────
     // Every authed account has at least one list (the default,

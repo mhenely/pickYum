@@ -31,6 +31,7 @@ import {
   defaultList as selectDefaultList,
   readActiveListIds,
   writeActiveListIds,
+  pruneStaleListIds,
 } from "../utils/favoriteLists";
 import "./HelpMeChoosePage.css";
 
@@ -81,13 +82,28 @@ const HelpMeChoosePage = () => {
   const allFavoriteLists    = useSelector(selectAllLists);
   const defaultFavoriteList = useSelector(selectDefaultList);
   const [activeListIds, setActiveListIdsState] = useState(() => readActiveListIds('choose'));
+  // Seed the selection to [defaultId] on first hydrate AND prune any
+  // stale sessionStorage ids that don't match the current user's lists.
+  // Same logic as SearchPage / Compare's identical effects — see
+  // utils/favoriteLists.js → pruneStaleListIds for the full rationale.
   useEffect(() => {
     if (activeListIds == null && defaultFavoriteList?.id) {
       const next = [defaultFavoriteList.id];
       setActiveListIdsState(next);
       writeActiveListIds('choose', next);
+      return;
     }
-  }, [activeListIds, defaultFavoriteList?.id]);
+    if (Array.isArray(activeListIds) && allFavoriteLists.length > 0) {
+      const { pruned, changed } = pruneStaleListIds(activeListIds, allFavoriteLists);
+      if (changed) {
+        const next = pruned.length === 0 && defaultFavoriteList?.id
+          ? [defaultFavoriteList.id]
+          : pruned;
+        setActiveListIdsState(next);
+        writeActiveListIds('choose', next);
+      }
+    }
+  }, [activeListIds, defaultFavoriteList?.id, allFavoriteLists]);
   const setActiveListIds = useCallback((next) => {
     setActiveListIdsState(next);
     writeActiveListIds('choose', next);
@@ -106,7 +122,7 @@ const HelpMeChoosePage = () => {
 
   // Resolve the favorites collection as the deduped UNION of every
   // selected list's entries. Pre-hydrate (activeListIds null) we
-  // fall back to the legacy users[0].favorites array so the strip
+  // fall back to the legacy `user.favorites` array so the strip
   // never blanks during initial load.
   const favorites = useMemo(() => {
     let base;
@@ -817,7 +833,24 @@ const HelpMeChoosePage = () => {
               </p>
             )}
 
-            <div className="flex flex-wrap gap-3">
+            {/* Horizontal scroller — shows exactly 3 cards at a time
+                regardless of how many options the user has. Replaces
+                the previous flex-wrap multi-row layout, which grew the
+                page unbounded as the options list got long.
+                Each card's width is calc((100% - 2×gap) / 3) so three
+                cards plus the two gaps between them fill the container
+                exactly. `flex-shrink-0` prevents cards from compressing
+                to fit more in view; `scroll-snap-align: start` lands
+                scroll positions on a card boundary instead of mid-card,
+                which is more readable when paging through a long list.
+                The CSS is inline (style={...}) rather than Tailwind
+                because Tailwind's arbitrary-value syntax for calc()
+                with a `100%` operand needs escaping that's noisier
+                than a 1-line style prop. */}
+            <div
+              className="flex flex-row gap-3 overflow-x-auto overscroll-x-contain pb-2"
+              style={{ scrollSnapType: 'x proximity' }}
+            >
               {options.map((id) => {
                 const rating    = getUserRating(reviews, id);
                 const badge     = sid(headsId) === sid(id) ? "heads" : sid(tailsId) === sid(id) ? "tails" : null;
@@ -828,16 +861,32 @@ const HelpMeChoosePage = () => {
                 return (
                   <div
                     key={id}
-                    // flex column makes the wrapper a flex item with stretched
-                    // height in its row, and h-full on the inner card fills it
-                    // — keeps cards in the same row aligned to the tallest.
-                    // Wider min/max than the legacy sm-card layout —
-                    // md cards include a photo carousel and richer
-                    // contact rows, so a 140px column was too cramped.
-                    // 220-260px gives the photo a sensible aspect
-                    // ratio (~h-32 photo / w-220 = 1.7) and still
-                    // packs 4-5 across at desktop widths.
-                    style={{ minWidth: "220px", maxWidth: "260px" }}
+                    // Viewport-aware width:
+                    //   max(220px, calc((100% - 1.5rem) / 3))
+                    //
+                    // The 1/3 calc gives "3 cards visible" whenever the
+                    // container is wide enough to honor it (~660px+ —
+                    // any desktop or large tablet). On narrower
+                    // viewports the 220px floor kicks in instead, so
+                    // cards stay legible (with photos / contact rows
+                    // intact) and the user scrolls to reach the rest.
+                    //
+                    // `max()` (not `clamp()`) means there's no upper
+                    // bound — on extra-wide containers the calc grows
+                    // proportionally and we still see exactly 3 cards
+                    // per row. A `clamp(..., 320px)` would cap card
+                    // width and let 4+ cards squeeze into view on wide
+                    // screens, breaking the "3 visible" intent.
+                    //
+                    // `flex-shrink: 0` keeps cards at this exact width
+                    // — without it the flex container would compress
+                    // them to fit everything in view. `scroll-snap-
+                    // align: start` lands scroll positions on a card
+                    // boundary instead of mid-card.
+                    style={{
+                      flex: '0 0 max(220px, calc((100% - 1.5rem) / 3))',
+                      scrollSnapAlign: 'start',
+                    }}
                     className="flex flex-col"
                     onDragOver={!isTouchDevice ? (e) => handleDragOver(e, id) : undefined}
                     onDragLeave={!isTouchDevice ? handleDragLeave : undefined}

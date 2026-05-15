@@ -18,6 +18,7 @@ import {
   loadUserData,
 } from './slices/userInfoSlice';
 import { checkAuth, loginUser, registerUser, logoutUser } from './slices/authSlice';
+import { syncWithFeedback } from './syncHelper';
 
 export const listenerMiddleware = createListenerMiddleware();
 
@@ -26,7 +27,11 @@ const listen = listenerMiddleware.startListening as AppStartListening;
 
 // Custom restaurant IDs are local-only (e.g. "custom-1234567890") and have no
 // corresponding DB row. Skip API calls for anything that isn't a plain integer.
-const isDbId = (id: unknown): boolean => Number.isInteger(Number(id)) && Number(id) > 0;
+// `isDbId` is centralized in utils/resourceId.ts — this file used to inline
+// the same predicate, but the dichotomy is needed in enough places (and
+// gets a follow-up complement `isLocalId`) that lifting it to a shared
+// helper made sense. See TIER_2_3_PLAN.md #11.
+import { isDbId } from '../utils/resourceId';
 
 // Helper accepts anything with a getState() — keeps tests cheap to mock.
 const isGuest = (listenerApi: { getState: () => RootState }): boolean =>
@@ -99,10 +104,21 @@ listen({
   },
 });
 
+// ── Background sync listeners ─────────────────────────────────
+// Every effect below routes through `syncWithFeedback` instead of the
+// old `try { ... } catch (err) { console.error(...) }` pattern. That
+// gives every mutation: retry on transient errors, Sentry capture on
+// final failure, and a visible toast surface (see <Toaster>) so the
+// user knows when their action didn't actually persist.
+//
+// `silent: true` is used only for telemetry-style writes where the
+// user doesn't care about the result (flip-count increment). Everything
+// the user "did" (favorite, accept, remove, archive) surfaces a toast.
+
 // Favorites toggle. The action originates from the heart icon
 // (now `<HeartWithKebab>`) and toggles the user's DEFAULT FavoriteList
 // membership server-side. The Redux reducer has already updated
-// `users[0].favorites` for legacy consumers AND mirrored the entry
+// `user.favorites` for legacy consumers AND mirrored the entry
 // into `favoriteLists.byId[defaultId]`, so the listener's job is
 // purely to persist the change.
 //
@@ -125,7 +141,7 @@ listen({
     const { restaurantId } = action.payload;
     if (!isDbId(restaurantId)) return;
     const prevState = listenerApi.getOriginalState();
-    const wasFavorited = prevState.userInfo.users[0].favorites
+    const wasFavorited = prevState.userInfo.user.favorites
       .map(String)
       .includes(String(restaurantId));
     if (!wasFavorited) {
@@ -134,21 +150,25 @@ listen({
     }
     const defaultId = listenerApi.getState().userInfo.favoriteLists?.defaultId ?? null;
     const numericId = Number(restaurantId);
-    try {
-      if (defaultId) {
-        if (wasFavorited) {
-          await api.users.removeFavoriteListEntry(defaultId, numericId);
+    await syncWithFeedback(listenerApi, {
+      label: wasFavorited ? 'Removing from favorites' : 'Adding to favorites',
+      context: { feature: 'favorites', action: wasFavorited ? 'remove' : 'add', restaurantId: numericId },
+      call: async () => {
+        if (defaultId) {
+          if (wasFavorited) await api.users.removeFavoriteListEntry(defaultId, numericId);
+          else              await api.users.addFavoriteListEntry(defaultId, { restaurantId: numericId });
+        } else if (wasFavorited) {
+          await api.users.removeFavorite(numericId);
         } else {
-          await api.users.addFavoriteListEntry(defaultId, { restaurantId: numericId });
+          await api.users.addFavorite(numericId);
         }
-      } else if (wasFavorited) {
-        await api.users.removeFavorite(numericId);
-      } else {
-        await api.users.addFavorite(numericId);
-      }
-    } catch (err) {
-      console.error('Failed to sync favorite:', err);
-    }
+      },
+      // No rollback here yet: heart toggle is symmetric, and the user
+      // can click again to re-toggle if the error toast surfaces. A
+      // future enhancement would dispatch updateUserFavorites again on
+      // rollback, but that fires the same listener and risks a loop —
+      // safer to leave manual.
+    });
   },
 });
 
@@ -160,11 +180,11 @@ listen({
     if (!isDbId(action.payload)) return;
     const state = listenerApi.getState();
     if (!state.userInfo.customRestaurants[String(action.payload)]) return;
-    try {
-      await api.users.addOption(Number(action.payload));
-    } catch (err) {
-      console.error('Failed to sync option add:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Adding to selections',
+      context: { feature: 'options', action: 'add', restaurantId: Number(action.payload) },
+      call: () => api.users.addOption(Number(action.payload)),
+    });
   },
 });
 listen({
@@ -172,11 +192,11 @@ listen({
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
     if (!isDbId(action.payload)) return;
-    try {
-      await api.users.removeOption(Number(action.payload));
-    } catch (err) {
-      console.error('Failed to sync option remove:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Removing from selections',
+      context: { feature: 'options', action: 'remove', restaurantId: Number(action.payload) },
+      call: () => api.users.removeOption(Number(action.payload)),
+    });
   },
 });
 
@@ -192,18 +212,18 @@ listen({
     const { restaurantId, optionsSnapshot, chooseMethod, _serverHandled } = action.payload;
     if (_serverHandled) return;
     if (!isDbId(restaurantId)) return;
-    try {
-      const { accepted } = await api.users.addAccepted(
-        Number(restaurantId),
-        { optionsSnapshot, chooseMethod },
-      );
-      // Backfill the server row id onto the optimistic local entry so
-      // the InsightsPage toggle can target this row without waiting for
-      // the next /me/all refresh. Skipped on POST failure (catch below).
-      listenerApi.dispatch(reconcileAcceptedRowId({ restaurantId, id: accepted.id }));
-    } catch (err) {
-      console.error('Failed to sync accepted:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Recording your pick',
+      context: { feature: 'accepted', restaurantId: Number(restaurantId), chooseMethod: chooseMethod ?? 'none' },
+      call: () => api.users.addAccepted(Number(restaurantId), { optionsSnapshot, chooseMethod }),
+      onSuccess: ({ accepted }) => {
+        // Backfill the server row id onto the optimistic local entry so
+        // the InsightsPage toggle can target this row without waiting for
+        // the next /me/all refresh. Only fires on success — failed POSTs
+        // leave the optimistic entry with id=null until /me/all reconciles.
+        listenerApi.dispatch(reconcileAcceptedRowId({ restaurantId, id: accepted.id }));
+      },
+    });
   },
 });
 
@@ -215,11 +235,11 @@ listen({
     const { id } = action.payload as { id: number | string };
     // Local-only ids (from guest mode that later signed in) have no server row to delete.
     if (typeof id !== 'number') return;
-    try {
-      await api.users.deleteReview(id);
-    } catch (err) {
-      console.error('Failed to sync review delete:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Deleting review',
+      context: { feature: 'reviews', action: 'delete', reviewId: id },
+      call: () => api.users.deleteReview(id),
+    });
   },
 });
 
@@ -229,11 +249,11 @@ listen({
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
     if (!isDbId(action.payload)) return;
-    try {
-      await api.users.removeFromHistory(Number(action.payload));
-    } catch (err) {
-      console.error('Failed to sync history remove:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Removing from history',
+      context: { feature: 'history', action: 'remove', restaurantId: Number(action.payload) },
+      call: () => api.users.removeFromHistory(Number(action.payload)),
+    });
   },
 });
 
@@ -242,17 +262,40 @@ listen({
   actionCreator: updateUserInfo,
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
-    const { username, email, password } = action.payload;
+    // The slice's payload type is `Partial<UserState> & Record<string, unknown>`
+    // so it tolerates ad-hoc fields. We narrow each field to string here
+    // before forwarding — anything non-string is silently ignored.
+    const payload = action.payload as Record<string, unknown>;
+    const username = typeof payload.username === 'string' ? payload.username : '';
+    const email    = typeof payload.email    === 'string' ? payload.email    : '';
+    const password = typeof payload.password === 'string' ? payload.password : '';
     if (!username && !email && !password) return;
-    try {
-      await api.users.updateProfile({
-        ...(username && { username }),
-        ...(email && { email }),
-        ...(password && { password }),
-      });
-    } catch (err) {
-      console.error('Failed to sync profile update:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      // Profile changes are the most user-visible mutation — a
+      // misleading toast here ("saved!" when it failed) would be
+      // particularly bad. syncWithFeedback only emits success after
+      // the API resolves, so the user never sees a green check on a
+      // failed update.
+      label: 'Saving profile',
+      context: {
+        feature: 'profile',
+        fieldsChanged: [username && 'username', email && 'email', password && 'password']
+          .filter(Boolean)
+          .join(','),
+      },
+      call: () => {
+        // Build the payload as a typed object literal instead of
+        // spreading conditionals. The previous shape used
+        // `...(field && { field })`, which is fragile under TS — an
+        // empty string short-circuits to "" (illegal as a spread
+        // source) and the ternary fallback narrows too aggressively.
+        const body: { username?: string; email?: string; password?: string } = {};
+        if (username) body.username = username;
+        if (email)    body.email    = email;
+        if (password) body.password = password;
+        return api.users.updateProfile(body);
+      },
+    });
   },
 });
 
@@ -264,11 +307,11 @@ listen({
     if (!isDbId(action.payload)) return;
     const state = listenerApi.getState();
     if (!state.userInfo.customRestaurants[String(action.payload)]) return;
-    try {
-      await api.users.archiveRestaurant(Number(action.payload));
-    } catch (err) {
-      console.error('Failed to sync archive:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Archiving',
+      context: { feature: 'archive', action: 'add', restaurantId: Number(action.payload) },
+      call: () => api.users.archiveRestaurant(Number(action.payload)),
+    });
   },
 });
 listen({
@@ -276,23 +319,28 @@ listen({
   effect: async (action, listenerApi) => {
     if (isGuest(listenerApi)) return;
     if (!isDbId(action.payload)) return;
-    try {
-      await api.users.unarchiveRestaurant(Number(action.payload));
-    } catch (err) {
-      console.error('Failed to sync unarchive:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Restoring',
+      context: { feature: 'archive', action: 'remove', restaurantId: Number(action.payload) },
+      call: () => api.users.unarchiveRestaurant(Number(action.payload)),
+    });
   },
 });
 
-// Flip / spin counter
+// Flip / spin counter. Telemetry-style write — the user has already
+// seen the coin land; a failed increment is invisible to them and
+// doesn't change anything they care about. `silent: true` skips the
+// toast push but keeps Sentry capture so we can see if these start
+// failing at unusual rates.
 listen({
   actionCreator: incrementFlipCount,
   effect: async (_action, listenerApi) => {
     if (isGuest(listenerApi)) return;
-    try {
-      await api.users.recordFlip();
-    } catch (err) {
-      console.error('Failed to sync flip count:', err);
-    }
+    await syncWithFeedback(listenerApi, {
+      label: 'Recording flip',
+      silent: true,
+      context: { feature: 'flipCount' },
+      call: () => api.users.recordFlip(),
+    });
   },
 });

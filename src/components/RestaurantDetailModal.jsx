@@ -1,119 +1,22 @@
 import { useState, useEffect, useRef } from 'react';
 import { Dialog, DialogPanel } from '@headlessui/react';
-import { XMarkIcon, ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon } from '@heroicons/react/24/outline';
 import { useDispatch, useSelector } from 'react-redux';
 import { addUserOption, removeUserOption, setRestaurantNote, persistAddReview, removeUserReview, addUserAcceptance, setMatchOptOut, updateCustomRestaurant, toggleAcceptedExcludeFromInsights } from '../redux/slices/userInfoSlice';
 import { showChosenCelebration } from '../redux/slices/celebrationSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
 import InfoRow from './InfoRow';
 import HeartWithKebab from './HeartWithKebab';
+import RestaurantPhotoGallery from './RestaurantPhotoGallery';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import { googleMapsUrl } from '../utils/googleMapsUrl';
 import { getOpenStatus, formatLocalTime } from '../utils/openingHours';
 import { socialApi } from '../lib/socialApi';
-import { api, placePhotoUrl } from '../lib/api';
+import { api } from '../lib/api';
 
 const sid = (id) => String(id);
 const mean = (nums) => nums.reduce((a, b) => a + b, 0) / nums.length;
-
-// ── Photo gallery (hero + arrow nav + thumbnail strip) ──────────────────
-// First photo renders as a hero (~h-48); remaining photos sit below in a
-// thumbnail row. Two ways to flip through: clicking a thumb, or the
-// prev/next chevron buttons that overlay the hero (only shown when
-// there's more than one photo). State is local so the gallery resets
-// to the first photo each time the modal reopens. All photos go
-// through our /api/places/photo proxy so the Google API key stays
-// server-side. Index wraps in both directions for a "carousel" feel —
-// pressing next from the last photo lands on the first.
-function PhotoGallery({ photos, restaurantName }) {
-  const [active, setActive] = useState(0);
-  // Defensive — `photos[active]?.name` is the proxy URL input. If a
-  // photo entry is missing `name` somehow, skip it so we never call the
-  // proxy with an invalid value.
-  const valid = photos.filter((p) => p?.name);
-  if (valid.length === 0) return null;
-  const safeActive = Math.min(active, valid.length - 1);
-  const hero = valid[safeActive];
-  const hasMultiple = valid.length > 1;
-
-  const prev = () => setActive((i) => (i - 1 + valid.length) % valid.length);
-  const next = () => setActive((i) => (i + 1) % valid.length);
-
-  return (
-    <div className="rounded-t-xl overflow-hidden">
-      <div className="relative h-48 bg-gray-100">
-        <img
-          key={hero.name}
-          src={placePhotoUrl(hero, 1200)}
-          alt={restaurantName}
-          loading="lazy"
-          className="absolute inset-0 h-full w-full object-cover"
-          onError={(e) => { e.currentTarget.style.display = 'none'; }}
-        />
-        {hasMultiple && (
-          <>
-            {/* Prev / next chevrons — fixed-position overlay, semi-
-                transparent so the photo shows through. type="button"
-                so they don't accidentally submit any parent form
-                (the modal isn't a form today, but defensive). */}
-            <button
-              type="button"
-              onClick={prev}
-              aria-label="Previous photo"
-              className="absolute left-2 top-1/2 -translate-y-1/2 h-8 w-8 flex items-center justify-center rounded-full bg-black/40 text-white hover:bg-black/60 transition-colors"
-            >
-              <ChevronLeftIcon className="h-5 w-5" />
-            </button>
-            <button
-              type="button"
-              onClick={next}
-              aria-label="Next photo"
-              className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 flex items-center justify-center rounded-full bg-black/40 text-white hover:bg-black/60 transition-colors"
-            >
-              <ChevronRightIcon className="h-5 w-5" />
-            </button>
-            {/* Position counter — "3 / 5" in the top-right corner.
-                Helps users know how many photos are in the carousel
-                without having to scan the thumbnail strip. Lives in
-                the TOP-right (not bottom) because the thumbnail
-                strip below the hero butts right up against the
-                hero's bottom edge, leaving no visual breathing room
-                for a bottom-right chip — it ended up looking like
-                it was sitting ON the thumbnails. Top-right is also
-                a more conventional spot for photo counters
-                (matches Google Maps / Instagram / Airbnb). */}
-            <span className="absolute top-2 right-2 rounded-full bg-black/50 px-2 py-0.5 text-[10px] font-medium text-white tabular-nums">
-              {safeActive + 1} / {valid.length}
-            </span>
-          </>
-        )}
-      </div>
-      {hasMultiple && (
-        <div className="flex gap-1 p-2 bg-gray-50 overflow-x-auto">
-          {valid.slice(0, 5).map((ph, i) => (
-            <button
-              key={ph.name}
-              type="button"
-              onClick={() => setActive(i)}
-              className={`relative h-14 w-20 shrink-0 overflow-hidden rounded transition-all ${
-                i === safeActive ? 'ring-2 ring-orange-500' : 'opacity-80 hover:opacity-100'
-              }`}
-            >
-              <img
-                src={placePhotoUrl(ph, 200)}
-                alt=""
-                loading="lazy"
-                className="absolute inset-0 h-full w-full object-cover"
-                onError={(e) => { e.currentTarget.style.display = 'none'; }}
-              />
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ── Rating chip (Google / Yours / Community) ────────────────────────────
 // One inline group: "Google ★ 4.5 (800)". All three sources sit in a
@@ -625,7 +528,7 @@ const RestaurantDetailModal = ({
               swaps the hero on click. State is local to the modal
               so reopening defaults back to the first photo. */}
           {Array.isArray(r.photos) && r.photos.length > 0 && r.photos[0]?.name && (
-            <PhotoGallery photos={r.photos} restaurantName={r.name} />
+            <RestaurantPhotoGallery photos={r.photos} restaurantName={r.name} />
           )}
 
           {/* ── Header — name + cuisine + price ──────────────────

@@ -41,6 +41,15 @@ model User {
   // 'support', 'readOnly') doesn't require a migration — values
   // outside the known set are treated as 'user' by `requireAdmin`.
   role            String    @default("user") @db.VarChar(16)
+  // Failed-login throttling counter — incremented by /auth/login on a
+  // password mismatch, reset to 0 on successful login. When this hits
+  // FAILED_LOGIN_LIMIT, `failedLoginLockedUntil` is set and the route
+  // refuses authentication attempts (even with a correct password)
+  // until the lockout window passes. Independent from the IP-based
+  // rate limiter — defends against credential-stuffing botnets that
+  // distribute attempts across many IPs.
+  failedLoginCount        Int       @default(0) @map("failed_login_count")
+  failedLoginLockedUntil  DateTime? @map("failed_login_locked_until")
   // User's preferred starting location for nearby restaurant searches.
   createdAt       DateTime  @default(now()) @map("created_at")
 
@@ -826,4 +835,49 @@ model FavoriteListEntry {
   @@id([listId, restaurantId])
   @@index([restaurantId])
   @@map("favorite_list_entries")
+}
+
+// Append-only log of security- and admin-relevant events. Written by
+// auth.ts on successful login / lockout / password reset, and by
+// any future admin action handlers. Read-only from the application —
+// rotation/retention is handled out-of-band (a future cron will
+// archive rows older than 90 days).
+//
+// `actorUserId` is the user who performed the action (or was acted
+// upon for system-driven events like "account locked"). Nullable for
+// pre-authentication events ("login attempt for unknown email").
+// `targetUserId` is the user the action affected, when distinct from
+// the actor (e.g. an admin disabling someone). Nullable in solo flows.
+//
+// `kind` is a free-form string rather than a Prisma enum — adding a
+// new event type doesn't need a migration. Known kinds, lowercased:
+//   - 'login.success'
+//   - 'login.failure'
+//   - 'login.locked'         (account just hit the lockout threshold)
+//   - 'login.locked-attempt' (login attempted while still locked)
+//   - 'password.reset'
+//   - 'password.changed'
+//   - 'email.verified'
+//   - 'admin.action'         (any admin-only mutation; details in metadata)
+//
+// `metadata` is a small JSON column for kind-specific context (IP,
+// user-agent fragment, target resource id). Don't put sensitive data
+// here — the audit log is meant to be shareable with support.
+model AuditLog {
+  id           Int      @id @default(autoincrement())
+  kind         String   @db.VarChar(64)
+  actorUserId  Int?     @map("actor_user_id")
+  targetUserId Int?     @map("target_user_id")
+  // IP captured at write time. Indexed in case we need to scan for
+  // "all attempts from IP X" during an incident. Not foreign-keyed
+  // since it's free-form (IPv4 or IPv6 string).
+  ip           String?  @db.VarChar(45)
+  metadata     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([actorUserId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@index([kind, createdAt])
+  @@index([ip, createdAt])
+  @@map("audit_log")
 }

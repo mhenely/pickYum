@@ -66,6 +66,115 @@ describe('POST /api/users/me/flip', () => {
   });
 });
 
+// ── Split bootstrap endpoints ────────────────────────────────
+// /me/identity + /me/data replace /me/all (which is now a deprecated alias).
+// Identity is the fast critical-path (user + favoriteIds + defaultListId);
+// data is everything else. Modern client fires both in parallel; old
+// clients still get /me/all as a back-compat shim.
+
+describe('GET /api/users/me/identity', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).get('/api/users/me/identity');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns the user identity + defaultListId + favoriteIds', async () => {
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: 1, email: 'a@b.c', username: 'alice', flipCount: 7,
+      avatarUrl: null, role: 'user', emailVerified: true,
+    });
+    (mockPrisma.favoriteList.findFirst as jest.Mock).mockResolvedValue({
+      id: 42, entries: [{ restaurantId: 10 }, { restaurantId: 11 }],
+    });
+
+    const res = await request(buildApp())
+      .get('/api/users/me/identity')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({ id: 1, username: 'alice', flipCount: 7 });
+    expect(res.body.defaultListId).toBe(42);
+    expect(res.body.favoriteIds).toEqual([10, 11]);
+  });
+
+  it('creates a default list when none exists (bootstrap)', async () => {
+    // A legacy account (or a freshly-deleted-everything case) should
+    // still get a valid defaultListId — ensureDefaultFavoriteList runs.
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: 2, email: 'b@c.d', username: 'bob', flipCount: 0,
+      avatarUrl: null, role: 'user', emailVerified: false,
+    });
+    (mockPrisma.favoriteList.findFirst as jest.Mock)
+      .mockResolvedValueOnce(null) // none exists initially
+      .mockResolvedValueOnce({ id: 99, isDefault: true, userId: 2, name: 'My Favorites' }); // ensureDefault's lookup
+    (mockPrisma.favoriteList.create as jest.Mock).mockResolvedValue({ id: 99 });
+
+    const res = await request(buildApp())
+      .get('/api/users/me/identity')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.defaultListId).toBeGreaterThan(0);
+    expect(res.body.favoriteIds).toEqual([]);
+  });
+
+  it('returns 404 when the user row vanishes mid-flight', async () => {
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.favoriteList.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/identity')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /api/users/me/data', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).get('/api/users/me/data');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns the extended payload (restaurants + all collections)', async () => {
+    // Shared fixtures for every collection query the route fires.
+    (mockPrisma.userFavorite.findMany   as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userOption.findMany     as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userAccepted.findMany   as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userArchive.findMany    as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.review.findMany         as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.savedAddress.findMany   as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.favoriteList.findMany   as jest.Mock).mockResolvedValue([
+      { id: 1, userId: 1, groupId: null, name: 'My Favorites', description: null,
+        color: null, isDefault: true, position: 0, createdAt: new Date(),
+        entries: [] },
+    ]);
+    (mockPrisma.restaurant.findMany     as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/data')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.apiVersion).toBe(2);
+    expect(res.body).toHaveProperty('restaurants');
+    expect(res.body).toHaveProperty('favoriteIds');
+    expect(res.body).toHaveProperty('optionIds');
+    expect(res.body).toHaveProperty('archivedIds');
+    expect(res.body).toHaveProperty('acceptedEntries');
+    expect(res.body).toHaveProperty('reviews');
+    expect(res.body).toHaveProperty('addresses');
+    expect(res.body).toHaveProperty('favoriteLists');
+    // Does NOT include identity fields — those live on /me/identity.
+    expect(res.body).not.toHaveProperty('user');
+    expect(res.body).not.toHaveProperty('email');
+  });
+});
+
 describe('POST /api/users/me/favorites/:restaurantId', () => {
   it('returns 401 without auth', async () => {
     const res = await request(buildApp()).post('/api/users/me/favorites/1');
@@ -844,7 +953,12 @@ describe('GET /api/users/me/insights', () => {
     expect(args.where.acceptedAt.gte).toBeInstanceOf(Date);
   });
 
-  it('ignores unknown `since` values and falls back to all-time', async () => {
+  it('ignores unknown `since` values and falls back to the all-time cap', async () => {
+    // Previously this test asserted "no acceptedAt filter applied" because
+    // the route used an unbounded all-time query. The route now caps all-
+    // time at 5 years (INSIGHTS_ALL_TIME_CAP_DAYS — see TIER_2_3_PLAN.md
+    // #12). Unknown `since` values fall through to the same cap, so the
+    // filter IS applied — just with a 5-year window.
     (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
 
     const res = await request(buildApp())
@@ -853,9 +967,13 @@ describe('GET /api/users/me/insights', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.since).toBe('bogus'); // echoed back as-is — no harm
-    // No acceptedAt filter applied since the value didn't match a known window
     const args = (mockPrisma.userAccepted.findMany as jest.Mock).mock.calls[0][0];
-    expect(args.where.acceptedAt).toBeUndefined();
+    expect(args.where.acceptedAt).toBeDefined();
+    expect(args.where.acceptedAt.gte).toBeInstanceOf(Date);
+    // Verify the cap is roughly 5 years back, not a tighter window.
+    const ms = Date.now() - (args.where.acceptedAt.gte as Date).getTime();
+    expect(ms).toBeGreaterThan(4 * 365 * 24 * 60 * 60 * 1000);
+    expect(ms).toBeLessThan(6 * 365 * 24 * 60 * 60 * 1000);
   });
 
   it('computes varietyScore as distinctChosen / totalDecisions × 10', async () => {

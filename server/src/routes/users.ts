@@ -356,50 +356,115 @@ const RESTAURANT_CARD_SELECT = {
 //        all client surfaces read from favoriteLists.
 const ME_ALL_API_VERSION = 2;
 
-router.get('/me/all', async (req: Request, res: Response) => {
-  // Five thin ID-only fetches + one batched restaurant lookup. Replaces
-  // the previous shape that joined the full Restaurant onto each
-  // collection row — that shipped the same restaurant data N times for
-  // any row appearing in two collections, AND silently dropped any
-  // "accepted-only" restaurants because the accepted query was thin
-  // (no join). The deduped shape solves both at once and is the right
-  // mobile-friendly contract for the upcoming mobile client.
-  //
-  // favoriteListRows added in apiVersion=2: each row carries its
-  // entries inline. Backfill migration guarantees every user with
-  // prior favorites has a default list; defensive ensureDefault
-  // below covers the edge case where neither path created one.
+// GET /me/identity — fast critical-path bootstrap.
+//
+// Returns just enough for the app shell to render correctly:
+//   - User identity (id, email, username, flipCount, avatarUrl, role,
+//     emailVerified) for the nav + profile menu.
+//   - defaultListId + favoriteIds so the heart icons on every card
+//     render with the right fill state before the heavier /me/data
+//     fetch lands.
+//
+// Two cheap queries vs. /me/all's seven-parallel + dedup-restaurants
+// batch. Lets the client paint the home/search/compare pages with
+// correct identity + favorite state in ~30ms, while History / Insights
+// / "everything else" data streams in via /me/data in parallel.
+//
+// Why this isn't just a subset of /me/all: the perf win comes from
+// NOT awaiting the slow queries (full restaurant lookup, all favorite
+// list entries, accepted history) before responding. A user reading
+// the search page doesn't care about their accepted history; serving
+// it on every initial pageload is the cost we're removing.
+router.get('/me/identity', async (req: Request, res: Response) => {
+  const [user, defaultList] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: req.userId },
+      select: {
+        id: true, email: true, username: true, flipCount: true,
+        avatarUrl: true, role: true, emailVerified: true,
+      },
+    }),
+    // Default list + its entries. The heart-fill state needs the entries;
+    // everything else about the list (color, position, etc.) ships with
+    // /me/data when the rest of the multi-list UI loads.
+    prisma.favoriteList.findFirst({
+      where: { userId: req.userId, isDefault: true },
+      select: {
+        id: true,
+        entries: { select: { restaurantId: true }, orderBy: { addedAt: 'desc' } },
+      },
+    }),
+  ]);
+
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  // Defensive bootstrap mirroring /me/all's path: if no default list
+  // exists (legacy or freshly-deleted-everything), create one so the
+  // heart icons have a valid target list.
+  let defaultListId: number | null = defaultList?.id ?? null;
+  let favoriteIds: number[] = defaultList?.entries.map((e) => e.restaurantId) ?? [];
+  if (!defaultListId) {
+    // ensureDefaultFavoriteList returns the list id (number) — see the
+    // helper in lib/favoriteLists.ts. A freshly-created default list has
+    // no entries yet, so favoriteIds stays [].
+    defaultListId = await ensureDefaultFavoriteList(req.userId);
+    favoriteIds = [];
+  }
+
+  res.json({
+    apiVersion: 1,
+    user,
+    defaultListId,
+    favoriteIds,
+  });
+});
+
+// GET /me/data — extended payload (everything except identity).
+//
+// Carries the heavier data the app eventually needs but can defer past
+// the initial render: full deduped restaurants[], all favorite lists,
+// options, accepted history, archives, reviews, addresses. Fired in
+// parallel with /me/identity by modern clients.
+//
+// Response shape mirrors /me/all minus the identity fields, so the
+// JSON nesting and field names stay stable across both — anything that
+// reads from /me/all's response can read from this without remapping.
+router.get('/me/data', async (req: Request, res: Response) => {
+  const data = await fetchUserDataPayload(req.userId);
+  res.json(data);
+});
+
+// Shared helper used by /me/data and (for backward compat) /me/all.
+// Kept as a function rather than inlined twice so the two endpoints
+// can't drift on field shape. /me/all merges the identity payload on
+// top of this; /me/data returns this verbatim.
+async function fetchUserDataPayload(userId: number) {
   const [favRows, optRows, accRows, arcRows, revRows, addrRows, favListRows] = await Promise.all([
     prisma.userFavorite.findMany({
-      where: { userId: req.userId },
+      where: { userId },
       select: { restaurantId: true },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.userOption.findMany({
-      where: { userId: req.userId },
+      where: { userId },
       select: { restaurantId: true },
       orderBy: { createdAt: 'asc' },
     }),
     prisma.userAccepted.findMany({
-      where: { userId: req.userId },
-      // `id` + `excludeFromInsights` ship with each row so the client
-      // can target a specific acceptance with PATCH /me/accepted/:id
-      // and render the "off-the-record" badge in History without a
-      // second roundtrip. Pre-rollout rows default to false (NOT NULL
-      // with a `false` default), so existing clients reading the
-      // expanded shape see the same insights behavior they had before.
+      where: { userId },
       select: { id: true, restaurantId: true, acceptedAt: true, excludeFromInsights: true },
       orderBy: { acceptedAt: 'desc' },
     }),
     prisma.userArchive.findMany({
-      where: { userId: req.userId },
+      where: { userId },
       select: { restaurantId: true },
       orderBy: { createdAt: 'desc' },
     }),
     prisma.review.findMany({
-      where: { userId: req.userId },
-      // No nested restaurant — the client joins by restaurantId
-      // against the deduped restaurants array below.
+      where: { userId },
       select: {
         id: true,
         content: true,
@@ -409,41 +474,27 @@ router.get('/me/all', async (req: Request, res: Response) => {
       },
       orderBy: { createdAt: 'desc' },
     }),
-    // Address book — same ordering as the dedicated /me/addresses
-    // endpoint so the Search-page dropdown gets the default first.
     prisma.savedAddress.findMany({
-      where: { userId: req.userId },
+      where: { userId },
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     }),
-    // Multi-list favorites. Ordered by position so the client gets a
-    // stable display order without a second pass; entries are
-    // ordered most-recent-first inside the LIST_WITH_ENTRIES_SELECT.
     prisma.favoriteList.findMany({
-      where: { userId: req.userId },
+      where: { userId },
       orderBy: { position: 'asc' },
       select: LIST_WITH_ENTRIES_SELECT,
     }),
   ]);
 
-  // Defensive bootstrap: a user with zero lists (legacy account or
-  // a freshly-deleted-everything case) gets a default created here
-  // so the client never sees a list-less account. Common path is
-  // skipped via the favListRows.length > 0 check.
   let lists = favListRows;
   if (lists.length === 0) {
-    await ensureDefaultFavoriteList(req.userId);
+    await ensureDefaultFavoriteList(userId);
     lists = await prisma.favoriteList.findMany({
-      where: { userId: req.userId },
+      where: { userId },
       orderBy: { position: 'asc' },
       select: LIST_WITH_ENTRIES_SELECT,
     });
   }
 
-  // Distinct set of every restaurant the user references via ANY
-  // collection — including entries inside favorite lists, since
-  // those are the new primary read path for favorites surfaces.
-  // Set guarantees no duplicate fetches and the spread gives Prisma
-  // a plain array for the IN clause.
   const linkedIds = new Set<number>();
   favRows.forEach((r) => linkedIds.add(r.restaurantId));
   optRows.forEach((r) => linkedIds.add(r.restaurantId));
@@ -459,31 +510,36 @@ router.get('/me/all', async (req: Request, res: Response) => {
     select: RESTAURANT_CARD_SELECT,
   });
 
-  // `favoriteIds` is now derived from the default list's entries
-  // for transition-period back-compat. New client code reads
-  // `favoriteLists` directly; this field can be dropped in a
-  // future minor bump once nothing depends on it.
   const defaultList = lists.find((l) => l.isDefault) ?? lists[0] ?? null;
   const favoriteIds = defaultList
     ? defaultList.entries.map((e) => e.restaurantId)
     : favRows.map((r) => r.restaurantId);
 
-  res.json({
+  return {
     apiVersion: ME_ALL_API_VERSION,
     restaurants,
     favoriteIds,
     optionIds:       optRows.map((r) => r.restaurantId),
     archivedIds:     arcRows.map((r) => r.restaurantId),
-    // Accepted is the only collection that's not ID-only — each
-    // accept event carries its own timestamp the client needs for
-    // History ordering / Insights bucketing.
     acceptedEntries: accRows,
-    // Reviews keep their full row data but reference the restaurant
-    // by ID; the client resolves it via the restaurants[] array.
     reviews:         revRows,
     addresses:       addrRows,
     favoriteLists:   lists.map(serializeList),
-  });
+  };
+}
+
+// GET /me/all — DEPRECATED. Identity + extended data in one shot. Kept
+// for backward compat with the legacy client (and future mobile builds
+// that may still call it). New web client paths fire /me/identity +
+// /me/data in parallel for the perf win. Delegates to fetchUserDataPayload
+// so there's no chance of /me/all's shape drifting from /me/data.
+//
+// Logs a deprecation breadcrumb on each call — when the count goes to
+// zero in production logs, this route is safe to remove.
+router.get('/me/all', async (req: Request, res: Response) => {
+  logger.warn({ userId: req.userId, route: '/me/all' }, 'deprecated /me/all endpoint hit — migrate caller to /me/identity + /me/data');
+  const data = await fetchUserDataPayload(req.userId);
+  res.json(data);
 });
 
 // ── Address book ──────────────────────────────────────────────
@@ -1381,25 +1437,17 @@ router.patch('/me/accepted/:id', async (req: Request, res: Response) => {
 // over UserAccepted: a single findMany + an in-memory rollup, which is fine
 // for any realistic per-user history size (acceptances are sparse).
 
-// Window options accepted by /me/insights — sliding from "now" rather than
-// calendar boundaries so "this week" doesn't reset every Monday. `all` is the
-// default and stays unbounded.
-const INSIGHT_WINDOW_DAYS: Record<string, number> = {
-  week:  7,
-  month: 30,
-  year:  365,
-};
-
-// "Neglected" = a favorite the user hasn't picked in this many days (or ever).
-// 60 days feels right — long enough that a "hey, remember this place?" nudge
-// is welcome, short enough that the list isn't empty for active users.
-const NEGLECT_THRESHOLD_DAYS = 60;
-
-// Cuisine sparklines show 12 weekly buckets, independent of the `since`
-// dropdown — the trend line is most readable as a fixed window so filter
-// changes don't redraw it.
-const SPARKLINE_WEEKS = 12;
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Insight tunables — see server/src/config/insights.ts for the rationale
+// on each value (TIER_2_3_PLAN.md #14). Re-exporting the cap for the
+// existing test that imports it from this module.
+import {
+  INSIGHT_WINDOW_DAYS,
+  INSIGHTS_ALL_TIME_CAP_DAYS,
+  NEGLECT_THRESHOLD_DAYS,
+  SPARKLINE_WEEKS,
+  DAY_MS,
+} from '../config/insights';
+export { INSIGHTS_ALL_TIME_CAP_DAYS };
 
 // First Sunday cell of the sparkline window. Sunday of the week containing
 // today, minus (SPARKLINE_WEEKS − 1) weeks. The current week is always the
@@ -1421,12 +1469,18 @@ router.get('/me/insights', async (req: Request, res: Response) => {
 
   const sinceParam = typeof req.query.since === 'string' ? req.query.since : 'all';
   const windowDays = INSIGHT_WINDOW_DAYS[sinceParam];
-  const sinceDate  = windowDays ? new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000) : null;
+  // Resolve the lower-bound timestamp:
+  //   - Explicit windowDays ('week'/'month'/'year') → slide from now.
+  //   - 'all' (or any unknown value) → cap at INSIGHTS_ALL_TIME_CAP_DAYS
+  //     so the rollup stays bounded. Previously this was null (unbounded);
+  //     see TIER_2_3_PLAN.md #12 for the rationale.
+  const effectiveWindowDays = windowDays ?? INSIGHTS_ALL_TIME_CAP_DAYS;
+  const sinceDate = new Date(Date.now() - effectiveWindowDays * 24 * 60 * 60 * 1000);
 
   const rows = await prisma.userAccepted.findMany({
     where: {
       userId,
-      ...(sinceDate && { acceptedAt: { gte: sinceDate } }),
+      acceptedAt: { gte: sinceDate },
       // Per-entry opt-out from insights. Excluded rows still appear in
       // History (the user wants the visit logged) but drop out of every
       // aggregation here — totals, breakdowns, weekday heatmap, cuisine
@@ -2191,5 +2245,15 @@ router.post('/me/refresh-restaurant/:id', externalApiLimiter, async (req: Reques
   if (!updated) { res.json({ refreshed: false, restaurant: null }); return; }
   res.json({ refreshed: true, restaurant: updated });
 });
+
+// Wire the background-refresh job's late-bound dependency. Module-level
+// side effect on import; safe because `registerBackgroundRefresher`
+// just stores the function pointer — the job doesn't fire until
+// `startBackgroundRefresh()` is called from index.ts at boot.
+// See server/src/lib/backgroundRefresh.ts for the rationale on the
+// late-binding pattern (avoids a circular import between users.ts and
+// the bg refresh module).
+import { registerBackgroundRefresher } from '../lib/backgroundRefresh';
+registerBackgroundRefresher(refreshOnePlace);
 
 export default router;

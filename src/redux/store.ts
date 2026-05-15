@@ -5,6 +5,8 @@ import authReducer from "./slices/authSlice";
 import ratingReducer from "./slices/ratingSlice";
 import searchReducer from "./slices/searchSlice";
 import celebrationReducer from "./slices/celebrationSlice";
+import toastReducer from "./slices/toastSlice";
+import flagsReducer from "./slices/flagsSlice";
 import { listenerMiddleware } from "./listenerMiddleware";
 
 const store = configureStore({
@@ -17,6 +19,14 @@ const store = configureStore({
     // Transient UI state for the post-Choose-Now celebration modal.
     // Not persisted to localStorage — it's a popup, not user data.
     celebration: celebrationReducer,
+    // Feedback channel for the sync abstraction — see syncHelper.ts.
+    // Background mutations push pending/success/error toasts here; the
+    // <Toaster> component renders them. Replaces the previous silent-
+    // fail `console.error` pattern in listenerMiddleware.
+    toast: toastReducer,
+    // Feature flag values — fetched once from /api/flags on app boot.
+    // See redux/slices/flagsSlice.ts + hooks/useFlag.ts.
+    flags: flagsReducer,
   },
   middleware: (getDefault) =>
     getDefault().prepend(listenerMiddleware.middleware),
@@ -64,7 +74,7 @@ store.subscribe(() => {
     const state = store.getState();
     // Re-check at flush time — state may have changed during the debounce.
     if (!shouldPersistGuest(state)) return;
-    const user = state.userInfo.users[0];
+    const user = state.userInfo.user;
     try {
       localStorage.setItem('pickyum_guest', JSON.stringify({
         favorites:         user.favorites,

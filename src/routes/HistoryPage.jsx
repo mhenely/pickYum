@@ -5,6 +5,7 @@ import { archiveRestaurant, unarchiveRestaurant, removeFromHistory } from '../re
 import RestaurantCard from '../components/RestaurantCard';
 import HeartWithKebab from '../components/HeartWithKebab';
 import HistoryRowKebab from '../components/HistoryRowKebab';
+import { useFlag } from '../hooks/useFlag';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import useCurrentUser from '../hooks/useCurrentUser';
 import { buildAcceptedStats, formatLastChosen } from '../utils/acceptedStats';
@@ -80,6 +81,11 @@ const UserHistoryPage = () => {
   const dispatch = useDispatch();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const allRestaurants = customRestaurants;
+  // Flag-gated kill switch — see server/src/lib/flags.ts. Default true,
+  // flipped to false via FLAG_INSIGHTS_OPT_OUT_VISIBLE=false if the
+  // toggle ever exposes a bug we need to suppress without a redeploy
+  // of the React bundle.
+  const showInsightsKebab = useFlag('insightsOptOutVisible');
 
   // Single modal-open state: `{ id, defaultWriteReview }` (or null).
   // The detail modal serves both flows now — generic detail view (card
@@ -260,7 +266,7 @@ const UserHistoryPage = () => {
               cornerSlot={(
                 <div className="inline-flex items-center gap-1 shrink-0">
                   <HeartWithKebab restaurantId={id} size="md" />
-                  <HistoryRowKebab restaurantId={id} size="md" />
+                  {showInsightsKebab && <HistoryRowKebab restaurantId={id} size="md" />}
                 </div>
               )}
             >

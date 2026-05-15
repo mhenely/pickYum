@@ -90,12 +90,36 @@ const router = createBrowserRouter([
       },
     ],
   },
-]);
+], {
+  // Opt into React Router v7's upcoming router-level behaviors early.
+  // Eliminates "Future Flag Warning" dev-console noise + smooths the
+  // eventual v7 upgrade.
+  //
+  // In react-router-dom 6.x the flags are split between two
+  // components: the router-creation function takes the @remix-run/router
+  // flags (below), and <RouterProvider future={...}> takes the
+  // framework-level flags like `v7_startTransition`. Both are needed
+  // to silence all the warnings.
+  //
+  //   v7_relativeSplatPath: tightens relative path resolution inside
+  //     splat routes. We don't use splat routes today, so this is
+  //     a no-op now and a safe pre-opt.
+  future: {
+    v7_relativeSplatPath: true,
+  },
+});
+
+// Framework-level future flags — the type lives on RouterProviderProps,
+// distinct from the router-creation options above. `v7_startTransition`
+// wraps internal state updates in React.startTransition so navigations
+// don't block urgent renders. Behavior-compatible for our pages — no
+// synchronous patterns rely on the legacy semantics.
+const ROUTER_FUTURE_FLAGS = { v7_startTransition: true } as const;
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <Provider store={store}>
-      <RouterProvider router={router} />
+      <RouterProvider router={router} future={ROUTER_FUTURE_FLAGS} />
     </Provider>
   </React.StrictMode>
 );

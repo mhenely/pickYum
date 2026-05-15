@@ -36,6 +36,10 @@ const fakeUser = {
   passwordHash: '$2a$12$hashed',
   flipCount: 0,
   avatarUrl: null,
+  // Failed-login lockout columns (default safe values match the
+  // migration's NOT NULL DEFAULT 0 + NULL respectively).
+  failedLoginCount: 0,
+  failedLoginLockedUntil: null,
   createdAt: new Date(),
 };
 
@@ -166,6 +170,95 @@ describe('POST /api/auth/login', () => {
     expect(res.status).toBe(401);
     expect(res.body.error).toMatch(/invalid email or password/i);
     expect(res.body.error).not.toMatch(/social|google|facebook|oauth/i);
+  });
+
+  // ── Per-account lockout ──────────────────────────────────────
+  // Tests the credential-stuffing defense: after N consecutive failures,
+  // the account is locked for a window regardless of correct password
+  // OR source IP. Locked-out attempts must still match the timing and
+  // response shape of normal wrong-password (anti-enumeration).
+
+  it('increments failedLoginCount on a wrong password', async () => {
+    (mockBcrypt.compare as jest.Mock).mockResolvedValue(false);
+
+    await request(buildApp())
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'wrong' });
+
+    const updateCalls = (mockPrisma.user.update as jest.Mock).mock.calls;
+    // The route writes failedLoginCount on failure. Find that update.
+    const failCall = updateCalls.find((c) => 'failedLoginCount' in (c[0]?.data ?? {}));
+    expect(failCall).toBeDefined();
+    expect(failCall![0].data.failedLoginCount).toBe(1);
+    // Below the lockout threshold — lockedUntil should NOT be set.
+    expect(failCall![0].data.failedLoginLockedUntil).toBeNull();
+  });
+
+  it('locks the account once failedLoginCount reaches the threshold', async () => {
+    (mockBcrypt.compare as jest.Mock).mockResolvedValue(false);
+    // Threshold is 8 — seed the user at count=7 so the next failure trips it.
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, failedLoginCount: 7 });
+
+    const res = await request(buildApp())
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'wrong' });
+
+    expect(res.status).toBe(401);
+    const updateCalls = (mockPrisma.user.update as jest.Mock).mock.calls;
+    const lockCall = updateCalls.find((c) => 'failedLoginLockedUntil' in (c[0]?.data ?? {}) && c[0].data.failedLoginLockedUntil instanceof Date);
+    expect(lockCall).toBeDefined();
+    expect(lockCall![0].data.failedLoginCount).toBe(8);
+  });
+
+  it('refuses login when the account is currently locked, even with the correct password', async () => {
+    // Correct password (bcrypt returns true) — should STILL be rejected
+    // because the lockout window is active. This is the actual defense.
+    (mockBcrypt.compare as jest.Mock).mockResolvedValue(true);
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({
+      ...fakeUser,
+      failedLoginCount: 8,
+      failedLoginLockedUntil: new Date(Date.now() + 10 * 60_000), // locked for 10 more min
+    });
+
+    const res = await request(buildApp())
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'secret123' });
+
+    expect(res.status).toBe(401);
+    // Error message identical to other 401 paths — anti-enumeration.
+    expect(res.body.error).toMatch(/invalid email or password/i);
+  });
+
+  it('resets failedLoginCount on a successful login', async () => {
+    (mockBcrypt.compare as jest.Mock).mockResolvedValue(true);
+    // User had a few prior failures but isn't locked — successful login
+    // should clear the counter.
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({ ...fakeUser, failedLoginCount: 3 });
+
+    const res = await request(buildApp())
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'secret123' });
+
+    expect(res.status).toBe(200);
+    const updateCalls = (mockPrisma.user.update as jest.Mock).mock.calls;
+    const resetCall = updateCalls.find((c) => c[0]?.data?.failedLoginCount === 0);
+    expect(resetCall).toBeDefined();
+    expect(resetCall![0].data.failedLoginLockedUntil).toBeNull();
+  });
+
+  it('skips the reset write when the counter is already 0 (hot-path optimization)', async () => {
+    (mockBcrypt.compare as jest.Mock).mockResolvedValue(true);
+    // Fresh user — count=0, no lockout. The route should NOT write a
+    // pointless "set count to 0" update on every successful login.
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue(fakeUser);
+
+    await request(buildApp())
+      .post('/api/auth/login')
+      .send({ email: 'alice@example.com', password: 'secret123' });
+
+    const updateCalls = (mockPrisma.user.update as jest.Mock).mock.calls;
+    const resetCall = updateCalls.find((c) => 'failedLoginCount' in (c[0]?.data ?? {}));
+    expect(resetCall).toBeUndefined();
   });
 });
 

@@ -1,12 +1,14 @@
 // Selectors and helpers for the multi-list favorites surface.
 //
-// Slice shape (see userInfoSlice.js):
+// Slice shape (see userInfoSlice.ts):
 //   state.userInfo.favoriteLists = { byId, order, defaultId }
 //
 // All restaurant ids inside lists are numbers (server-side). The
-// legacy `users[0].favorites` array is stringified for guest /
+// legacy `user.favorites` array is stringified for guest /
 // legacy reasons — `legacyFavoritesArray` below normalizes everything
 // to strings so card consumers don't need to care about the type.
+
+import { createSelector } from '@reduxjs/toolkit';
 
 // Server-side brand palette mirror. Component-level pickers import
 // this directly to render swatch options. Keep in lockstep with
@@ -91,15 +93,30 @@ export function listsContaining(state, restaurantId) {
   return out;
 }
 
-// All lists in display order. Returns a stable array reference per
-// call — if you need referential stability across re-renders, wrap
-// with shallowEqual or pull byId/order separately. For most consumers
-// (rendering a small dropdown), a fresh array is fine.
-export function allLists(state) {
-  const fl = state.userInfo?.favoriteLists;
-  if (!fl) return [];
-  return fl.order.map((id) => fl.byId[id]).filter(Boolean);
-}
+// All lists in display order.
+//
+// Memoized: `useSelector(allLists)` was returning a fresh array on
+// every dispatch even when neither `order` nor `byId` changed —
+// React-Redux dev-mode flagged this as a perf foot-gun. createSelector
+// caches the output array against the two input refs so consumers
+// that subscribe via useSelector see the same array reference until
+// `order` or `byId` actually changes. Note the input selectors return
+// stable references when nothing changed (slice reducers preserve
+// `state.favoriteLists.order` / `.byId` identity on unrelated
+// dispatches), which is the precondition for the memo to be effective.
+export const allLists = createSelector(
+  [
+    (state) => state.userInfo?.favoriteLists?.order ?? EMPTY_ORDER,
+    (state) => state.userInfo?.favoriteLists?.byId  ?? EMPTY_BY_ID,
+  ],
+  (order, byId) => order.map((id) => byId[id]).filter(Boolean),
+);
+// Module-level constants so the fallback paths return the SAME
+// reference each call — without this, the `?? []` / `?? {}` inline
+// fallbacks would themselves recreate refs and defeat the memo
+// before the merge function even runs.
+const EMPTY_ORDER = Object.freeze([]);
+const EMPTY_BY_ID = Object.freeze({});
 
 // The user's default list (or null if not hydrated). Heart-toggle
 // callers use `.id` to feed addEntryToList / removeEntryFromList.
@@ -135,7 +152,7 @@ export function allEntryIdsUnion(state) {
   return [...seen];
 }
 
-// Drop-in replacement for `userInfo.users[0].favorites`. New code
+// Drop-in replacement for `userInfo.user.favorites`. New code
 // reads this when it doesn't care WHICH list a restaurant is in,
 // only that it's favorited somewhere. Mirrors the "default list
 // only" behavior of the legacy array so callers that pre-date
@@ -145,10 +162,10 @@ export function allEntryIdsUnion(state) {
 export function legacyFavoritesArray(state) {
   const list = defaultList(state);
   if (!list) {
-    // Fall back to the legacy users[0].favorites array — covers
+    // Fall back to the legacy `user.favorites` array — covers
     // the guest path (server-side lists don't exist for unauthed
     // users) and any legacy state shape that hasn't hydrated lists.
-    return (state.userInfo?.users?.[0]?.favorites ?? []).map(String);
+    return (state.userInfo?.user?.favorites ?? []).map(String);
   }
   return list.entries.map((e) => String(e.restaurantId));
 }
@@ -207,6 +224,30 @@ export function writeActiveListIds(page, ids) {
     }
     sessionStorage.setItem(ACTIVE_LIST_KEY(page), JSON.stringify(ids));
   } catch { /* full storage / privacy mode — silently ignore */ }
+}
+
+/**
+ * Filter `activeIds` down to ids that exist in the current user's
+ * lists. Used by pages after `setFavoriteLists` hydrates to drop any
+ * sessionStorage ids that belong to a previously-signed-in account
+ * — the user's selection from session A doesn't carry over to session B.
+ *
+ * Returns:
+ *   { pruned, changed } where `pruned` is the validated id array and
+ *   `changed` is true if anything was dropped. Callers should use
+ *   `changed` to decide whether to persist the new value back to
+ *   sessionStorage.
+ *
+ * Without this guard, ListSelector / page-level memos read stale ids
+ * out of sessionStorage and either (a) render "No matching lists"
+ * for users who clearly have lists, or (b) crash on the
+ * `picked[0].name` access if the defensive fallback regresses.
+ */
+export function pruneStaleListIds(activeIds, currentLists) {
+  if (!Array.isArray(activeIds)) return { pruned: activeIds, changed: false };
+  const valid = new Set(currentLists.map((l) => l.id));
+  const pruned = activeIds.filter((id) => valid.has(id));
+  return { pruned, changed: pruned.length !== activeIds.length };
 }
 
 // Legacy single-id reader/writer — kept exported so any straggling

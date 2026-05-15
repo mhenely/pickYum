@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { createApp } from './app';
 import { logger } from './lib/logger';
+import { startBackgroundRefresh } from './lib/backgroundRefresh';
 
 // Fail fast on missing config rather than 500-ing on the first request.
 // Required everywhere; CLIENT_URL is required only in production (dev defaults to localhost:5173).
@@ -40,4 +41,9 @@ const app = createApp();
 
 app.listen(PORT, () => {
   logger.info({ port: PORT }, `Server running on http://localhost:${PORT}`);
+  // Background-refresh job — gated on the FLAG_BACKGROUND_REFRESH env
+  // var (default false). Schedules a daily run that pre-warms the
+  // oldest stale Google-sourced rows so users don't pay the refresh
+  // latency on their first open. See lib/backgroundRefresh.ts.
+  startBackgroundRefresh();
 });

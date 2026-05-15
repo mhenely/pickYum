@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { toggleAcceptedExcludeFromInsights } from '../redux/slices/userInfoSlice';
+import { useViewportAnchoredPopover, useOutsideClickClose } from '../hooks/useViewportAnchoredPopover';
 
 // Per-row kebab for HistoryPage. Currently exposes a single action:
 // toggle the InsightsPage opt-out flag for this restaurant's accepted
@@ -42,38 +43,12 @@ export default function HistoryRowKebab({ restaurantId, size = 'md' }) {
 
   const [open, setOpen] = useState(false);
   const btnRef = useRef(null);
-  const [pos, setPos] = useState(null);
-
-  useEffect(() => {
-    if (!open) { setPos(null); return undefined; }
-    const measure = () => {
-      const btn = btnRef.current;
-      if (!btn) return;
-      const r = btn.getBoundingClientRect();
-      setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
-    };
-    measure();
-    // Capture phase catches nested overflow containers (sidebars), not
-    // just the window. Mirrors <HeartWithKebab>.
-    window.addEventListener('scroll', measure, true);
-    window.addEventListener('resize', measure);
-    return () => {
-      window.removeEventListener('scroll', measure, true);
-      window.removeEventListener('resize', measure);
-    };
-  }, [open]);
-
-  // Outside-click dismissal. Click on the kebab itself doesn't count
-  // (the handler toggles already), so we filter it out by ref.
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDocClick = (e) => {
-      if (btnRef.current && btnRef.current.contains(e.target)) return;
-      setOpen(false);
-    };
-    document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
-  }, [open]);
+  // Positioning + outside-click dismissal now come from the shared
+  // hooks in src/hooks/useViewportAnchoredPopover.ts. Used to be ~25 LOC
+  // of inline effect + scroll/resize listener + outside-click handler.
+  // See TIER_2_3_PLAN.md #13 for the rationale.
+  const pos = useViewportAnchoredPopover(btnRef, open);
+  useOutsideClickClose(btnRef, open, () => setOpen(false));
 
   if (acceptedRows.length === 0) return null;
 

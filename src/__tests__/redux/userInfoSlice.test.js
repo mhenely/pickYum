@@ -21,13 +21,13 @@ describe('userInfoSlice', () => {
   describe('addUserOption', () => {
     it('adds a new restaurant id to options', () => {
       const state = reducer(baseState, addUserOption('42'));
-      expect(state.users[0].options).toContain('42');
+      expect(state.user.options).toContain('42');
     });
 
     it('is a no-op when the id is already present', () => {
       const first = reducer(baseState, addUserOption('42'));
       const second = reducer(first, addUserOption('42'));
-      expect(second.users[0].options.filter((id) => id == '42').length).toBe(1);
+      expect(second.user.options.filter((id) => id == '42').length).toBe(1);
     });
   });
 
@@ -35,32 +35,32 @@ describe('userInfoSlice', () => {
     it('removes an existing id', () => {
       const withSel = reducer(baseState, addUserOption('7'));
       const removed = reducer(withSel, removeUserOption('7'));
-      expect(removed.users[0].options).not.toContain('7');
+      expect(removed.user.options).not.toContain('7');
     });
 
     it('is a no-op when id is not present', () => {
       const state = reducer(baseState, removeUserOption('999'));
-      expect(state.users[0].options).toEqual(baseState.users[0].options);
+      expect(state.user.options).toEqual(baseState.user.options);
     });
   });
 
   describe('updateUserFavorites', () => {
     it('adds a restaurant when it is not yet favorited', () => {
       const state = reducer(baseState, updateUserFavorites({ restaurantId: '3' }));
-      expect(state.users[0].favorites).toContain('3');
+      expect(state.user.favorites).toContain('3');
     });
 
     it('removes a restaurant when it is already favorited', () => {
       const added = reducer(baseState, updateUserFavorites({ restaurantId: '3' }));
       const removed = reducer(added, updateUserFavorites({ restaurantId: '3' }));
-      expect(removed.users[0].favorites).not.toContain('3');
+      expect(removed.user.favorites).not.toContain('3');
     });
   });
 
   describe('addUserAcceptance', () => {
     it('appends an acceptance record with restaurantId and date', () => {
       const state = reducer(baseState, addUserAcceptance({ restaurantId: '10' }));
-      const last = state.users[0].accepted[state.users[0].accepted.length - 1];
+      const last = state.user.accepted[state.user.accepted.length - 1];
       expect(last.restaurantId).toBe('10');
       expect(last.date).toBeDefined();
     });
@@ -70,7 +70,7 @@ describe('userInfoSlice', () => {
       // row id; both new fields default safely so the entry is valid in
       // the slice's expanded shape.
       const state = reducer(baseState, addUserAcceptance({ restaurantId: '11' }));
-      const last = state.users[0].accepted[state.users[0].accepted.length - 1];
+      const last = state.user.accepted[state.user.accepted.length - 1];
       expect(last.id).toBeNull();
       expect(last.excludeFromInsights).toBe(false);
     });
@@ -79,7 +79,7 @@ describe('userInfoSlice', () => {
       const state = reducer(baseState, addUserAcceptance({
         restaurantId: 12, id: 99, excludeFromInsights: true,
       }));
-      const last = state.users[0].accepted[state.users[0].accepted.length - 1];
+      const last = state.user.accepted[state.user.accepted.length - 1];
       expect(last.id).toBe(99);
       expect(last.excludeFromInsights).toBe(true);
     });
@@ -97,15 +97,15 @@ describe('userInfoSlice', () => {
         ],
       }));
       const next = reducer(seeded, setAcceptedExcludeFromInsights({ id: 11, excludeFromInsights: true }));
-      expect(next.users[0].accepted[0].excludeFromInsights).toBe(false);
-      expect(next.users[0].accepted[1].excludeFromInsights).toBe(true);
+      expect(next.user.accepted[0].excludeFromInsights).toBe(false);
+      expect(next.user.accepted[1].excludeFromInsights).toBe(true);
     });
 
     it('no-ops when the server id is not in state', () => {
       const next = reducer(baseState, setAcceptedExcludeFromInsights({ id: 999, excludeFromInsights: true }));
       // baseState has an empty accepted list — the action shouldn't add a
       // phantom entry. The whole accepted slice should still be empty.
-      expect(next.users[0].accepted).toEqual([]);
+      expect(next.user.accepted).toEqual([]);
     });
   });
 
@@ -115,7 +115,7 @@ describe('userInfoSlice', () => {
       // backfilling the real id once POST /me/accepted returns.
       const seeded = reducer(baseState, addUserAcceptance({ restaurantId: 7 }));
       const next = reducer(seeded, reconcileAcceptedRowId({ restaurantId: 7, id: 555 }));
-      const target = next.users[0].accepted.find((a) => String(a.restaurantId) === '7');
+      const target = next.user.accepted.find((a) => String(a.restaurantId) === '7');
       expect(target.id).toBe(555);
     });
 
@@ -125,7 +125,7 @@ describe('userInfoSlice', () => {
       const a = reducer(baseState, addUserAcceptance({ restaurantId: 8 }));
       const b = reducer(a,         addUserAcceptance({ restaurantId: 8 }));
       const next = reducer(b, reconcileAcceptedRowId({ restaurantId: 8, id: 100 }));
-      const ids = next.users[0].accepted.map((e) => e.id);
+      const ids = next.user.accepted.map((e) => e.id);
       expect(ids).toEqual([100, null]);
     });
   });
@@ -133,26 +133,26 @@ describe('userInfoSlice', () => {
   describe('archiveRestaurant / unarchiveRestaurant', () => {
     it('adds to archived on archiveRestaurant', () => {
       const state = reducer(baseState, archiveRestaurant('5'));
-      expect(state.users[0].archived).toContain('5');
+      expect(state.user.archived).toContain('5');
     });
 
     it('does not duplicate if already archived', () => {
       const once = reducer(baseState, archiveRestaurant('5'));
       const twice = reducer(once, archiveRestaurant('5'));
-      expect(twice.users[0].archived.filter((id) => id === '5').length).toBe(1);
+      expect(twice.user.archived.filter((id) => id === '5').length).toBe(1);
     });
 
     it('removes from archived on unarchiveRestaurant', () => {
       const archived = reducer(baseState, archiveRestaurant('5'));
       const unarchived = reducer(archived, unarchiveRestaurant('5'));
-      expect(unarchived.users[0].archived).not.toContain('5');
+      expect(unarchived.user.archived).not.toContain('5');
     });
   });
 
   describe('incrementFlipCount', () => {
     it('increments flipCount by 1', () => {
       const state = reducer(baseState, incrementFlipCount());
-      expect(state.users[0].flipCount).toBe(1);
+      expect(state.user.flipCount).toBe(1);
     });
 
     it('accumulates correctly over multiple calls', () => {
@@ -160,7 +160,7 @@ describe('userInfoSlice', () => {
       state = reducer(state, incrementFlipCount());
       state = reducer(state, incrementFlipCount());
       state = reducer(state, incrementFlipCount());
-      expect(state.users[0].flipCount).toBe(3);
+      expect(state.user.flipCount).toBe(3);
     });
   });
 
@@ -178,17 +178,17 @@ describe('userInfoSlice', () => {
         reviews: { '1': [{ content: 'Great', rating: 5, date: '2024-01-01' }] },
       };
       const state = reducer(baseState, setUserData(payload));
-      expect(state.users[0].id).toBe(99);
-      expect(state.users[0].email).toBe('test@example.com');
-      expect(state.users[0].username).toBe('testuser');
-      expect(state.users[0].flipCount).toBe(7);
-      expect(state.users[0].favorites).toEqual(['1', '2']);
-      expect(state.users[0].options).toEqual(['3']);
+      expect(state.user.id).toBe(99);
+      expect(state.user.email).toBe('test@example.com');
+      expect(state.user.username).toBe('testuser');
+      expect(state.user.flipCount).toBe(7);
+      expect(state.user.favorites).toEqual(['1', '2']);
+      expect(state.user.options).toEqual(['3']);
     });
 
     it('defaults flipCount to 0 when not provided', () => {
       const state = reducer(baseState, setUserData({ id: 1, email: 'a@b.com', username: 'u' }));
-      expect(state.users[0].flipCount).toBe(0);
+      expect(state.user.flipCount).toBe(0);
     });
   });
 
@@ -224,7 +224,7 @@ describe('userInfoSlice', () => {
   describe('updateUserInfo', () => {
     it('updates truthy fields on the user', () => {
       const state = reducer(baseState, updateUserInfo({ username: 'newname' }));
-      expect(state.users[0].username).toBe('newname');
+      expect(state.user.username).toBe('newname');
     });
   });
 });

@@ -12,13 +12,27 @@ import { sendEmail, verifyEmailTemplate, passwordResetTemplate } from '../lib/em
 import { issueToken, consumeToken } from '../lib/emailTokens';
 import { ensureDefaultFavoriteList } from '../lib/favoriteLists';
 import { logger } from '../lib/logger';
+import { audit } from '../lib/audit';
+// Auth policy constants — see server/src/config/auth.ts for the per-value
+// rationale. Centralizing them makes per-environment overrides trivial
+// (a future env-var pass swaps the imports for env-aware defaults) and
+// keeps the route file focused on flow, not configuration.
+import {
+  SESSION_DURATION,
+  SESSION_MAX_AGE_MS,
+  MIN_PASSWORD_LEN,
+  FAILED_LOGIN_LIMIT,
+  LOCKOUT_DURATION_MS,
+  BCRYPT_TIMING_DUMMY as DUMMY_HASH,
+  AUTH_LIMITER_WINDOW_MS,
+  AUTH_LIMITER_MAX,
+  EMAIL_LIMITER_WINDOW_MS,
+  EMAIL_LIMITER_MAX,
+} from '../config/auth';
 
 const router = Router();
 
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
-
-const SESSION_DURATION = '7d';
-const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -28,8 +42,8 @@ const COOKIE_OPTIONS = {
 };
 
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
+  windowMs: AUTH_LIMITER_WINDOW_MS,
+  max: AUTH_LIMITER_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => process.env.NODE_ENV === 'test',
@@ -38,22 +52,18 @@ const authLimiter = rateLimit({
 
 // Stricter limit for password-reset / resend-verify to slow email-flooding abuse.
 const emailLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 5,
+  windowMs: EMAIL_LIMITER_WINDOW_MS,
+  max: EMAIL_LIMITER_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => process.env.NODE_ENV === 'test',
   message: { error: 'Too many email requests, please try again later' },
 });
 
-// Pre-computed bcrypt hash used as a timing dummy when no real hash exists.
-// Ensures bcrypt.compare always runs regardless of whether the account exists.
-const DUMMY_HASH = '$2a$12$KIXxwf7pVdaFGaFVMxJAOuLgc0X1Xk6pJz9mV3RwUqHnYeD5tsBqS';
-
-// Minimum requirements: ≥8 chars and at least one letter + one number.
-// Generous on symbols/length to avoid frustrating real users; tight enough
-// to block trivial passwords like "password" / "12345678".
-const MIN_PASSWORD_LEN = 8;
+// Minimum-password validation — uses MIN_PASSWORD_LEN from config/auth.ts.
+// The rule itself ("≥N chars + at least one letter + one number") stays
+// here because it's specific to the registration flow; the threshold is
+// the only knob.
 export function validatePassword(pw: unknown): string | null {
   if (typeof pw !== 'string') return 'password is required';
   if (pw.length < MIN_PASSWORD_LEN) return `password must be at least ${MIN_PASSWORD_LEN} characters`;
@@ -389,7 +399,14 @@ router.post('/reset-password', authLimiter, async (req: Request, res: Response) 
   }
 
   const passwordHash = await bcrypt.hash(password as string, 12);
-  await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+  // Resetting the password also clears the failed-login lockout —
+  // proving email control is at least as strong as proving the
+  // previous password, so the lockout's purpose is served.
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash, failedLoginCount: 0, failedLoginLockedUntil: null },
+  });
+  audit({ kind: 'password.reset', actorUserId: userId, req });
 
   // Issue a session cookie so the user is signed in after reset
   const sessionToken = jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: SESSION_DURATION });
@@ -412,8 +429,31 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
   const user = await prisma.user.findFirst({
     where: { email: { equals: email } },
   });
-  // Always run bcrypt regardless of whether the user exists to prevent timing-based email enumeration
-  const passwordMatch = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
+
+  // Lockout check FIRST: a locked account refuses even a correct password
+  // until the lockout window passes. We still run bcrypt against the dummy
+  // hash (below) on locked-out attempts so the response time stays
+  // indistinguishable from a normal wrong-password — otherwise the
+  // lockout itself becomes an email-enumeration signal.
+  const lockedNow = !!(user?.failedLoginLockedUntil && user.failedLoginLockedUntil > new Date());
+
+  // Always run bcrypt regardless of whether the user exists OR is locked,
+  // to keep the timing channel quiet against email enumeration.
+  const passwordMatch = await bcrypt.compare(
+    password,
+    lockedNow ? DUMMY_HASH : (user?.passwordHash ?? DUMMY_HASH),
+  );
+
+  if (lockedNow) {
+    audit({
+      kind: 'login.locked-attempt',
+      targetUserId: user?.id,
+      req,
+      metadata: { email },
+    });
+    res.status(401).json({ error: 'Invalid email or password' });
+    return;
+  }
 
   // Single opaque error for every "failure to authenticate" path: missing
   // user, OAuth-only account, wrong password. Distinct messages here leak
@@ -422,9 +462,46 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
   // hint that used to live here is moved to the UI side (after the user
   // tries social sign-in successfully).
   if (!user || !user.passwordHash || !passwordMatch) {
+    // Increment the per-account failure counter, and lock the account
+    // when it hits the threshold. Only runs against real accounts —
+    // we don't want to leave failed-login records for non-existent
+    // email addresses (and we don't want to expose row creation that
+    // an attacker could measure via timing).
+    if (user) {
+      const nextCount = user.failedLoginCount + 1;
+      const willLock = nextCount >= FAILED_LOGIN_LIMIT;
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginCount: nextCount,
+          failedLoginLockedUntil: willLock
+            ? new Date(Date.now() + LOCKOUT_DURATION_MS)
+            : user.failedLoginLockedUntil,
+        },
+      });
+      audit({
+        kind: willLock ? 'login.locked' : 'login.failure',
+        targetUserId: user.id,
+        req,
+        metadata: { email, failedCount: nextCount, ...(willLock && { lockoutMinutes: LOCKOUT_DURATION_MS / 60000 }) },
+      });
+    } else {
+      audit({ kind: 'login.failure', req, metadata: { email, reason: 'no-such-user' } });
+    }
     res.status(401).json({ error: 'Invalid email or password' });
     return;
   }
+
+  // Success — reset the counter + unlock if anything's set. The update
+  // is conditional via `if (...)` to skip the write on the hot path
+  // where nothing changes (most logins have count=0, lockedUntil=null).
+  if (user.failedLoginCount > 0 || user.failedLoginLockedUntil) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { failedLoginCount: 0, failedLoginLockedUntil: null },
+    });
+  }
+  audit({ kind: 'login.success', actorUserId: user.id, req });
 
   const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET!, { expiresIn: SESSION_DURATION });
   res.cookie('token', token, COOKIE_OPTIONS).json({

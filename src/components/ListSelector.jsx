@@ -62,17 +62,29 @@ export default function ListSelector({ value, onChange, defaultId, align = 'left
   const noneSelected = !value || value.length === 0;
 
   // Summary label for the closed button.
-  //   0 lists checked → "No lists"
-  //   1 list checked  → "<list name>"
-  //   all checked     → "All lists"
-  //   else            → "<first list name> + N more"
+  //   0 lists checked    → "No lists" / "No lists selected"
+  //   1 list checked     → "<list name>"
+  //   all checked        → "All lists"
+  //   stale ids only     → "No matching lists"  (defense — see below)
+  //   else               → "<first list name> + N more"
   // Total entry count is summed across the selected lists so the
   // user sees an aggregate alongside the label.
+  //
+  // Defense for `picked.length === 0`: `value` is persisted in
+  // sessionStorage by the caller (Search / Compare / Choose) per-page.
+  // If a user logs out + back in as a different account in the same
+  // tab, sessionStorage still holds the previous account's list ids
+  // — none of which match this user's lists. Without the empty-picked
+  // branch this fell through to `picked[0].name` and crashed the
+  // whole page on the first render after sign-in. The validating
+  // useEffect in the caller eventually prunes the stale ids, but
+  // ListSelector must not crash in the half-second before that runs.
   const summary = useMemo(() => {
     if (lists.length === 0) return { label: 'No lists', count: null };
     if (noneSelected)        return { label: 'No lists selected', count: 0 };
     if (allSelected)         return { label: 'All lists', count: sumEntries(lists) };
     const picked = lists.filter((l) => selectedSet.has(l.id));
+    if (picked.length === 0) return { label: 'No matching lists', count: 0 };
     const total  = sumEntries(picked);
     if (picked.length === 1) return { label: picked[0].name, count: total };
     return { label: `${picked[0].name} + ${picked.length - 1}`, count: total };

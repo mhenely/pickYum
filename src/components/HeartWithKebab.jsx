@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { isInAnyList } from '../utils/favoriteLists';
 import { updateUserFavorites } from '../redux/slices/userInfoSlice';
+import { useViewportAnchoredPopover } from '../hooks/useViewportAnchoredPopover';
 import ListPicker from './ListPicker';
 import ListManagementModal from './ListManagementModal';
 
@@ -20,7 +21,7 @@ import ListManagementModal from './ListManagementModal';
 //     existing heart call site working without rewrite.
 //   - The kebab opens <ListPicker>, which mutates non-default lists
 //     directly via the favorite-list-entries API.
-//   - Guests fall back to the legacy users[0].favorites array via the
+//   - Guests fall back to the legacy `user.favorites` array via the
 //     same reducer + listener (the listener early-returns on guest).
 //
 // Props:
@@ -58,11 +59,25 @@ export default function HeartWithKebab({
   // which list a row landed in.
   const favorited  = useSelector((s) => isInAnyList(s, restaurantId));
   const listCount  = useSelector((s) => s.userInfo?.favoriteLists?.order?.length ?? 0);
-  const guestFavs  = useSelector((s) => s.userInfo?.users?.[0]?.favorites ?? []);
   // Guest fallback — without any lists, the legacy favorites array
   // is the source of truth. Used pre-hydrate too so the heart stays
   // responsive before /me/all completes.
-  const guestFavorited = guestFavs.some((id) => String(id) === String(restaurantId));
+  //
+  // Selector returns a BOOLEAN (not the array). Primitives have
+  // automatic reference stability, so React-Redux's dev-mode
+  // stability check is satisfied for free. The previous shape
+  // (`s.userInfo.users?.[0]?.favorites ?? []`) was wrong on two
+  // counts: (a) the `users[0]` path was flattened to `user` in the
+  // slice port, so the optional chain always fell through, and
+  // (b) the `?? []` fallback returned a fresh array each call,
+  // tripping the stability check on every dispatch. Inlining the
+  // `.some()` here makes both issues moot.
+  const guestFavorited = useSelector((s) => {
+    const favs = s.userInfo?.user?.favorites;
+    if (!Array.isArray(favs)) return false;
+    const target = String(restaurantId);
+    return favs.some((id) => String(id) === target);
+  });
   const isFavorited = isAuthed && listCount > 0 ? favorited : guestFavorited;
 
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -76,39 +91,16 @@ export default function HeartWithKebab({
   // The picker has to portal to <body>: cards live inside
   // overflow-y-auto containers (Compare/Choose sidebars, detail
   // modal, etc.) that would clip an absolutely-positioned popover
-  // at the scroll boundary. To position the portaled popover we
-  // measure the kebab button's viewport rect once we know it's
-  // open, then re-measure on scroll/resize so the popover tracks
-  // the button if the page moves underneath us.
+  // at the scroll boundary. The viewport-anchored positioning logic
+  // (measure on open + re-measure on scroll/resize) now lives in a
+  // shared hook (TIER_2_3_PLAN.md #13).
+  //
+  // Outside-click dismissal isn't included here because the picker
+  // already handles its own close paths (X button, Esc, anchor ref
+  // exclusion) — adding a redundant document-level handler here
+  // would close on clicks inside the picker too.
   const kebabRef = useRef(null);
-  const [pickerPos, setPickerPos] = useState(null);
-
-  useEffect(() => {
-    if (!pickerOpen) { setPickerPos(null); return undefined; }
-    const measure = () => {
-      const btn = kebabRef.current;
-      if (!btn) return;
-      const r = btn.getBoundingClientRect();
-      setPickerPos({
-        // Anchor the popover's TOP just below the kebab and align
-        // its RIGHT edge with the kebab's right edge — same visual
-        // result the old `absolute top-full right-0 mt-1` had.
-        top:   r.bottom + 4,
-        right: window.innerWidth - r.right,
-      });
-    };
-    measure();
-    // Track scroll/resize so the popover stays glued to the button
-    // if the user scrolls a sidebar or the page while the popover
-    // is open. `true` for the scroll listener so we catch nested
-    // overflow containers, not just window scroll.
-    window.addEventListener('scroll',  measure, true);
-    window.addEventListener('resize',  measure);
-    return () => {
-      window.removeEventListener('scroll', measure, true);
-      window.removeEventListener('resize', measure);
-    };
-  }, [pickerOpen]);
+  const pickerPos = useViewportAnchoredPopover(kebabRef, pickerOpen);
 
   const heartCls = size === 'sm' ? 'text-base' : 'text-xl';
   const kebabCls = size === 'sm' ? 'text-xs px-1' : 'text-sm px-1';

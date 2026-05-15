@@ -10,6 +10,13 @@ import ConfirmDialog from '../components/ConfirmDialog';
 // on members and anchors; non-host members see read-only lists plus a
 // "leave trip" button. Once archivedAt is set, every action is hidden.
 
+// Module-level empty array shared by every selector below that falls
+// back when the corresponding slice path is missing. Without this, each
+// `?? []` would return a fresh array reference per call and React-
+// Redux's dev-mode selector-stability check would warn on every
+// dispatch. Same pattern as `allLists` / `Toaster`'s EMPTY_QUEUE.
+const EMPTY_ID_LIST = [];
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function formatDateRange(startDate, endDate) {
@@ -434,8 +441,15 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
   // restaurant picker. We don't run a separate Places search here — keep
   // the UI compact and reuse what the user has already curated.
   const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? {});
-  const userFavorites     = useSelector((s) => s.userInfo.users?.[0]?.favorites ?? []);
-  const userSelections    = useSelector((s) => s.userInfo.users?.[0]?.options   ?? []);
+  // Path was `users?.[0]?.favorites` before the slice-flatten migration
+  // (Tier 2 #6 + #7). The legacy path always returned undefined post-
+  // flatten, then the `?? []` fallback minted a fresh array each call
+  // — same dev-mode selector-stability bug that fired in HeartWithKebab.
+  // The new path reads `user.favorites` and the fallback is the shared
+  // module-level `EMPTY_ID_LIST` so the missing-data branch returns a
+  // stable reference too.
+  const userFavorites     = useSelector((s) => s.userInfo.user?.favorites ?? EMPTY_ID_LIST);
+  const userSelections    = useSelector((s) => s.userInfo.user?.options   ?? EMPTY_ID_LIST);
 
   // "Add a meal" form state. Collapsed by default; expanded when the user
   // clicks the affordance. Participant picker defaults to all members

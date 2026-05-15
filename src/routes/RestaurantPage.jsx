@@ -19,6 +19,7 @@ import {
   defaultList as selectDefaultList,
   readActiveListIds,
   writeActiveListIds,
+  pruneStaleListIds,
 } from "../utils/favoriteLists";
 // PRICE_LABELS was previously consumed by the inline ChosenModal
 // in this file; that modal has been replaced by the global
@@ -107,13 +108,29 @@ const RestaurantPage = () => {
   const allFavoriteLists    = useSelector(selectAllLists);
   const defaultFavoriteList = useSelector(selectDefaultList);
   const [activeListIds, setActiveListIdsState] = useState(() => readActiveListIds('compare'));
+  // Seed the selection to [defaultId] on first hydrate AND prune any
+  // stale sessionStorage ids that don't match the current user's lists.
+  // Same logic as SearchPage's identical effect — see the comment there
+  // (and utils/favoriteLists.js → pruneStaleListIds) for the full
+  // rationale on why this guard exists.
   useEffect(() => {
     if (activeListIds == null && defaultFavoriteList?.id) {
       const next = [defaultFavoriteList.id];
       setActiveListIdsState(next);
       writeActiveListIds('compare', next);
+      return;
     }
-  }, [activeListIds, defaultFavoriteList?.id]);
+    if (Array.isArray(activeListIds) && allFavoriteLists.length > 0) {
+      const { pruned, changed } = pruneStaleListIds(activeListIds, allFavoriteLists);
+      if (changed) {
+        const next = pruned.length === 0 && defaultFavoriteList?.id
+          ? [defaultFavoriteList.id]
+          : pruned;
+        setActiveListIdsState(next);
+        writeActiveListIds('compare', next);
+      }
+    }
+  }, [activeListIds, defaultFavoriteList?.id, allFavoriteLists]);
   const setActiveListIds = useCallback((next) => {
     setActiveListIdsState(next);
     writeActiveListIds('compare', next);
@@ -136,7 +153,7 @@ const RestaurantPage = () => {
   // Resolve the favorites list shown in the sidebar as the deduped
   // UNION of every selected list's entries. `activeListIds` is null
   // before the first-hydrate seeding lands — in that window we fall
-  // back to the legacy users[0].favorites array so the sidebar is
+  // back to the legacy `user.favorites` array so the sidebar is
   // never empty during a page load.
   const favorites = useMemo(() => {
     let base;

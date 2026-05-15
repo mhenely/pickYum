@@ -24,6 +24,7 @@ import socialRoutes from './routes/social';
 import groupRoutes from './routes/groups';
 import tripRoutes from './routes/trips';
 import healthRoutes from './routes/health';
+import flagsRoutes from './routes/flags';
 
 export function createApp() {
   const app = express();
@@ -71,6 +72,19 @@ export function createApp() {
   app.use('/api/groups', groupRoutes);
   app.use('/api/trips', tripRoutes);
   app.use('/api/health', healthRoutes);
+  app.use('/api/flags',  flagsRoutes);
+
+  // E2E test hooks — mounted ONLY when the env gate is set. Provides
+  // destructive endpoints (reset / unlock test users) that have no
+  // business existing in production. The route file itself also gates
+  // every operation on `*@pickyum.test` email suffix as a defense in
+  // depth, but the mount gate is the load-bearing protection.
+  // See server/src/routes/__testHooks.ts.
+  if (process.env.E2E_TEST_HOOKS === 'true') {
+    const testHooks = require('./routes/__testHooks').default;
+    app.use('/api/__test', testHooks);
+    logger.warn('E2E_TEST_HOOKS=true — destructive test endpoints mounted at /api/__test');
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {

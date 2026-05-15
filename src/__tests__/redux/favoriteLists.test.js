@@ -21,6 +21,7 @@ import {
   legacyFavoritesArray,
   readActiveListIds,
   writeActiveListIds,
+  pruneStaleListIds,
 } from '../../utils/favoriteLists';
 
 // Helper builder for a list row shaped like an /me/all favoriteLists entry.
@@ -140,17 +141,17 @@ describe('favoriteLists slice reducers', () => {
     it('toggles the legacy array AND the default list entries in sync', () => {
       const seeded = reducer(baseState, setFavoriteLists([buildList({ id: 1 })]));
       const added = reducer(seeded, updateUserFavorites({ restaurantId: 42 }));
-      expect(added.users[0].favorites.map(String)).toContain('42');
+      expect(added.user.favorites.map(String)).toContain('42');
       expect(added.favoriteLists.byId[1].entries.map((e) => e.restaurantId)).toContain(42);
 
       const removed = reducer(added, updateUserFavorites({ restaurantId: 42 }));
-      expect(removed.users[0].favorites.map(String)).not.toContain('42');
+      expect(removed.user.favorites.map(String)).not.toContain('42');
       expect(removed.favoriteLists.byId[1].entries).toHaveLength(0);
     });
 
     it('with no default list, only touches the legacy array (guest path)', () => {
       const added = reducer(baseState, updateUserFavorites({ restaurantId: 42 }));
-      expect(added.users[0].favorites.map(String)).toContain('42');
+      expect(added.user.favorites.map(String)).toContain('42');
       // No default list means no mirror — favoriteLists state stays empty.
       expect(added.favoriteLists.order).toEqual([]);
     });
@@ -277,7 +278,7 @@ describe('favoriteLists selectors', () => {
     ]);
     expect(legacyFavoritesArray(stateWithList)).toEqual(['42']);
 
-    // No lists → fall back to users[0].favorites
+    // No lists → fall back to `user.favorites`
     const guestState = {
       userInfo: reducer(reducer(undefined, { type: '@@INIT' }), updateUserFavorites({ restaurantId: 7 })),
     };
@@ -325,5 +326,46 @@ describe('readActiveListIds / writeActiveListIds', () => {
   it('returns null for the legacy "all" sentinel (caller re-seeds)', () => {
     sessionStorage.setItem('pickyum_active_list_search', 'all');
     expect(readActiveListIds('search')).toBeNull();
+  });
+});
+
+describe('pruneStaleListIds', () => {
+  // Used by Search / Compare / Choose to clean sessionStorage ids that
+  // belong to a previously-signed-in account's lists. The bug this
+  // catches: a user logs out + logs back in as a different account in
+  // the same tab → previous account's list ids linger in sessionStorage
+  // → ListSelector tries to summarize them, finds zero matches, and
+  // either renders "No matching lists" or crashes on `picked[0].name`.
+  // Pruning at the page level prevents the bad state from being passed
+  // to ListSelector in the first place.
+
+  const lists = (...ids) => ids.map((id) => ({ id, name: `L${id}`, entries: [] }));
+
+  it('returns unchanged + changed=false when every id is valid', () => {
+    expect(pruneStaleListIds([1, 2, 3], lists(1, 2, 3))).toEqual({ pruned: [1, 2, 3], changed: false });
+  });
+
+  it('drops ids missing from the current lists', () => {
+    expect(pruneStaleListIds([1, 999, 3], lists(1, 2, 3))).toEqual({ pruned: [1, 3], changed: true });
+  });
+
+  it('preserves ordering of the survivors', () => {
+    expect(pruneStaleListIds([3, 1, 999], lists(1, 2, 3)).pruned).toEqual([3, 1]);
+  });
+
+  it('returns an empty pruned array when no id matches', () => {
+    expect(pruneStaleListIds([100, 200], lists(1, 2))).toEqual({ pruned: [], changed: true });
+  });
+
+  it('handles a non-array activeIds (passes through unchanged)', () => {
+    // Callers may invoke this before sessionStorage is hydrated; null
+    // / undefined must not crash.
+    expect(pruneStaleListIds(null, lists(1)).pruned).toBeNull();
+    expect(pruneStaleListIds(undefined, lists(1)).changed).toBe(false);
+  });
+
+  it('handles empty currentLists (drops everything)', () => {
+    // A user with no lists yet → every id is stale.
+    expect(pruneStaleListIds([1, 2, 3], [])).toEqual({ pruned: [], changed: true });
   });
 });

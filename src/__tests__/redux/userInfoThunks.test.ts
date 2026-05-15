@@ -4,7 +4,18 @@ import { configureStore } from '@reduxjs/toolkit';
 vi.mock('../../lib/api', () => ({
   api: {
     users: {
+      // /me/all is kept as a deprecated alias on the server, but the
+      // client's loadUserData thunk now fires /me/identity and /me/data
+      // in parallel (see Tier 1 #3 split). These mocks cover both
+      // shapes — getAll stays for any test that still references it.
       getAll: vi.fn(),
+      getIdentity: vi.fn().mockResolvedValue({
+        apiVersion: 1,
+        user: { id: 1, email: 'a@b.c', username: 'alice', flipCount: 0, avatarUrl: null, role: 'user', emailVerified: true },
+        defaultListId: 1,
+        favoriteIds: [],
+      }),
+      getData: vi.fn(),
       addReview: vi.fn(),
       refreshPlaces: vi.fn().mockResolvedValue({ updated: [] }),
     },
@@ -37,11 +48,11 @@ beforeEach(() => {
 });
 
 describe('loadUserData thunk', () => {
-  it('hydrates users[0] and customRestaurants from the API response', async () => {
+  it('hydrates state.user and customRestaurants from the API response', async () => {
     // /me/all returns the normalized shape: one deduped restaurants
     // array + ID-only collection lists. apiVersion is forward-compat
     // metadata for future mobile clients.
-    (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (api.users.getData as ReturnType<typeof vi.fn>).mockResolvedValue({
       apiVersion: 1,
       restaurants: [
         { id: 10, name: 'Pho 99', cuisineType: 'Vietnamese', priceLevel: 1, googleRating: '4.6', hours: '11 AM' },
@@ -60,18 +71,18 @@ describe('loadUserData thunk', () => {
     await store.dispatch(loadUserData({ id: 1, email: 'a@b.c', username: 'alice', flipCount: 0 }) as never);
 
     const state = store.getState().userInfo;
-    expect(state.users[0].favorites).toEqual(['10']);
-    expect(state.users[0].options).toEqual(['11']);
+    expect(state.user.favorites).toEqual(['10']);
+    expect(state.user.options).toEqual(['11']);
     // Shape extended with `id` (server row id, needed for the InsightsPage
     // toggle) and `excludeFromInsights` (per-entry opt-out flag).
-    expect(state.users[0].accepted).toEqual([
+    expect(state.user.accepted).toEqual([
       { id: null, restaurantId: '10', date: '2024-05-01T12:00:00Z', excludeFromInsights: false },
     ]);
 
     // Reviews are keyed by restaurantId, with id (server-issued integer) preserved
-    expect(state.users[0].reviews['10']).toBeDefined();
-    expect(state.users[0].reviews['10']).toHaveLength(1);
-    expect(state.users[0].reviews['10'][0]).toEqual(expect.objectContaining({
+    expect(state.user.reviews['10']).toBeDefined();
+    expect(state.user.reviews['10']).toHaveLength(1);
+    expect(state.user.reviews['10'][0]).toEqual(expect.objectContaining({
       id: 7,
       content: 'Solid',
       rating: 4.5,
@@ -84,7 +95,7 @@ describe('loadUserData thunk', () => {
   });
 
   it('is guarded by isDataLoaded — second call is a no-op', async () => {
-    (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (api.users.getData as ReturnType<typeof vi.fn>).mockResolvedValue({
       apiVersion: 1,
       restaurants: [],
       favoriteIds: [], optionIds: [], archivedIds: [],
@@ -93,15 +104,18 @@ describe('loadUserData thunk', () => {
 
     const store = buildStore();
     await store.dispatch(loadUserData({ id: 1, email: 'a@b.c', username: 'alice' }) as never);
-    expect(api.users.getAll).toHaveBeenCalledTimes(1);
+    // The thunk now fires getIdentity + getData in parallel — either is a
+    // reasonable "did we hit the network?" sentinel. Picking getData since
+    // it's the heavier of the two and is the one most callers care about.
+    expect(api.users.getData).toHaveBeenCalledTimes(1);
 
     await store.dispatch(loadUserData({ id: 1, email: 'a@b.c', username: 'alice' }) as never);
     // Second dispatch short-circuits via the `condition` predicate
-    expect(api.users.getAll).toHaveBeenCalledTimes(1);
+    expect(api.users.getData).toHaveBeenCalledTimes(1);
   });
 
   it('coerces restaurant ids to strings to match string-keyed Redux collections', async () => {
-    (api.users.getAll as ReturnType<typeof vi.fn>).mockResolvedValue({
+    (api.users.getData as ReturnType<typeof vi.fn>).mockResolvedValue({
       apiVersion: 1,
       restaurants: [{ id: 42, name: 'X', cuisineType: null, priceLevel: null, googleRating: null }],
       favoriteIds: [42],
@@ -113,8 +127,8 @@ describe('loadUserData thunk', () => {
     await store.dispatch(loadUserData({ id: 1, email: 'a@b.c', username: 'alice' }) as never);
 
     const state = store.getState().userInfo;
-    expect(state.users[0].favorites[0]).toBe('42');
-    expect(typeof state.users[0].favorites[0]).toBe('string');
+    expect(state.user.favorites[0]).toBe('42');
+    expect(typeof state.user.favorites[0]).toBe('string');
   });
 });
 
@@ -125,7 +139,7 @@ describe('persistAddReview thunk', () => {
     });
 
     const store = buildStore();
-    // Pre-hydrate users[0] so addUserReview can find user.id === 1
+    // Pre-hydrate state.user so addUserReview can find user.id === 1
     store.dispatch({
       type: 'userInfo/setUserData',
       payload: { id: 1, email: 'a@b.c', username: 'alice', favorites: [], options: [], accepted: [], archived: [], reviews: {}, flipCount: 0 },
@@ -138,8 +152,8 @@ describe('persistAddReview thunk', () => {
     expect(api.users.addReview).toHaveBeenCalledWith({ restaurantId: 5, rating: 4, content: 'Good' });
 
     const state = store.getState().userInfo;
-    expect(state.users[0].reviews['5']).toHaveLength(1);
-    expect(state.users[0].reviews['5'][0]).toEqual({
+    expect(state.user.reviews['5']).toHaveLength(1);
+    expect(state.user.reviews['5'][0]).toEqual({
       id: 123, // server-issued, NOT a local id
       content: 'Good',
       rating: 4,
@@ -159,7 +173,7 @@ describe('persistAddReview thunk', () => {
     }) as never);
 
     expect(api.users.addReview).not.toHaveBeenCalled();
-    const stored = store.getState().userInfo.users[0].reviews['5'][0];
+    const stored = store.getState().userInfo.user.reviews['5'][0];
     expect(stored.content).toBe('Tasty');
     // Guest reviews get a string "local-…" id so they're still distinguishable
     expect(typeof stored.id).toBe('string');
@@ -180,7 +194,7 @@ describe('persistAddReview thunk', () => {
     await store.dispatch(persistAddReview({ restaurantId: '5', userId: 1, content: 'Same', rating: 4, date: '2024-05-01' }) as never);
     await store.dispatch(persistAddReview({ restaurantId: '5', userId: 1, content: 'Same', rating: 5, date: '2024-05-02' }) as never);
 
-    const reviews = store.getState().userInfo.users[0].reviews['5'];
+    const reviews = store.getState().userInfo.user.reviews['5'];
     expect(reviews).toHaveLength(2);
     expect(reviews.map((r: { id: number }) => r.id)).toEqual([1, 2]); // distinguishable
   });

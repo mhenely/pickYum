@@ -590,7 +590,7 @@ function EventDatePicker({ groupId, event, isHost, onUpdated }) {
 
 function ResultDisplay({ result, scheduledFor }) {
   const dispatch = useDispatch();
-  const userOptions    = useSelector((s) => s.userInfo.users[0]?.options ?? EMPTY_ARRAY);
+  const userOptions    = useSelector((s) => s.userInfo.user?.options ?? EMPTY_ARRAY);
   const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? EMPTY_OBJECT);
 
   const [shared, setShared] = useState(false);
@@ -1638,7 +1638,7 @@ const GroupDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const authUserId        = useSelector((state) => state.auth.user?.id);
-  const userOptions    = useSelector((state) => state.userInfo.users[0]?.options ?? EMPTY_ARRAY);
+  const userOptions    = useSelector((state) => state.userInfo.user?.options ?? EMPTY_ARRAY);
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants ?? EMPTY_OBJECT);
 
   const [group, setGroup] = useState(null);

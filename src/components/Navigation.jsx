@@ -212,7 +212,34 @@ const NavBar = () => {
           old `min-h-full` wrapper which had no effect — Footer's mt-auto
           only works inside a flex column. */}
       <div className="min-h-screen flex flex-col">
-        <Disclosure as="nav" className="bg-white border-b border-orange-200" style={{boxShadow: '0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06)'}}>
+        {/* Sticky on tablet/desktop (md:+), scrolls with page on mobile.
+            Vertical real estate is at a premium on phones, and the
+            mobile hamburger menu already provides on-demand access to
+            every nav link — sticky is most valuable on long-scroll
+            desktop pages (History, Search results, Insights) where
+            scrolling back to the top to switch pages is real friction.
+
+            md:bg-white/90 + md:backdrop-blur-sm: translucent in the
+            sticky variant so scrolled content shows through subtly,
+            matching the modern-app feel. Default mobile keeps opaque
+            bg-white since it's not sticky and there's no content
+            scrolling beneath it.
+
+            z-30 sits below the layers that need to be drawable on top
+            of the nav: modals (z-50), portaled kebab popovers (z-60),
+            Toaster (z-100). Above page content (no explicit z-index)
+            and the celebration overlay (z-40), so the nav stays
+            visible during normal scroll.
+
+            top-0 anchors the sticky edge to the viewport top — note
+            this requires no `overflow-*` on any ancestor that would
+            otherwise create a new scroll container; the `min-h-screen
+            flex flex-col` wrapper is sticky-friendly. */}
+        <Disclosure
+          as="nav"
+          className="bg-white border-b border-orange-200 md:sticky md:top-0 md:z-30 md:bg-white/90 md:backdrop-blur-sm"
+          style={{boxShadow: '0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06)'}}
+        >
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
             <div className="flex h-16 items-center justify-between">
 

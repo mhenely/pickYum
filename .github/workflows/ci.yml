@@ -8,16 +8,37 @@ on:
 
 jobs:
   backend:
-    name: Backend (typecheck + Jest)
+    name: Backend (typecheck + Jest + migration smoke)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
+    # Postgres service for the migration drift smoke test. Existing tests
+    # stub out the DB, so this isn't used for `npm test`; it exists so we
+    # can run `prisma migrate deploy` end-to-end against a fresh schema
+    # and catch ordering bugs, missing extensions, or broken SQL syntax
+    # before they hit staging.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       # Tests stub out network/DB calls but the source still references these
       # and validateEnv() would refuse to boot without them.
       JWT_SECRET: test-jwt-secret-for-ci
-      DATABASE_URL: postgresql://test:test@localhost:5432/test
+      # The non-test steps below use the live postgres service. Tests
+      # themselves don't actually connect (Prisma is mocked in unit tests).
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
       NODE_ENV: test
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +51,15 @@ jobs:
       - run: npx prisma generate
       - run: npx tsc --noEmit
       - run: npm test
+      # Migration smoke test: applies every migration in order against a
+      # fresh Postgres. Catches "this migration breaks on a clean DB" the
+      # moment a PR introduces it — before it's possible to ship broken
+      # SQL to staging. Requires the postgres service above. Run last
+      # because it mutates the DB.
+      - name: Apply migrations to fresh DB
+        run: npx prisma migrate deploy
+      - name: Verify migration drift check passes
+        run: npx tsx scripts/check-migrations.ts --quiet
 
   frontend:
     name: Frontend (typecheck + Vitest + build)

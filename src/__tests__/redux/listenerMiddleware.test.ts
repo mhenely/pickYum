@@ -28,6 +28,7 @@ vi.mock('../../lib/api', () => ({
 import { api } from '../../lib/api';
 import { listenerMiddleware } from '../../redux/listenerMiddleware';
 import authReducer from '../../redux/slices/authSlice';
+import toastReducer from '../../redux/slices/toastSlice';
 import userInfoReducer, {
   setUserData,
   updateUserFavorites,
@@ -51,6 +52,11 @@ async function buildStore(authStatus: 'authenticated' | 'unauthenticated' = 'aut
     reducer: {
       auth: authReducer,
       userInfo: userInfoReducer,
+      // The sync abstraction (see syncHelper.ts) pushes toasts on
+      // background mutation outcomes; without the toast reducer here,
+      // every `syncWithFeedback` call would dispatch into the void and
+      // the failure-surface assertion below would fail.
+      toast: toastReducer,
     },
     middleware: (gd) => gd().prepend(listenerMiddleware.middleware),
   });
@@ -261,15 +267,29 @@ describe('updateUserInfo listener', () => {
 });
 
 describe('Listener errors do not crash the store', () => {
-  it('a rejected API call is caught and logged, store stays consistent', async () => {
+  it('a rejected API call is caught and surfaced via toast + console, store stays consistent', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    (api.users.addFavorite as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('500'));
+    // mockRejectedValue (not -Once): the sync helper retries 2 times after
+    // an initial failure, so the API has to keep rejecting for the failure
+    // path to run. Retry backoff is 0ms in test env (see syncHelper) so
+    // a few flush() ticks are enough to drain the retry loop.
+    const err500 = Object.assign(new Error('500'), { status: 500 });
+    (api.users.addFavorite as ReturnType<typeof vi.fn>).mockRejectedValue(err500);
     const store = await buildStore();
     store.dispatch(updateUserFavorites({ restaurantId: '42' }));
-    await flush();
+    // 3 flushes = initial attempt + 2 retries; one extra for the final
+    // failure-handling microtask (Sentry capture + toast push).
+    await flush(); await flush(); await flush(); await flush();
     expect(errSpy).toHaveBeenCalled();
-    // Local state still added the favorite even though the sync failed
-    expect(store.getState().userInfo.users[0].favorites).toContain('42');
+    // Local state still has the favorite — optimistic updates don't roll
+    // back automatically here (see syncHelper opts.rollback for the path
+    // that does).
+    expect(store.getState().userInfo.user.favorites).toContain('42');
+    // The user-visible failure surface: an error toast in the queue.
+    // This is the bug-fix payoff — silent failures are gone.
+    const errorToasts = store.getState().toast.queue.filter((t) => t.status === 'error');
+    expect(errorToasts).toHaveLength(1);
+    expect(errorToasts[0].label).toBe('Adding to favorites');
     errSpy.mockRestore();
   });
 });
