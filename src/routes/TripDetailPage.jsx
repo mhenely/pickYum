@@ -30,6 +30,21 @@ function formatDateRange(startDate, endDate) {
   return start ?? end;
 }
 
+// Formats an ISO trip date as YYYY-MM-DD for `<input type="date">`. Trip
+// startDate / endDate are stored as UTC midnight (the client sends
+// YYYY-MM-DD from a date input; `new Date('YYYY-MM-DD')` parses as UTC),
+// so we extract UTC parts here — using local getDate() would shift to
+// the previous day for users west of UTC.
+function tripDateToInputValue(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 // ── Members section ─────────────────────────────────────────
 
 function MembersSection({ trip, canHostAct, currentUserId, onRefresh }) {
@@ -1212,7 +1227,16 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
       {canCreate && (
         !showCreate ? (
           <button
-            onClick={() => setShowCreate(true)}
+            onClick={() => {
+              setShowCreate(true);
+              // Pre-fill the date with the trip's start so the calendar
+              // opens on the trip's month (browsers open the date picker
+              // on the input's value when set, the current month when
+              // empty). User can change it before submitting.
+              if (!newDate && trip.startDate) {
+                setNewDate(tripDateToInputValue(trip.startDate));
+              }
+            }}
             className="text-xs font-medium text-orange-600 hover:text-orange-800"
           >
             + Add a meal
@@ -1232,13 +1256,18 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
                 type="date"
                 value={newDate}
                 onChange={(e) => setNewDate(e.target.value)}
+                min={tripDateToInputValue(trip.startDate)}
+                max={tripDateToInputValue(trip.endDate)}
                 className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
               />
               <input
                 type="time"
                 value={newTime}
                 onChange={(e) => setNewTime(e.target.value)}
-                className="w-28 rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                /* w-40 (was w-28) — 12-hour locales need ~120-130px to fit
+                   "HH:MM AM/PM" with the spinner without the AM/PM control
+                   overlapping the digits. */
+                className="w-40 rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
               />
             </div>
             <select

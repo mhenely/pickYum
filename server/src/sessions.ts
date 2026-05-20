@@ -5,10 +5,24 @@ import { logger } from './lib/logger';
 
 // ── Interfaces ────────────────────────────────────────────────
 
+// Photo entry mirrors the JSON shape in Restaurant.photos. After the
+// Supabase Storage migration `name` is a public CDN URL (legacy Google
+// refs may still appear in pre-migration sessions persisted to Redis).
+export interface SnapshotPhoto {
+  name: string;
+  widthPx: number | null;
+  heightPx: number | null;
+}
+
 export interface RestaurantSnapshot {
   name: string;
   type: string;
   price: number;
+  // First photo only — enough for cards, the coin face, and the result
+  // reveal. Keeping it bounded avoids bloating session payloads (and the
+  // SSE broadcasts that ship them). Missing field is fine: old session
+  // blobs and ad-hoc sessions without photo data still typecheck.
+  photos?: SnapshotPhoto[];
 }
 
 export type SessionStatus = 'lobby' | 'voting' | 'closed' | 'done';

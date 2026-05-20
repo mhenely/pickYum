@@ -14,6 +14,7 @@ import { api } from "../lib/api";
 import useCurrentUser from "../hooks/useCurrentUser";
 import { useScrollListIndex } from "../hooks/useScrollListIndex";
 import RouletteWheel from "../components/RouletteWheel";
+import CoinFlip from "../components/CoinFlip";
 import CreateSessionModal from "../components/CreateSessionModal";
 import { buildAcceptedStats, formatLastChosen } from "../utils/acceptedStats";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
@@ -169,14 +170,14 @@ const HelpMeChoosePage = () => {
   const [mode, setMode] = useState("coinflip");
 
   // ── Coin flip ─────────────────────────────────────────────
-  const [coinRotation, setCoinRotation]     = useState(0);
-  const [coinTransition, setCoinTransition] = useState("none");
-  const [coinPhase, setCoinPhase]           = useState('idle'); // idle | anticipate | flipping | settle
-  const [flipDuration, setFlipDuration]     = useState(2400);
-  const [isFlipping, setIsFlipping]         = useState(false);
-  const [flipResult, setFlipResult]         = useState(null);
-  const [flipComplete, setFlipComplete]     = useState(false);
-  const [sparkles, setSparkles]             = useState([]);
+  // The visible coin (rotation, sparkles, settle wobble) lives inside
+  // <CoinFlip>. The page only tracks parent-side gating: whether a flip
+  // is mid-animation (disables the button) and whether a result is
+  // currently awaiting user accept/remove (shows the ResultBanner).
+  const coinRef = useRef(null);
+  const [isFlipping, setIsFlipping]     = useState(false);
+  const [flipResult, setFlipResult]     = useState(null);
+  const [flipComplete, setFlipComplete] = useState(false);
 
   // ── Touch detection ───────────────────────────────────────
   const [isTouchDevice, setIsTouchDevice] = useState(
@@ -329,58 +330,28 @@ const HelpMeChoosePage = () => {
   const [rouletteWinnerId, setRouletteWinnerId] = useState(null);
 
   // ── Coin flip logic ───────────────────────────────────────
-  const generateSparkles = () => Array.from({ length: 12 }).map((_, i) => {
-    const angle = (i / 12) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
-    const dist  = 70 + Math.random() * 60;
-    return {
-      id: i,
-      dx: Math.cos(angle) * dist,
-      dy: Math.sin(angle) * dist - 8,
-      delay: Math.random() * 100,
-    };
-  });
-
+  // CoinFlip owns rotation, sparkles, and the multi-phase animation
+  // timeline. The page just kicks it off and listens for the result.
   const handleCoinFlip = () => {
-    if (isFlipping) return;
-    setFlipComplete(false);
-    setFlipResult(null);
-    setSparkles([]);
+    if (isFlipping || flipComplete) return;
     dispatch(incrementFlipCount());
+    setFlipResult(null);
+    setFlipComplete(false);
     setIsFlipping(true);
-    setCoinPhase('anticipate');
+    coinRef.current?.flip();
+  };
 
-    // Phase 1 — anticipation squash, then launch the flip
-    setTimeout(() => {
-      const seed = (Math.random() * 0.5 + (performance.now() % 1) * 0.3 + (Date.now() % 1000) * 0.0002) % 1;
-      const result = seed > 0.5 ? "heads" : "tails";
+  // Fires when the coin lands (start of settle phase) — show the
+  // ResultBanner immediately even though the wobble is still playing.
+  const handleCoinResult = (result) => {
+    setFlipResult(result);
+    setFlipComplete(true);
+  };
 
-      const currentAngle = ((coinRotation % 360) + 360) % 360;
-      const targetAngle  = result === "tails" ? 180 : 0;
-      let angleDelta = (targetAngle - currentAngle + 360) % 360;
-      if (angleDelta === 0) angleDelta = 360;
-      const delta    = (Math.floor(Math.random() * 6) + 9) * 360 + angleDelta;
-      const duration = 2200 + Math.floor(Math.random() * 400);
-
-      setFlipDuration(duration);
-      setCoinPhase('flipping');
-      setCoinTransition(`transform ${duration}ms cubic-bezier(0.15, 0.65, 0.28, 1)`);
-      setCoinRotation((prev) => prev + delta);
-
-      // Phase 2 — flip lands, kick off the settle wobble + reveal flash
-      setTimeout(() => {
-        setFlipResult(result);
-        setFlipComplete(true);
-        setCoinTransition("none");
-        setCoinPhase('settle');
-        setSparkles(generateSparkles());
-
-        // Phase 3 — wobble decays; return to idle
-        setTimeout(() => {
-          setCoinPhase('idle');
-          setIsFlipping(false);
-        }, 550);
-      }, duration + 50);
-    }, 180);
+  // Fires when the settle wobble ends — re-enable the flip button label
+  // (the button stays disabled via flipComplete until accept/remove).
+  const handleCoinComplete = () => {
+    setIsFlipping(false);
   };
 
   const coinWinnerId = flipResult === "heads" ? headsId : flipResult === "tails" ? tailsId : null;
@@ -398,7 +369,7 @@ const HelpMeChoosePage = () => {
     dispatch(removeUserOption(coinWinnerId));
     setFlipResult(null);
     setFlipComplete(false);
-    setSparkles([]);
+    coinRef.current?.reset();
     // Pop the global "Tonight you're going to…" celebration. Same
     // UX as the Compare-page Choose-Now and the detail-modal
     // Choose-Now action — fires from celebrationSlice, rendered by
@@ -411,7 +382,7 @@ const HelpMeChoosePage = () => {
     dispatch(removeUserOption(coinWinnerId));
     setFlipResult(null);
     setFlipComplete(false);
-    setSparkles([]);
+    coinRef.current?.reset();
   };
 
   const handleRemoveOption = (id) => {
@@ -945,49 +916,15 @@ const HelpMeChoosePage = () => {
           {/* ── COIN FLIP ────────────────────────────────────── */}
           {flipPool.length >= 2 && mode === "coinflip" && (
             <div className="flex flex-col items-center gap-5">
-              <div className="coin-perspective mt-[27px] mb-[27px]">
-                {flipComplete && coinWinnerId && (
-                  <>
-                    <div key={`glow-${flipResult}-${coinWinnerId}`} className="coin-glow" />
-                    {sparkles.map((s) => (
-                      <div
-                        key={s.id}
-                        className="coin-sparkle"
-                        style={{
-                          '--sparkle-dx': `${s.dx}px`,
-                          '--sparkle-dy': `${s.dy}px`,
-                          '--sparkle-delay': `${s.delay}ms`,
-                        }}
-                      />
-                    ))}
-                  </>
-                )}
-                <div className={`coin-shell ${coinPhase !== 'idle' ? coinPhase : ''}`}>
-                  <div
-                    className={`coin-toss ${coinPhase === 'flipping' ? 'flipping' : ''}`}
-                    style={{ '--flip-duration': `${flipDuration}ms` }}
-                  >
-                    <div
-                      className="coin"
-                      style={{ transform: `rotateY(${coinRotation}deg)`, transition: coinTransition }}
-                    >
-                      <div className="coin-face coin-heads">
-                        <div className="coin-ring">
-                          <span className="coin-text-top">{headsId && allRestaurants[headsId]?.name}</span>
-                          <span className="coin-symbol">👤</span>
-                          <span className="coin-text-bottom">Heads</span>
-                        </div>
-                      </div>
-                      <div className="coin-face coin-tails">
-                        <div className="coin-ring">
-                          <span className="coin-text-top">{tailsId && allRestaurants[tailsId]?.name}</span>
-                          <span className="coin-symbol">🦅</span>
-                          <span className="coin-text-bottom">Tails</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+              <div className="mt-[27px] mb-[27px]">
+                <CoinFlip
+                  ref={coinRef}
+                  headsRestaurant={headsId ? allRestaurants[headsId] : null}
+                  tailsRestaurant={tailsId ? allRestaurants[tailsId] : null}
+                  size={250}
+                  onResult={handleCoinResult}
+                  onComplete={handleCoinComplete}
+                />
               </div>
 
               <button

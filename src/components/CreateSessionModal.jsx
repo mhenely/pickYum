@@ -24,7 +24,20 @@ const CreateSessionModal = ({ flipPool, restaurantMap, defaultHostName = '', onC
       const restaurants = {};
       for (const id of candidates) {
         const r = restaurantMap[id];
-        if (r) restaurants[id] = { name: r.name, type: r.type ?? 'Restaurant', price: r.price ?? 1 };
+        if (!r) continue;
+        const snap = { name: r.name, type: r.type ?? 'Restaurant', price: r.price ?? 1 };
+        // Pass the first photo through so invitees (especially guests
+        // without local restaurant data) see the same coin face + cards
+        // as the host. Server validates / caps.
+        const first = Array.isArray(r.photos) ? r.photos[0] : null;
+        if (first && typeof first.name === 'string') {
+          snap.photos = [{
+            name: first.name,
+            widthPx: typeof first.widthPx === 'number' ? first.widthPx : null,
+            heightPx: typeof first.heightPx === 'number' ? first.heightPx : null,
+          }];
+        }
+        restaurants[id] = snap;
       }
       const { session } = await sessionApi.create({ hostName: name, candidates, restaurants });
       sessionStorage.setItem(`py_voter_${session.id}`, name);

@@ -11,6 +11,7 @@ import {
   createSession, generateSessionId, withSessionLock,
   getSession, saveSession, notifyClients,
   type RestaurantSnapshot,
+  type SnapshotPhoto,
 } from '../sessions';
 
 export type EventParent = 'group' | 'trip';
@@ -59,10 +60,25 @@ export async function launchVoting(
   const restaurants: Record<string, RestaurantSnapshot> = {};
   for (const opt of event.options) {
     const r = opt.restaurant;
+    // First photo only — keeps the SSE-broadcast session payload bounded.
+    // Restaurant.photos is JSON; defensively re-shape since old rows may
+    // pre-date the current { name, widthPx, heightPx } convention.
+    let firstPhoto: SnapshotPhoto | null = null;
+    if (Array.isArray(r.photos) && r.photos.length > 0) {
+      const p = r.photos[0] as { name?: unknown; widthPx?: unknown; heightPx?: unknown };
+      if (p && typeof p.name === 'string' && p.name.length > 0) {
+        firstPhoto = {
+          name: p.name,
+          widthPx: typeof p.widthPx === 'number' ? p.widthPx : null,
+          heightPx: typeof p.heightPx === 'number' ? p.heightPx : null,
+        };
+      }
+    }
     restaurants[String(r.id)] = {
       name:  r.name,
       type:  r.cuisineType ?? 'Restaurant',
       price: r.priceLevel ?? 1,
+      ...(firstPhoto ? { photos: [firstPhoto] } : {}),
     };
   }
 

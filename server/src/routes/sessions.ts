@@ -11,6 +11,7 @@ import {
   generateVoterToken,
   redactForClient,
   RestaurantSnapshot,
+  SnapshotPhoto,
   VoteMethod,
 } from '../sessions';
 import { requireAuth, getOptionalAuthUserId } from '../middleware/auth';
@@ -72,7 +73,9 @@ function validateSessionCreate(body: unknown):
       if (!value || typeof value !== 'object') {
         return { ok: false, error: `restaurants["${key}"] must be an object` };
       }
-      const { name, type, price } = value as { name?: unknown; type?: unknown; price?: unknown };
+      const { name, type, price, photos } = value as {
+        name?: unknown; type?: unknown; price?: unknown; photos?: unknown;
+      };
       if (typeof name !== 'string' || name.length === 0 || name.length > MAX_RESTAURANT_NAME) {
         return { ok: false, error: `restaurants["${key}"].name must be a string ≤${MAX_RESTAURANT_NAME} chars` };
       }
@@ -82,7 +85,28 @@ function validateSessionCreate(body: unknown):
       if (typeof price !== 'number' || !Number.isFinite(price) || price < 0 || price > 4) {
         return { ok: false, error: `restaurants["${key}"].price must be a number between 0 and 4` };
       }
-      validatedRestaurants[key] = { name, type, price };
+      // Photos are optional. We trim to the first entry (the only one any
+      // session-rendered card uses) and re-shape defensively — anything
+      // misshapen is silently dropped. 512 char cap mirrors the restaurants
+      // route; Supabase URLs are well under, legacy Google refs can be ~300.
+      const validatedPhotos: SnapshotPhoto[] = [];
+      if (Array.isArray(photos) && photos.length > 0) {
+        const first = photos[0];
+        if (first && typeof first === 'object') {
+          const p = first as { name?: unknown; widthPx?: unknown; heightPx?: unknown };
+          if (typeof p.name === 'string' && p.name.length > 0) {
+            validatedPhotos.push({
+              name: p.name.slice(0, 512),
+              widthPx: typeof p.widthPx === 'number' ? p.widthPx : null,
+              heightPx: typeof p.heightPx === 'number' ? p.heightPx : null,
+            });
+          }
+        }
+      }
+      validatedRestaurants[key] = {
+        name, type, price,
+        ...(validatedPhotos.length > 0 ? { photos: validatedPhotos } : {}),
+      };
     }
   }
 

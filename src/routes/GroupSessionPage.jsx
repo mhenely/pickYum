@@ -12,6 +12,8 @@ import { groupsApi } from '../lib/groupsApi';
 // the session belongs to a trip rather than a group.
 import { api } from '../lib/api';
 import RouletteWheel from '../components/RouletteWheel';
+import CoinFlip from '../components/CoinFlip';
+import { placePhotoUrl } from '../lib/api';
 import InfoRow from '../components/InfoRow';
 import ScheduleModal from '../components/ScheduleModal';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
@@ -828,13 +830,46 @@ const GroupWinnerModal = ({ session, onClose, onAccept }) => {
 const RouletteOverlay = ({ winnerId, pool, restaurants, onComplete }) => {
   const wheelRef = useRef(null);
   const [done, setDone] = useState(false);
+  const [imagesReady, setImagesReady] = useState(false);
+
+  // Preload all candidate photos before kicking off the spin — invitees
+  // (especially guests) often haven't rendered these images yet, and
+  // without this gate the wheel spins with placeholder fills for the
+  // first second while the CDN responds. Mirrors the coin overlay.
+  // Falls open at 2000ms so a slow/dead CDN doesn't strand users.
+  useEffect(() => {
+    const urls = (pool ?? [])
+      .map((id) => {
+        const first = restaurants?.[id]?.photos?.[0];
+        return first ? placePhotoUrl(first, 400) : null;
+      })
+      .filter(Boolean);
+    if (urls.length === 0) { setImagesReady(true); return; }
+
+    let remaining = urls.length;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      remaining -= 1;
+      if (remaining <= 0) setImagesReady(true);
+    };
+    urls.forEach((url) => {
+      const img = new Image();
+      img.onload = tick;
+      img.onerror = tick;
+      img.src = url;
+    });
+    const timeout = setTimeout(() => { if (!cancelled) setImagesReady(true); }, 2000);
+    return () => { cancelled = true; clearTimeout(timeout); };
+  }, [pool, restaurants]);
 
   useEffect(() => {
+    if (!imagesReady) return;
     const timer = setTimeout(() => {
       wheelRef.current?.spinTo(winnerId, pool);
     }, 300);
     return () => clearTimeout(timer);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [imagesReady, winnerId, pool]);
 
   const handleComplete = () => {
     setDone(true);
@@ -843,7 +878,9 @@ const RouletteOverlay = ({ winnerId, pool, restaurants, onComplete }) => {
 
   return (
     <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center gap-4 p-4">
-      <p className="text-white font-bold text-lg">{done ? '🎉 We have a winner!' : '🎰 Spinning…'}</p>
+      <p className="text-white font-bold text-lg">
+        {done ? '🎉 We have a winner!' : imagesReady ? '🎰 Spinning…' : '🎰 Getting ready…'}
+      </p>
       <RouletteWheel
         ref={wheelRef}
         options={pool}
@@ -855,28 +892,81 @@ const RouletteOverlay = ({ winnerId, pool, restaurants, onComplete }) => {
 };
 
 // ── Coin flip animation overlay ───────────────────────────────
+// Plays the same coin animation every voter sees on the result reveal.
+// The host triggers the flip via the API; the server picks the winner
+// and broadcasts via SSE. We pre-populated `pool` (2 restaurant IDs)
+// and `winnerId` at applySession time, then mount this overlay which
+// auto-runs the coin to land on whichever side carries the winner.
 
-const CoinFlipOverlay = ({ onComplete }) => {
-  const [phase, setPhase] = useState('spinning'); // spinning | done
+const CoinFlipOverlay = ({ pool, winnerId, restaurants, onComplete }) => {
+  const coinRef = useRef(null);
+  const [done, setDone] = useState(false);
+  const [imagesReady, setImagesReady] = useState(false);
 
+  const headsId = pool?.[0];
+  const tailsId = pool?.[1];
+  const headsRestaurant = headsId ? restaurants?.[headsId] : null;
+  const tailsRestaurant = tailsId ? restaurants?.[tailsId] : null;
+  const landingSide = sid(winnerId) === sid(headsId) ? 'heads' : 'tails';
+
+  // Preload both coin-face photos before kicking off the animation.
+  // The host has these images cached from rendering the lobby /
+  // candidate cards; invitees often don't (the lobby uses a different
+  // photo size and may not have hit Supabase yet), so without this
+  // step their coin spins with empty faces for ~1s until the CDN
+  // responds. Falls open at 1500ms so a dead/slow CDN doesn't strand
+  // the user on the preload screen — better to show a blank face
+  // briefly than to never flip.
   useEffect(() => {
-    const t = setTimeout(() => { setPhase('done'); setTimeout(onComplete, 800); }, 2200);
+    const urls = [headsRestaurant, tailsRestaurant]
+      .map((r) => (r?.photos?.[0] ? placePhotoUrl(r.photos[0], 400) : null))
+      .filter(Boolean);
+    if (urls.length === 0) { setImagesReady(true); return; }
+
+    let remaining = urls.length;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      remaining -= 1;
+      if (remaining <= 0) setImagesReady(true);
+    };
+    urls.forEach((url) => {
+      const img = new Image();
+      img.onload = tick;
+      img.onerror = tick;
+      img.src = url;
+    });
+    const timeout = setTimeout(() => { if (!cancelled) setImagesReady(true); }, 1500);
+    return () => { cancelled = true; clearTimeout(timeout); };
+  }, [headsRestaurant, tailsRestaurant]);
+
+  // Hold the flip until photos are in cache. The 250ms beat after they
+  // load lets the user see the two faces side-by-side for a moment
+  // before the toss starts — gives the reveal more drama.
+  useEffect(() => {
+    if (!imagesReady) return;
+    const t = setTimeout(() => {
+      coinRef.current?.flip(landingSide);
+    }, 250);
     return () => clearTimeout(t);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [imagesReady, landingSide]);
+
+  const handleResult = () => setDone(true);
+  const handleSettle = () => setTimeout(onComplete, 900);
 
   return (
-    <div className="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center gap-6">
-      <p className="text-white font-bold text-xl">{phase === 'done' ? '🎉 Decided!' : '🪙 Flipping…'}</p>
-      <div
-        className="w-24 h-24 rounded-full flex items-center justify-center text-5xl shadow-2xl"
-        style={{
-          background: 'linear-gradient(135deg, #fbbf24, #f59e0b)',
-          animation: phase === 'spinning' ? 'spin 0.4s linear infinite' : 'none',
-        }}
-      >
-        🪙
-      </div>
-      <style>{`@keyframes spin { to { transform: rotateY(360deg); } }`}</style>
+    <div className="fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex flex-col items-center justify-center gap-8 p-4">
+      <p className="text-white font-bold text-xl tracking-wide">
+        {done ? '🎉 Decided!' : imagesReady ? '🪙 Flipping…' : '🪙 Getting ready…'}
+      </p>
+      <CoinFlip
+        ref={coinRef}
+        headsRestaurant={headsRestaurant}
+        tailsRestaurant={tailsRestaurant}
+        size={260}
+        onResult={handleResult}
+        onComplete={handleSettle}
+      />
     </div>
   );
 };
@@ -909,6 +999,8 @@ const GroupSessionPage = () => {
   // Overlay state for animations
   const [showCoin, setShowCoin]         = useState(false);
   const [showRoulette, setShowRoulette] = useState(false);
+  const coinPool          = useRef([]);
+  const coinWinnerId      = useRef(null);
   const roulettePool      = useRef([]);
   const rouletteWinnerId  = useRef(null);
   const pendingSession    = useRef(null);
@@ -941,6 +1033,11 @@ const GroupSessionPage = () => {
     const justGotResult = prev != null && !prev.result && !!s.result;
     if (justGotResult) {
       if (s.method === 'flip' && !showCoinRef.current) {
+        // Mirror the spin path: snapshot pool + winner up-front so the
+        // overlay reads from refs and doesn't depend on session state
+        // that's intentionally being held back until onComplete.
+        coinPool.current     = s.tiedIds ?? s.candidates;
+        coinWinnerId.current = s.result;
         pendingSession.current = s;
         setShowCoin(true);
       } else if (s.method === 'spin' && !showRouletteRef.current) {
@@ -1047,11 +1144,17 @@ const GroupSessionPage = () => {
   const handleFlip = async () => {
     setActionError('');
     try {
-      setShowCoin(true);
+      // Snapshot the pool BEFORE the API call so we can pass it into the
+      // overlay with confidence — server can't change candidates on a
+      // flip, and using the current session avoids depending on the
+      // response shape. Mirrors handleSpin below.
+      const pool = session.tiedIds ?? session.candidates;
       const { session: s } = await sessionApi.flip(sessionId, 'flip');
+      coinPool.current       = pool;
+      coinWinnerId.current   = s.result;
       pendingSession.current = s; // applied in onComplete, not before
+      setShowCoin(true);
     } catch (err) {
-      setShowCoin(false);
       setActionError(err.message);
     }
   };
@@ -1218,6 +1321,9 @@ const GroupSessionPage = () => {
     <>
       {showCoin && (
         <CoinFlipOverlay
+          pool={coinPool.current}
+          winnerId={coinWinnerId.current}
+          restaurants={session.restaurants}
           onComplete={() => {
             setShowCoin(false);
             if (pendingSession.current) {
