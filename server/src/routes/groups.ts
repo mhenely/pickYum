@@ -73,11 +73,15 @@ async function checkGroupAuth(groupId: number, userId: number): Promise<GroupAut
 // with 20 past events × 30 voters could ship 50+ KB of unused ballots
 // here otherwise.
 const eventInclude = {
-  // options.include composed via eventOptionsInclude(true) — same
-  // restaurant: true + addedBy(userMinimalSelect) + asc createdAt as
-  // before, just sourced from lib/prismaHelpers so trips.ts and any
-  // future caller share one definition.
-  options: eventOptionsInclude(true),
+  // options.include composed via eventOptionsInclude — projects
+  // restaurant down to { id, name } because that's all the inline
+  // event card on the group page reads. The full Restaurant row
+  // (photos JSON + opening hours JSON + every column) added 2-5KB
+  // per option; a group with 20 past events × 5 options each was
+  // shipping ~100-200KB of restaurant data the UI never displayed.
+  // BallotDetailModal renders from result.restaurantPool (a
+  // separately-persisted JSON snapshot), not from this projection.
+  options: eventOptionsInclude({ id: true, name: true }),
   result: {
     select: {
       id: true,

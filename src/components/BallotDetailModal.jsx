@@ -218,8 +218,16 @@ const BallotDetailModal = ({ groupId, eventId, onClose }) => {
                             <span>{voter}{voter === result.hostUsername ? ' 👑' : ''}</span>
                             <VoterIdentityBadge voterName={voter} meta={metaFor(voter)} />
                           </p>
-                          {isRanked && Array.isArray(ballot) ? (
-                            // Ordered list of preferences. Empty array = abstained.
+                          {/* Dispatch on the ballot shape directly rather than
+                              result.voteMethod. The shape is unambiguous: ranked
+                              ballots are arrays of ordered ids; simple/approval
+                              ballots are objects mapping id → boolean. This
+                              survives missing / case-mismatched voteMethod on
+                              the result row (which was producing a
+                              "Ballot format not recognized" line for every voter
+                              when voteMethod was null/uppercase). */}
+                          {Array.isArray(ballot) ? (
+                            // Ranked: ordered list of preferences. Empty array = abstained.
                             ballot.length === 0 ? (
                               <p className="text-xs text-gray-400 italic">No ranking submitted</p>
                             ) : (
@@ -232,8 +240,8 @@ const BallotDetailModal = ({ groupId, eventId, onClose }) => {
                                 ))}
                               </ol>
                             )
-                          ) : isSimple && ballot && typeof ballot === 'object' ? (
-                            // Approval map → list of approved restaurants
+                          ) : (ballot && typeof ballot === 'object') ? (
+                            // Simple/approval: object mapping restaurantId → boolean
                             (() => {
                               const approved = Object.entries(ballot).filter(([, v]) => v === true).map(([id]) => id);
                               if (approved.length === 0) {
