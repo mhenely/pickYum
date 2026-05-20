@@ -19,7 +19,10 @@ const HelpMeChoosePage    = lazy(() => import('./routes/HelpMeChoosePage'));
 const HistoryPage         = lazy(() => import('./routes/HistoryPage.jsx'));
 const UserInfoPage        = lazy(() => import('./routes/UserInfoPage'));
 const RestaurantPage      = lazy(() => import('./routes/RestaurantPage'));
-const SearchPage          = lazy(() => import('./routes/SearchPage.jsx'));
+// HomePage is the `/` dispatcher: renders LandingPage for guests and
+// SearchPage for signed-in users. It lazy-loads its own children, so
+// this entry chunk doesn't pull in either before the user arrives.
+const HomePage            = lazy(() => import('./routes/HomePage'));
 const OAuthCallbackPage   = lazy(() => import('./routes/OAuthCallbackPage'));
 const AboutPage           = lazy(() => import('./routes/AboutPage'));
 const GroupSessionPage    = lazy(() => import('./routes/GroupSessionPage'));
@@ -77,7 +80,10 @@ const router = createBrowserRouter([
       {
         element: <ProtectedRoute />,
         children: [
-          { index: true, element: <Suspense fallback={PageFallback}><SearchPage /></Suspense> },
+          // HomePage picks between LandingPage (guests) and SearchPage
+          // (signed-in). Keeping it inside ProtectedRoute leaves the
+          // shared "auth-resolving" skeleton in one place.
+          { index: true, element: <Suspense fallback={PageFallback}><HomePage /></Suspense> },
           { path: 'choose/*', element: <Suspense fallback={PageFallback}><HelpMeChoosePage /></Suspense> },
           { path: 'History/:userId', element: <Suspense fallback={PageFallback}><HistoryPage /></Suspense> },
           { path: 'userInfo/:userId', element: <Suspense fallback={PageFallback}><UserInfoPage /></Suspense> },

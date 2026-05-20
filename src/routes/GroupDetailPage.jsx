@@ -3,6 +3,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { addUserOption, addCustomRestaurant } from '../redux/slices/userInfoSlice';
+import { pushToast } from '../redux/slices/toastSlice';
 
 // Stable sentinels for useSelector fallbacks. The naive
 // `useSelector(s => x ?? [])` produces a NEW [] on every dispatch, which
@@ -35,6 +36,7 @@ import DietaryTagChips from '../components/DietaryTagChips';
 const GroupDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const dispatch = useDispatch();
   const authUserId        = useSelector((state) => state.auth.user?.id);
   const userOptions    = useSelector((state) => state.userInfo.user?.options ?? EMPTY_ARRAY);
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants ?? EMPTY_OBJECT);
@@ -105,7 +107,13 @@ const GroupDetailPage = () => {
       message: `Remove ${username} from the group?`,
       onConfirm: async () => {
         setConfirm(null);
-        try { await groupsApi.removeMember(group.id, userId); await load(); } catch { /* ignore */ }
+        try {
+          await groupsApi.removeMember(group.id, userId);
+          await load();
+          dispatch(pushToast({ id: `group-kick-${Date.now()}`, status: 'success', label: `Removed ${username}` }));
+        } catch (err) {
+          dispatch(pushToast({ id: `group-kick-err-${Date.now()}`, status: 'error', label: `Could not remove ${username}`, detail: err?.message }));
+        }
       },
     });
   };
@@ -115,7 +123,13 @@ const GroupDetailPage = () => {
       message: 'Leave this group?',
       onConfirm: async () => {
         setConfirm(null);
-        try { await groupsApi.removeMember(group.id, authUserId); navigate('/socials'); } catch { /* ignore */ }
+        try {
+          await groupsApi.removeMember(group.id, authUserId);
+          dispatch(pushToast({ id: `group-leave-${Date.now()}`, status: 'success', label: `Left ${group.name}` }));
+          navigate('/socials');
+        } catch (err) {
+          dispatch(pushToast({ id: `group-leave-err-${Date.now()}`, status: 'error', label: 'Could not leave group', detail: err?.message }));
+        }
       },
     });
   };

@@ -309,6 +309,7 @@ export default function TripDetailPage() {
   // useNavigate is consumed inside MembersSection (for "leave" → bounce
   // to /trips); the page itself doesn't need it directly.
   const currentUserId = useSelector((s) => s.auth.user?.id);
+  const dispatch = useDispatch();
 
   const [trip,    setTrip]    = useState(null);
   const [loading, setLoading] = useState(true);
@@ -353,8 +354,19 @@ export default function TripDetailPage() {
     try {
       const { trip: updated } = await api.trips.archive(trip.id);
       setTrip(updated);
+      dispatch(pushToast({
+        id: `trip-archive-${Date.now()}`,
+        status: 'success',
+        label: `Trip "${updated.name}" archived`,
+      }));
     } catch (err) {
       setError(err.message ?? 'Could not archive trip.');
+      dispatch(pushToast({
+        id: `trip-archive-err-${Date.now()}`,
+        status: 'error',
+        label: 'Could not archive trip',
+        detail: err?.message,
+      }));
     } finally {
       setArchiving(false);
     }

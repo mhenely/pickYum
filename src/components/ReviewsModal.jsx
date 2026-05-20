@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useSelector } from 'react-redux';
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { api } from '../lib/api';
 import { useFetchData } from '../hooks/useFetchData';
 import StarRating from './star-rating/star-rating.component';
@@ -110,15 +111,15 @@ const ReviewsModal = ({
   const totalCount     = sorted.length + (showGoogleCard ? 1 : 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-black/40" aria-hidden="true" onClick={onClose} />
-
-      <div className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl flex flex-col max-h-[85vh]">
+    <Dialog open onClose={onClose} className="relative z-50">
+      <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl flex flex-col max-h-[85vh]">
 
         {/* Header */}
         <div className="flex justify-between items-start px-6 py-4 border-b border-gray-100 shrink-0">
           <div>
-            <h2 className="text-base font-bold text-gray-900 leading-snug">{restaurantName}</h2>
+            <DialogTitle className="text-base font-bold text-gray-900 leading-snug">{restaurantName}</DialogTitle>
             <p className="text-xs text-gray-400 mt-0.5">
               {totalCount} review{totalCount !== 1 ? 's' : ''}
               {loading && ' · loading…'}
@@ -240,8 +241,9 @@ const ReviewsModal = ({
             ))
           )}
         </div>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 };
 

@@ -4,6 +4,7 @@
 // Auto-collapses to option 2 when there are no other members to hand off to.
 
 import { useState } from 'react';
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { groupsApi } from '../../lib/groupsApi';
 
 export default function HostExitDialog({ group, onClose, onTransferred, onDisbanded }) {
@@ -30,10 +31,12 @@ export default function HostExitDialog({ group, onClose, onTransferred, onDisban
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
+    <Dialog open onClose={loading ? () => {} : onClose} className="relative z-50">
+      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center px-4">
+        <DialogPanel className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col gap-4">
         <div>
-          <h2 className="text-lg font-bold text-gray-900">Leave or disband group</h2>
+          <DialogTitle className="text-lg font-bold text-gray-900">Leave or disband group</DialogTitle>
           <p className="text-sm text-gray-500 mt-0.5">
             You're the host of <span className="font-medium text-gray-700">{group.name}</span>.
             Pick what happens next.
@@ -116,7 +119,8 @@ export default function HostExitDialog({ group, onClose, onTransferred, onDisban
             {loading ? '…' : mode === 'transfer' ? 'Transfer & leave' : 'Disband group'}
           </button>
         </div>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 }

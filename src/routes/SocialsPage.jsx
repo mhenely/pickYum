@@ -1,10 +1,33 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useDispatch } from 'react-redux';
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { socialApi } from '../lib/socialApi';
 import { groupsApi } from '../lib/groupsApi';
+import { pushToast } from '../redux/slices/toastSlice';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import SectionEmpty from '../components/SectionEmpty';
 import { SkeletonSection, SkeletonList } from '../components/Skeleton';
+import Button from '../components/ui/Button';
+
+// Toast helper: each mutation pushes a one-shot success/error so silent
+// catches don't leave the user wondering "did that work?" Centralized
+// here so the SocialsPage tabs all use a single id-naming convention.
+function toastOk(dispatch, label) {
+  dispatch(pushToast({
+    id: `social-ok-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    status: 'success',
+    label,
+  }));
+}
+function toastErr(dispatch, label, err) {
+  dispatch(pushToast({
+    id: `social-err-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    status: 'error',
+    label,
+    detail: err?.message,
+  }));
+}
 
 // ── Shared helpers ────────────────────────────────────────────
 
@@ -43,9 +66,11 @@ function CreateGroupModal({ onClose, onCreate }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
-        <h2 className="text-lg font-bold text-gray-900 mb-4">Create a group</h2>
+    <Dialog open onClose={loading ? () => {} : onClose} className="relative z-50">
+      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center px-4">
+        <DialogPanel className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <DialogTitle className="text-lg font-bold text-gray-900 mb-4">Create a group</DialogTitle>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <input
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
@@ -56,16 +81,15 @@ function CreateGroupModal({ onClose, onCreate }) {
           />
           {error && <p className="text-xs text-red-500">{error}</p>}
           <div className="flex gap-2 mt-1">
-            <button type="button" onClick={onClose} className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
-              Cancel
-            </button>
-            <button type="submit" disabled={loading || !name.trim()} className="flex-1 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all shadow-brand-sm">
+            <Button variant="secondary" fullWidth onClick={onClose}>Cancel</Button>
+            <Button type="submit" fullWidth disabled={loading || !name.trim()}>
               {loading ? 'Creating…' : 'Create'}
-            </button>
+            </Button>
           </div>
         </form>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -122,6 +146,7 @@ function GroupCard({ group }) {
 }
 
 function GroupsTab() {
+  const dispatch = useDispatch();
   const [groups, setGroups] = useState([]);
   const [pendingInvites, setPendingInvites] = useState([]);
   const [archivedGroups, setArchivedGroups] = useState([]);
@@ -151,7 +176,10 @@ function GroupsTab() {
     try {
       await groupsApi.respondInvite(invite.group.id, invite.id, action);
       await load();
-    } catch { /* ignore */ } finally {
+      toastOk(dispatch, action === 'accept' ? `Joined ${invite.group.name}` : `Declined invite to ${invite.group.name}`);
+    } catch (err) {
+      toastErr(dispatch, action === 'accept' ? 'Could not accept invite' : 'Could not decline invite', err);
+    } finally {
       setRespondingId(null);
     }
   };
@@ -159,6 +187,7 @@ function GroupsTab() {
   const handleCreated = (group) => {
     setShowCreate(false);
     setGroups((prev) => [{ ...group, role: 'host' }, ...prev]);
+    toastOk(dispatch, `Group "${group.name}" created`);
   };
 
   const hostedGroups = groups.filter((g) => g.role === 'host');
@@ -178,12 +207,7 @@ function GroupsTab() {
     <div>
       <div className="flex items-center justify-between mb-5">
         <p className="text-sm text-gray-500">Manage dinner groups and vote with friends.</p>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
-        >
-          + New group
-        </button>
+        <Button onClick={() => setShowCreate(true)}>+ New group</Button>
       </div>
 
       <div className="flex flex-col gap-8">
@@ -291,6 +315,7 @@ function GroupsTab() {
 // ── Friends tab ───────────────────────────────────────────────
 
 function FriendsTab() {
+  const dispatch = useDispatch();
   const [friends, setFriends]         = useState([]);
   const [incoming, setIncoming]       = useState([]);
   const [friendPicks, setFriendPicks] = useState([]);
@@ -357,35 +382,57 @@ function FriendsTab() {
     try {
       if (isFollowing) await socialApi.unfollow(userId);
       else             await socialApi.follow(userId);
-    } catch {
+      toastOk(dispatch, isFollowing ? 'Unfollowed' : 'Following');
+    } catch (err) {
       // Rollback — the server rejected the change, so put isFollowing back.
       setSearchResults((prev) =>
         prev?.map((u) => (u.id === userId ? { ...u, isFollowing } : u)) ?? prev
       );
+      toastErr(dispatch, isFollowing ? 'Could not unfollow' : 'Could not follow', err);
     }
   };
 
   const handleFriendAction = async (userId, friendStatus, requestId) => {
     setActionId(userId);
     try {
-      if      (friendStatus === 'none')              await socialApi.sendRequest(userId);
-      else if (friendStatus === 'pending_sent')      await socialApi.cancelRequest(userId);
-      else if (friendStatus === 'pending_received' && requestId) await socialApi.respondRequest(requestId, 'accept');
-      else if (friendStatus === 'friends')           await socialApi.unfriend(userId);
+      let okMsg = '';
+      if      (friendStatus === 'none')              { await socialApi.sendRequest(userId);   okMsg = 'Friend request sent'; }
+      else if (friendStatus === 'pending_sent')      { await socialApi.cancelRequest(userId); okMsg = 'Friend request canceled'; }
+      else if (friendStatus === 'pending_received' && requestId) { await socialApi.respondRequest(requestId, 'accept'); okMsg = 'Friend request accepted'; }
+      else if (friendStatus === 'friends')           { await socialApi.unfriend(userId);      okMsg = 'Unfriended'; }
       await Promise.all([load(), refreshSearch()]);
-    } catch { /* ignore */ } finally {
+      if (okMsg) toastOk(dispatch, okMsg);
+    } catch (err) {
+      toastErr(dispatch, 'Could not update friend status', err);
+    } finally {
       setActionId(null);
     }
   };
 
   const handleRespond = async (requestId, action) => {
     setActionId(requestId);
-    try { await socialApi.respondRequest(requestId, action); await load(); } catch { /* ignore */ } finally { setActionId(null); }
+    try {
+      await socialApi.respondRequest(requestId, action);
+      await load();
+      toastOk(dispatch, action === 'accept' ? 'Friend request accepted' : 'Friend request declined');
+    } catch (err) {
+      toastErr(dispatch, 'Could not respond to friend request', err);
+    } finally {
+      setActionId(null);
+    }
   };
 
   const handleUnfriend = async (userId) => {
     setActionId(userId);
-    try { await socialApi.unfriend(userId); setFriends((f) => f.filter((u) => u.id !== userId)); } catch { /* ignore */ } finally { setActionId(null); }
+    try {
+      await socialApi.unfriend(userId);
+      setFriends((f) => f.filter((u) => u.id !== userId));
+      toastOk(dispatch, 'Unfriended');
+    } catch (err) {
+      toastErr(dispatch, 'Could not unfriend', err);
+    } finally {
+      setActionId(null);
+    }
   };
 
   if (loading) {
@@ -588,6 +635,7 @@ function FriendsTab() {
 // ── Followers tab ─────────────────────────────────────────────
 
 function FollowersTab() {
+  const dispatch = useDispatch();
   const [following, setFollowing] = useState([]);
   const [followers, setFollowers] = useState([]);
   const [loading, setLoading]     = useState(true);
@@ -611,12 +659,24 @@ function FollowersTab() {
 
   const handleUnfollow = async (userId) => {
     setActionId(userId);
-    try { await socialApi.unfollow(userId); setFollowing((f) => f.filter((u) => u.id !== userId)); } catch { /* ignore */ } finally { setActionId(null); }
+    try {
+      await socialApi.unfollow(userId);
+      setFollowing((f) => f.filter((u) => u.id !== userId));
+      toastOk(dispatch, 'Unfollowed');
+    } catch (err) {
+      toastErr(dispatch, 'Could not unfollow', err);
+    } finally { setActionId(null); }
   };
 
   const handleFollow = async (userId) => {
     setActionId(userId);
-    try { await socialApi.follow(userId); await load(); } catch { /* ignore */ } finally { setActionId(null); }
+    try {
+      await socialApi.follow(userId);
+      await load();
+      toastOk(dispatch, 'Following');
+    } catch (err) {
+      toastErr(dispatch, 'Could not follow', err);
+    } finally { setActionId(null); }
   };
 
   if (loading) {
@@ -678,6 +738,7 @@ function FollowersTab() {
 // ── Recommendations tab ───────────────────────────────────────
 
 function RecommendationsTab() {
+  const dispatch = useDispatch();
   const [recs, setRecs]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [removingId, setRemovingId] = useState(null);
@@ -725,7 +786,10 @@ function RecommendationsTab() {
     try {
       await socialApi.unrecommend(restaurantId);
       setRecs((prev) => prev.filter((r) => r.restaurantId !== restaurantId));
-    } catch { /* ignore */ } finally {
+      toastOk(dispatch, 'Recommendation removed');
+    } catch (err) {
+      toastErr(dispatch, 'Could not remove recommendation', err);
+    } finally {
       setRemovingId(null);
     }
   };

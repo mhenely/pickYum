@@ -66,35 +66,101 @@ const JoinView = ({ sessionId, session, onJoined, joinError, defaultName = '' })
     }
   };
 
+  // Peek of the candidate pool to show invitees what they're actually
+  // voting on. Up to 3 names + a "+N more" overflow row when there are
+  // more candidates than will fit. Skipped while session is null
+  // (initial load) — the join card stays usable either way.
+  const candidatePreview = session?.candidates?.slice(0, 3).map((id) => session.restaurants?.[id]?.name).filter(Boolean) ?? [];
+  const candidateCount   = session?.candidates?.length ?? 0;
+  const extraCandidates  = Math.max(0, candidateCount - candidatePreview.length);
+  // Voter peek minus the host so "2 friends" doesn't double-count the
+  // person who set up the vote in the first place.
+  const otherVoters = session
+    ? Object.keys(session.voters ?? {}).filter((n) => n !== session.hostName)
+    : [];
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
-      <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8">
-        <div className="text-4xl text-center mb-4">🍽️</div>
-        <h1 className="text-2xl font-bold text-gray-900 text-center mb-1">pickYum Group</h1>
-        {session && (
-          <p className="text-sm text-gray-500 text-center mb-6">
-            {session.hostName} is deciding where to eat — join the vote!
-          </p>
-        )}
-        <form onSubmit={handle} className="space-y-4">
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Your name"
-            maxLength={30}
-            autoFocus
-            className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-          />
-          {err && <p className="text-sm text-red-500">{err}</p>}
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-lg bg-orange-500 py-2.5 text-sm font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors"
-          >
-            {loading ? 'Joining…' : 'Join session'}
-          </button>
-        </form>
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-orange-50 via-white to-orange-50 p-4">
+      <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl overflow-hidden">
+
+        {/* Hero — gradient strip + branded title. The strip is the
+            same orange→red brand gradient used on the marketing site
+            buttons, giving guests an immediate visual link to the
+            product before the form pulls focus. */}
+        <div className="bg-gradient-to-br from-orange-500 to-red-500 px-8 pt-7 pb-6 text-center">
+          <div className="text-4xl mb-2" aria-hidden="true">🍽️</div>
+          <h1 className="text-2xl font-extrabold text-white tracking-tight">pickYum</h1>
+          {session?.hostName && (
+            <p className="text-sm text-orange-50 mt-1.5">
+              <span className="font-semibold text-white">{session.hostName}</span> invited you to vote on dinner
+            </p>
+          )}
+          {!session && (
+            <p className="text-sm text-orange-50 mt-1.5">Loading invite…</p>
+          )}
+        </div>
+
+        <div className="p-7 space-y-5">
+
+          {/* What you're joining — candidates + voter peek. Renders
+              only once session data has hydrated so we don't show
+              "Voting on 0 restaurants" mid-load. */}
+          {session && candidateCount > 0 && (
+            <div className="rounded-xl border border-orange-100 bg-orange-50/50 px-4 py-3">
+              <p className="text-xs font-semibold text-orange-800 uppercase tracking-wide mb-1.5">
+                Voting on {candidateCount} restaurant{candidateCount === 1 ? '' : 's'}
+              </p>
+              <ul className="space-y-0.5 text-sm text-gray-700">
+                {candidatePreview.map((name) => (
+                  <li key={name} className="truncate">· {name}</li>
+                ))}
+                {extraCandidates > 0 && (
+                  <li className="text-xs text-gray-500 italic">+ {extraCandidates} more</li>
+                )}
+              </ul>
+              {otherVoters.length > 0 && (
+                <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-orange-100">
+                  {otherVoters.length} {otherVoters.length === 1 ? 'person has' : 'people have'} joined
+                </p>
+              )}
+            </div>
+          )}
+
+          <form onSubmit={handle} className="space-y-3">
+            <label className="block">
+              <span className="block text-xs font-medium text-gray-600 mb-1.5">Your name</span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Sam"
+                maxLength={30}
+                autoFocus
+                className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+              />
+            </label>
+            {err && <p className="text-sm text-red-500">{err}</p>}
+            <button
+              type="submit"
+              disabled={loading || !name.trim()}
+              className="w-full rounded-lg bg-gradient-to-br from-orange-500 to-red-500 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-50 shadow-brand-sm transition-all"
+            >
+              {loading ? 'Joining…' : 'Join the vote'}
+            </button>
+          </form>
+
+          {/* Soft context for first-time visitors. Compact so it
+              doesn't compete with the form, but enough to answer
+              "what is this site?" without leaving the page. */}
+          <div className="pt-2 border-t border-gray-100 space-y-1.5 text-center">
+            <p className="text-[11px] text-gray-500">No account needed to vote.</p>
+            <p className="text-[11px] text-gray-400">
+              <a href="/about" className="hover:text-orange-600 underline-offset-2 hover:underline" target="_blank" rel="noopener noreferrer">
+                What is pickYum?
+              </a>
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1257,16 +1323,22 @@ const GroupSessionPage = () => {
   }
 
   if (!session) {
+    // Mirrors the JoinView shape (branded hero + body) so loading→loaded
+    // doesn't reflow the page. The hero is already gradient-painted
+    // — no pulse needed there — and the body cells animate-pulse.
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
-        <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8 flex flex-col gap-4">
-          <div className="mx-auto h-10 w-10 rounded-full bg-gray-200 animate-pulse" />
-          <SkeletonLine width="w-2/3" height="h-5" className="mx-auto" />
-          <SkeletonLine width="w-1/2" height="h-3" className="mx-auto" />
-          <div className="mt-2 flex flex-col gap-2">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-orange-50 via-white to-orange-50 p-4">
+        <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl overflow-hidden">
+          <div className="bg-gradient-to-br from-orange-500 to-red-500 px-8 pt-7 pb-6 text-center">
+            <div className="text-4xl mb-2" aria-hidden="true">🍽️</div>
+            <h1 className="text-2xl font-extrabold text-white tracking-tight">pickYum</h1>
+            <p className="text-sm text-orange-50 mt-1.5">Loading invite…</p>
+          </div>
+          <div className="p-7 flex flex-col gap-3">
+            <SkeletonLine width="w-1/3" height="h-3" />
             <SkeletonLine width="w-full" height="h-3" />
             <SkeletonLine width="w-full" height="h-3" />
-            <SkeletonLine width="w-3/4" height="h-3" />
+            <SkeletonLine width="w-2/3" height="h-3" />
           </div>
         </div>
       </div>

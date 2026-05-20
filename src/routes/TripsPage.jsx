@@ -1,7 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useDispatch } from 'react-redux';
 import { api } from '../lib/api';
+import { pushToast } from '../redux/slices/toastSlice';
 import { SkeletonList } from '../components/Skeleton';
+import Button from '../components/ui/Button';
 
 // Trips list — every trip the user hosts OR is a member of, plus an
 // inline form to create a new one. Mirrors the SocialsPage / Groups
@@ -70,6 +73,7 @@ const TripCard = ({ trip }) => {
 
 export default function TripsPage() {
   const navigate = useNavigate();
+  const dispatch = useDispatch();
   const [trips,   setTrips]   = useState([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState('');
@@ -120,6 +124,11 @@ export default function TripsPage() {
       setNewStart('');
       setNewEnd('');
       setShowCreate(false);
+      dispatch(pushToast({
+        id: `trip-created-${Date.now()}`,
+        status: 'success',
+        label: `Trip "${trip.name}" created`,
+      }));
       navigate(`/trips/${trip.id}`);
     } catch (err) {
       setCreateError(err.message ?? 'Could not create trip.');
@@ -144,12 +153,7 @@ export default function TripsPage() {
           </p>
         </div>
         {!showCreate && (
-          <button
-            onClick={() => setShowCreate(true)}
-            className="rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
-          >
-            + New trip
-          </button>
+          <Button onClick={() => setShowCreate(true)}>+ New trip</Button>
         )}
       </div>
 

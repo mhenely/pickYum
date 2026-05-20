@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
+import { useDispatch } from 'react-redux';
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { groupsApi } from '../lib/groupsApi';
+import { pushToast } from '../redux/slices/toastSlice';
 import { SkeletonList } from '../components/Skeleton';
 import SectionEmpty from '../components/SectionEmpty';
+import Button from '../components/ui/Button';
 
 const STATUS_BADGE = {
   OPEN:   { label: 'Open',   cls: 'bg-green-100 text-green-700' },
@@ -31,9 +35,11 @@ function CreateGroupModal({ onClose, onCreate }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
-        <h2 className="text-lg font-bold text-gray-900 mb-4">Create a group</h2>
+    <Dialog open onClose={loading ? () => {} : onClose} className="relative z-50">
+      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center px-4">
+        <DialogPanel className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <DialogTitle className="text-lg font-bold text-gray-900 mb-4">Create a group</DialogTitle>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <input
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
@@ -44,24 +50,15 @@ function CreateGroupModal({ onClose, onCreate }) {
           />
           {error && <p className="text-xs text-red-500">{error}</p>}
           <div className="flex gap-2 mt-1">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={loading || !name.trim()}
-              className="flex-1 rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors"
-            >
+            <Button variant="secondary" fullWidth onClick={onClose}>Cancel</Button>
+            <Button type="submit" fullWidth disabled={loading || !name.trim()}>
               {loading ? 'Creating…' : 'Create'}
-            </button>
+            </Button>
           </div>
         </form>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -102,6 +99,7 @@ function GroupCard({ group }) {
 }
 
 const GroupsPage = () => {
+  const dispatch = useDispatch();
   const [groups, setGroups] = useState([]);
   const [pendingInvites, setPendingInvites] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -128,7 +126,19 @@ const GroupsPage = () => {
     try {
       await groupsApi.respondInvite(invite.group.id, invite.id, action);
       await load();
-    } catch { /* ignore */ } finally {
+      dispatch(pushToast({
+        id: `groups-respond-${Date.now()}`,
+        status: 'success',
+        label: action === 'accept' ? `Joined ${invite.group.name}` : `Declined invite to ${invite.group.name}`,
+      }));
+    } catch (err) {
+      dispatch(pushToast({
+        id: `groups-respond-err-${Date.now()}`,
+        status: 'error',
+        label: action === 'accept' ? 'Could not accept invite' : 'Could not decline invite',
+        detail: err?.message,
+      }));
+    } finally {
       setRespondingId(null);
     }
   };
@@ -136,6 +146,11 @@ const GroupsPage = () => {
   const handleCreated = (group) => {
     setShowCreate(false);
     setGroups((prev) => [{ ...group, role: 'host' }, ...prev]);
+    dispatch(pushToast({
+      id: `groups-created-${Date.now()}`,
+      status: 'success',
+      label: `Group "${group.name}" created`,
+    }));
   };
 
   const hostedGroups = groups.filter((g) => g.role === 'host');
@@ -147,12 +162,7 @@ const GroupsPage = () => {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Groups</h1>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-500 transition-colors"
-        >
-          + New group
-        </button>
+        <Button onClick={() => setShowCreate(true)}>+ New group</Button>
       </div>
 
       {loading && (

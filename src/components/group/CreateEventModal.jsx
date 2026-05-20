@@ -6,6 +6,7 @@
 // flow needed.
 
 import { useState, useEffect } from 'react';
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { groupsApi } from '../../lib/groupsApi';
 
 export default function CreateEventModal({ groupId, onClose, onCreate }) {
@@ -71,9 +72,11 @@ export default function CreateEventModal({ groupId, onClose, onCreate }) {
   const selectedCount = selectedIds.size;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 max-h-[90vh] flex flex-col">
-        <h2 className="text-lg font-bold text-gray-900 mb-4 shrink-0">New vote event</h2>
+    <Dialog open onClose={loading ? () => {} : onClose} className="relative z-50">
+      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center px-4">
+        <DialogPanel className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 max-h-[90vh] flex flex-col">
+        <DialogTitle className="text-lg font-bold text-gray-900 mb-4 shrink-0">New vote event</DialogTitle>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3 min-h-0 flex-1">
           <input
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
@@ -142,7 +145,8 @@ export default function CreateEventModal({ groupId, onClose, onCreate }) {
             </button>
           </div>
         </form>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 }

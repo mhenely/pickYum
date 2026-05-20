@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { loginUser, registerUser } from '../redux/slices/authSlice';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import Button from '../components/ui/Button';
 
 const CALLBACK_URL = `${window.location.origin}/auth/callback`;
 
@@ -277,15 +278,11 @@ const AuthenticationPage = () => {
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={formLoading}
-                  className="mt-1 w-full rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2.5 text-sm font-semibold text-white shadow-brand-sm hover:from-orange-400 hover:to-red-400 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
+                <Button type="submit" size="lg" fullWidth disabled={formLoading} className="mt-1">
                   {formLoading
                     ? (isSignUp ? 'Creating account…' : 'Signing in…')
                     : (isSignUp ? 'Create account' : 'Sign in')}
-                </button>
+                </Button>
 
                 {!isSignUp && (
                   <div className="text-center">

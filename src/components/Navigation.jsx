@@ -906,8 +906,15 @@ const NavBar = () => {
             an always-visible reminder — Search (/), Compare (/restaurant), and
             Socials. Suppressed on /choose because that page already renders the
             full Options grid with the same affordances (click to inspect, ✕ to
-            remove); the chips just steal vertical space and duplicate state. */}
-        {(pathname === '/' || pathname.startsWith('/restaurant') || pathname.startsWith('/socials')) && (
+            remove); the chips just steal vertical space and duplicate state.
+            Also suppressed on `/` for unauthenticated visitors, where the
+            page renders the marketing landing — "Options: No options yet"
+            on top of a sign-up hero reads as a broken UI to first-timers. */}
+        {(
+          (pathname === '/' && !isUnauthenticated) ||
+          pathname.startsWith('/restaurant') ||
+          pathname.startsWith('/socials')
+        ) && (
         <header className="bg-gradient-to-r from-orange-50 to-amber-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8 flex items-center gap-3 flex-wrap">
             <h1 className="text-xs font-bold tracking-widest text-orange-800 uppercase shrink-0">Options</h1>
@@ -951,7 +958,11 @@ const NavBar = () => {
         </header>
         )}
 
-      {isUnauthenticated && (
+      {/* Guest reminder. Hidden on `/` because the landing page itself
+          is the sign-up pitch — repeating the prompt would just look
+          like duplicate UI. Still rendered everywhere else so guest
+          mode never feels permanent. */}
+      {isUnauthenticated && pathname !== '/' && (
         <div className="bg-orange-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-2 flex items-center justify-between gap-4">
             <p className="text-xs text-orange-800">

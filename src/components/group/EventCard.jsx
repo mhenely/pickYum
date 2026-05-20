@@ -13,8 +13,10 @@
 // STATUS_BADGE is co-located here because EventCard is its only consumer.
 
 import { useState } from 'react';
+import { useDispatch } from 'react-redux';
 import { groupsApi } from '../../lib/groupsApi';
 import { api } from '../../lib/api';
+import { pushToast } from '../../redux/slices/toastSlice';
 import ResultDisplay from './ResultDisplay';
 import VoteMethodPicker from './VoteMethodPicker';
 import EventDatePicker from './EventDatePicker';
@@ -28,6 +30,7 @@ const STATUS_BADGE = {
 };
 
 export default function EventCard({ event, group, isHost, authUserId, userOptions, allRestaurants, onRefresh, onConfirm, updateEvent, removeEvent }) {
+  const dispatch = useDispatch();
   const [expanded, setExpanded] = useState(event.status !== 'DONE');
   const [startingVote, setStartingVote] = useState(false);
   const [voteError, setVoteError] = useState('');
@@ -93,7 +96,10 @@ export default function EventCard({ event, group, isHost, authUserId, userOption
           await groupsApi.cancelVoting(group.id, event.id);
           // Optimistic: reset locally to OPEN (server clears sessionId too).
           updateEvent(event.id, (e) => ({ ...e, status: 'OPEN', sessionId: null }));
-        } catch { /* ignore */ }
+          dispatch(pushToast({ id: `event-cancel-${Date.now()}`, status: 'success', label: 'Voting canceled' }));
+        } catch (err) {
+          dispatch(pushToast({ id: `event-cancel-err-${Date.now()}`, status: 'error', label: 'Could not cancel voting', detail: err?.message }));
+        }
       },
     });
   };
@@ -120,7 +126,10 @@ export default function EventCard({ event, group, isHost, authUserId, userOption
         try {
           await groupsApi.deleteEvent(group.id, event.id);
           removeEvent(event.id);
-        } catch { /* ignore */ } finally { setDeleting(false); }
+          dispatch(pushToast({ id: `event-delete-${Date.now()}`, status: 'success', label: `Deleted "${event.name}"` }));
+        } catch (err) {
+          dispatch(pushToast({ id: `event-delete-err-${Date.now()}`, status: 'error', label: 'Could not delete event', detail: err?.message }));
+        } finally { setDeleting(false); }
       },
     });
   };

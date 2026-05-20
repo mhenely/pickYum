@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 
 const STORAGE_KEY = 'pickyum_onboarded';
 
@@ -47,54 +48,59 @@ const OnboardingModal = () => {
   const progress = ((step + 1) / STEPS.length) * 100;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-black/50" aria-hidden="true" onClick={dismiss} />
-      <div className="relative w-full max-w-sm rounded-2xl bg-white shadow-2xl overflow-hidden">
+    <Dialog open={open} onClose={dismiss} className="relative z-50">
+      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="relative w-full max-w-sm rounded-2xl bg-white shadow-2xl overflow-hidden">
 
-        {/* Progress bar */}
-        <div className="h-1 bg-gray-100">
-          <div
-            className="h-full bg-orange-500 transition-all duration-300"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-
-        <div className="px-8 py-8">
-          <div className="text-5xl mb-5 text-center">{current.icon}</div>
-          <h2 className="text-xl font-bold text-gray-900 text-center mb-2">{current.title}</h2>
-          <p className="text-sm text-gray-500 text-center leading-relaxed">{current.body}</p>
-
-          <div className="mt-8 flex items-center justify-between">
-            <button
-              onClick={dismiss}
-              className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-            >
-              Skip
-            </button>
-
-            {/* Step dots */}
-            <div className="flex items-center gap-1.5">
-              {STEPS.map((_, i) => (
-                <button
-                  key={i}
-                  onClick={() => setStep(i)}
-                  className={`w-1.5 h-1.5 rounded-full transition-colors ${
-                    i === step ? 'bg-orange-500' : 'bg-gray-200 hover:bg-gray-300'
-                  }`}
-                />
-              ))}
-            </div>
-
-            <button
-              onClick={() => (isLast ? dismiss() : setStep((s) => s + 1))}
-              className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-500 transition-colors"
-            >
-              {isLast ? "Let's go" : 'Next'}
-            </button>
+          {/* Progress bar */}
+          <div className="h-1 bg-gray-100">
+            <div
+              className="h-full bg-orange-500 transition-all duration-300"
+              style={{ width: `${progress}%` }}
+            />
           </div>
-        </div>
+
+          <div className="px-8 py-8">
+            <div className="text-5xl mb-5 text-center" aria-hidden="true">{current.icon}</div>
+            <DialogTitle className="text-xl font-bold text-gray-900 text-center mb-2">{current.title}</DialogTitle>
+            <p className="text-sm text-gray-500 text-center leading-relaxed">{current.body}</p>
+
+            <div className="mt-8 flex items-center justify-between">
+              <button
+                onClick={dismiss}
+                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                Skip
+              </button>
+
+              {/* Step dots */}
+              <div className="flex items-center gap-1.5" role="tablist">
+                {STEPS.map((_, i) => (
+                  <button
+                    key={i}
+                    role="tab"
+                    aria-label={`Go to step ${i + 1}`}
+                    aria-selected={i === step}
+                    onClick={() => setStep(i)}
+                    className={`w-1.5 h-1.5 rounded-full transition-colors ${
+                      i === step ? 'bg-orange-500' : 'bg-gray-200 hover:bg-gray-300'
+                    }`}
+                  />
+                ))}
+              </div>
+
+              <button
+                onClick={() => (isLast ? dismiss() : setStep((s) => s + 1))}
+                className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-500 transition-colors"
+              >
+                {isLast ? "Let's go" : 'Next'}
+              </button>
+            </div>
+          </div>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 };
 

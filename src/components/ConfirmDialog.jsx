@@ -7,10 +7,25 @@
 // ("Delete", "Archive", etc.) for clarity at the action level.
 // `tone='danger'` paints the confirm button red; `tone='primary'` uses
 // the orange brand color for non-destructive flows.
+//
+// Backed by Headless UI's <Dialog> so keyboard users get a focus trap,
+// Esc-to-cancel, focus restoration on close, and proper ARIA roles —
+// none of which the raw <div> version provided. The previous markup
+// implemented none of those and would let keyboard focus escape the
+// dialog after Tab; screen readers couldn't announce it as a dialog
+// either. Visual API (`message`, `onConfirm`, `onCancel`, etc.) is
+// unchanged so call sites don't have to migrate.
 
-const TONE = {
-  danger:  'bg-red-600 hover:bg-red-500',
-  primary: 'bg-orange-500 hover:bg-orange-400',
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
+import { useRef } from 'react';
+import Button from './ui/Button';
+
+// `tone` maps to the Button primitive's variant: 'danger' → red,
+// 'primary' → brand orange. Defaults to 'danger' since this dialog is
+// most often used for destructive confirms.
+const TONE_TO_VARIANT = {
+  danger:  'danger',
+  primary: 'primary',
 };
 
 export default function ConfirmDialog({
@@ -21,26 +36,33 @@ export default function ConfirmDialog({
   cancelLabel  = 'Cancel',
   tone = 'danger',
 }) {
-  const toneClass = TONE[tone] ?? TONE.danger;
+  const confirmVariant = TONE_TO_VARIANT[tone] ?? 'danger';
+  // initialFocus → Cancel button. Esc and backdrop click both route
+  // through onClose → onCancel so destructive-action dialogs don't
+  // confirm by accident.
+  const cancelRef = useRef(null);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-xs p-6 flex flex-col gap-4">
-        <p className="text-sm text-gray-700">{message}</p>
-        <div className="flex gap-2">
-          <button
-            onClick={onCancel}
-            className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-          >
-            {cancelLabel}
-          </button>
-          <button
-            onClick={onConfirm}
-            className={`flex-1 rounded-lg ${toneClass} px-4 py-2 text-sm font-semibold text-white transition-colors`}
-          >
-            {confirmLabel}
-          </button>
-        </div>
+    <Dialog
+      open
+      onClose={onCancel}
+      initialFocus={cancelRef}
+      className="relative z-50"
+    >
+      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center px-4">
+        <DialogPanel className="bg-white rounded-2xl shadow-xl w-full max-w-xs p-6 flex flex-col gap-4">
+          <DialogTitle className="sr-only">Confirm action</DialogTitle>
+          <p className="text-sm text-gray-700">{message}</p>
+          <div className="flex gap-2">
+            <Button ref={cancelRef} variant="secondary" fullWidth onClick={onCancel}>
+              {cancelLabel}
+            </Button>
+            <Button variant={confirmVariant} fullWidth onClick={onConfirm}>
+              {confirmLabel}
+            </Button>
+          </div>
+        </DialogPanel>
       </div>
-    </div>
+    </Dialog>
   );
 }
