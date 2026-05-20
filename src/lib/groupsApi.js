@@ -62,7 +62,10 @@ export const groupsApi = {
   // voteMethod must be 'SIMPLE' or 'RANKED'. Locked once event status leaves OPEN.
   setVoteMethod: (groupId, eventId, voteMethod) =>
     patch(`/api/groups/${groupId}/events/${eventId}/vote-method`, { voteMethod }),
-  acceptResult:  (groupId, eventId)  => post(`/api/groups/${groupId}/events/${eventId}/accept-result`),
+  // `force=true` lets the host wrap up before every voter has submitted —
+  // the server tallies whatever's in flight and breaks ties randomly.
+  acceptResult:  (groupId, eventId, opts)  =>
+    post(`/api/groups/${groupId}/events/${eventId}/accept-result`, { force: opts?.force === true }),
   // Returns one event with full ballot/IRV detail — used by ballot detail modals.
   getEvent:      (groupId, eventId)  => req(`/api/groups/${groupId}/events/${eventId}`),
 

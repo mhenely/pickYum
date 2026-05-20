@@ -943,8 +943,13 @@ export const api = {
       request<{ sessionId: string }>(`/api/trips/${id}/events/${eventId}/start-voting`, { method: 'POST' }),
     cancelVoting: (id: number, eventId: number) =>
       request<{ message: string }>(`/api/trips/${id}/events/${eventId}/cancel-voting`, { method: 'POST' }),
-    acceptResult: (id: number, eventId: number) =>
-      request<{ message: string }>(`/api/trips/${id}/events/${eventId}/accept-result`, { method: 'POST' }),
+    // `force=true` lets the host wrap up before every voter has submitted —
+    // the server tallies whatever's in flight and breaks ties randomly.
+    acceptResult: (id: number, eventId: number, opts?: { force?: boolean }) =>
+      request<{ message: string }>(`/api/trips/${id}/events/${eventId}/accept-result`, {
+        method: 'POST',
+        body: JSON.stringify({ force: opts?.force === true }),
+      }),
     getEvent: (id: number, eventId: number) =>
       request<{ event: ApiTripMealEvent }>(`/api/trips/${id}/events/${eventId}`),
     // Trip-scoped insights rollup over completed meal events. Mirrors

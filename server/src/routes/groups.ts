@@ -854,9 +854,15 @@ router.post('/:id/events/:eventId/accept-result', async (req: Request, res: Resp
     res.status(400).json({ error: 'Event is not in voting state' }); return;
   }
 
+  // `force` lets the host wrap up before every voter has submitted —
+  // finalizeVoteUnderLock tallies in-flight votes and randomly breaks
+  // a tie. Default false keeps the strict "session must be done" path.
+  const force = (req.body as { force?: unknown } | undefined)?.force === true;
+
   const result = await finalizeVoteUnderLock(eventId, preEvent.sessionId, {
     recordPersonalAcceptance: true,
     actingUserId: req.userId,
+    force,
   });
 
   if (result.kind === 'concluded')         res.json({ message: 'Event concluded' });

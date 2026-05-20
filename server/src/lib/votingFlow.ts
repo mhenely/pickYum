@@ -20,13 +20,17 @@
 // here. The function returns a discriminated union the caller maps
 // to (status, body).
 
+import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
 import prisma from './prisma';
 import {
   type GroupSession,
   getSession,
+  saveSession,
+  notifyClients,
   withSessionLock,
 } from '../sessions';
+import { tallyRanked } from './irv';
 
 // ── Body validators ──────────────────────────────────────────────
 
@@ -88,6 +92,16 @@ export interface FinalizeOptions {
    * UserAccepted row we create; other voters are deduped against this id.
    */
   actingUserId: number;
+
+  /**
+   * Force-close path. When true, if the session is still in 'voting'
+   * or 'closed' state we tally whatever votes have come in, randomly
+   * break any tie, and proceed to finalize. Use for "Close & save
+   * result" actions where the host wants to wrap up regardless of
+   * whether every voter submitted. Default false preserves the strict
+   * "session must be done" behavior.
+   */
+  force?: boolean;
 }
 
 /**
@@ -124,6 +138,18 @@ export async function finalizeVoteUnderLock(
     }
 
     const session = await getSession(event.sessionId);
+
+    // Force-close path: host wants to wrap up even though not every
+    // voter has submitted. Tally whatever's there, randomly break a
+    // tie if one comes out, and fall through to the happy path with
+    // the now-'done' session. Skipped when session is missing entirely
+    // (Redis expired); that case still has to go through the recovery
+    // branch below since there's no in-memory state to tally.
+    if (opts.force && session && (session.status === 'voting' || session.status === 'closed')) {
+      forceTallyAndPick(session);
+      await saveSession(session);
+      notifyClients(session.id, session);
+    }
 
     // Recovery path: session not done OR missing entirely. If a
     // GroupEventResult already exists from a prior crashed call,
@@ -320,4 +346,58 @@ async function backfillMissingUserAccepted(
     })),
     skipDuplicates: true,
   });
+}
+
+// ── Force-close tally ────────────────────────────────────────────
+// Mirrors the tally logic in routes/sessions.ts (the POST /:id/close
+// handler). The difference: here we don't surface ties — if the
+// approval / IRV tally results in a tie, we pick uniformly at random
+// among the tied candidates and stamp method='flip'. The host's
+// "Close & save result" action is the explicit "wrap this up" signal,
+// so a tie shouldn't stall them in a tiebreak modal.
+//
+// Mutates the passed session and returns nothing — the caller saves
+// it. Idempotent on a session that's already 'done' (no-ops).
+function forceTallyAndPick(session: GroupSession): void {
+  if (session.status === 'done') return;
+
+  // Approval tally for SIMPLE, IRV for RANKED. Both yield a `scores`
+  // record + a set of top candidates (size 1 if clear, >1 if tied).
+  let topIds: string[];
+  if (session.voteMethod === 'ranked') {
+    const irv = tallyRanked(session.candidates, session.rankings);
+    session.irvRounds = irv.rounds;
+    const lastRound = irv.rounds[irv.rounds.length - 1];
+    session.scores = lastRound ? { ...lastRound.counts } : Object.fromEntries(session.candidates.map((id) => [id, 0]));
+    topIds = irv.winner ? [irv.winner] : (irv.tied ?? []);
+  } else {
+    const scores: Record<string, number> = {};
+    for (const id of session.candidates) scores[id] = 0;
+    for (const voterBallot of Object.values(session.voters)) {
+      for (const [id, approved] of Object.entries(voterBallot)) {
+        if (approved && id in scores) scores[id]++;
+      }
+    }
+    session.scores = scores;
+    const maxScore = Math.max(...Object.values(scores), 0);
+    topIds = Object.entries(scores).filter(([, s]) => s === maxScore).map(([id]) => id);
+  }
+
+  // Clear winner: stamp as vote-decided. Tied (or zero-vote ties where
+  // every candidate has 0): randomly pick. crypto.randomInt over
+  // Math.random for the same "host can't predict" reason the /flip
+  // route uses CSPRNG.
+  if (topIds.length === 1) {
+    session.result = topIds[0];
+    session.method = 'vote';
+  } else {
+    // topIds may be empty if there are no candidates at all (degenerate);
+    // fall back to the full candidate list so we never pick from an empty
+    // pool below.
+    const pool = topIds.length > 0 ? topIds : session.candidates;
+    session.result = pool[crypto.randomInt(pool.length)];
+    session.method = 'flip';
+    session.tiedIds = topIds;
+  }
+  session.status = 'done';
 }
