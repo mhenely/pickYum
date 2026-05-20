@@ -13,6 +13,7 @@ import { groupsApi } from '../lib/groupsApi';
 import { api } from '../lib/api';
 import RouletteWheel from '../components/RouletteWheel';
 import CoinFlip from '../components/CoinFlip';
+import { SkeletonLine } from '../components/Skeleton';
 import { placePhotoUrl } from '../lib/api';
 import InfoRow from '../components/InfoRow';
 import ScheduleModal from '../components/ScheduleModal';
@@ -1257,8 +1258,17 @@ const GroupSessionPage = () => {
 
   if (!session) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <p className="text-gray-400 text-sm animate-pulse">Loading session…</p>
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8 flex flex-col gap-4">
+          <div className="mx-auto h-10 w-10 rounded-full bg-gray-200 animate-pulse" />
+          <SkeletonLine width="w-2/3" height="h-5" className="mx-auto" />
+          <SkeletonLine width="w-1/2" height="h-3" className="mx-auto" />
+          <div className="mt-2 flex flex-col gap-2">
+            <SkeletonLine width="w-full" height="h-3" />
+            <SkeletonLine width="w-full" height="h-3" />
+            <SkeletonLine width="w-3/4" height="h-3" />
+          </div>
+        </div>
       </div>
     );
   }

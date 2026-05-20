@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { addCustomRestaurant } from '../redux/slices/userInfoSlice';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import BallotDetailModal from '../components/BallotDetailModal';
+import { SkeletonLine, SkeletonStatGrid, SkeletonList } from '../components/Skeleton';
 
 // Stable empty-object sentinel for the useSelector fallback — without
 // this, `?? {}` minted a new {} every dispatch and forced a re-render.
@@ -257,7 +258,17 @@ const InsightsPage = () => {
     return (
       <div className="max-w-3xl mx-auto px-4 py-8">
         {PageHeader}
-        <p className="text-center text-sm text-gray-400 py-20">Loading your decision history…</p>
+        <div className="flex flex-col gap-6">
+          <SkeletonStatGrid tiles={3} />
+          <div className="flex flex-col gap-3">
+            <SkeletonLine width="w-32" height="h-3" />
+            <SkeletonList count={3} />
+          </div>
+          <div className="flex flex-col gap-3">
+            <SkeletonLine width="w-40" height="h-3" />
+            <SkeletonList count={2} />
+          </div>
+        </div>
       </div>
     );
   }

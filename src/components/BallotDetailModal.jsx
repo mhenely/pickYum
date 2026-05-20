@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { groupsApi } from '../lib/groupsApi';
+import { SkeletonLine } from './Skeleton';
 
 // Shows the full ballot breakdown for a past (DONE) group event:
 // - winner + method (vote / flip / spin) + voteMethod (simple / ranked) when applicable
@@ -115,7 +116,14 @@ const BallotDetailModal = ({ groupId, eventId, onClose }) => {
           </div>
 
           <div className="p-6 space-y-5">
-            {loading && <p className="text-sm text-gray-400 text-center py-6">Loading ballot…</p>}
+            {loading && (
+              <div className="flex flex-col gap-3 py-4">
+                <SkeletonLine width="w-1/2" height="h-4" />
+                <SkeletonLine width="w-full" height="h-3" />
+                <SkeletonLine width="w-full" height="h-3" />
+                <SkeletonLine width="w-2/3" height="h-3" />
+              </div>
+            )}
             {error && !loading && (
               <p className="text-sm text-red-500 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</p>
             )}

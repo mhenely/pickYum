@@ -211,6 +211,12 @@ const HelpMeChoosePage = () => {
   // ── Custom restaurants ────────────────────────────────────
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const isAuthenticated   = useSelector((state) => state.auth.status === 'authenticated');
+  // For non-guest users, loadUserData lands ~300-800ms after page mount.
+  // Without this gate the page flashes "No favorites yet" and the big
+  // "Nothing to flip yet" empty card before the real data arrives.
+  const isUnauthenticated = useSelector((state) => state.auth.status === 'unauthenticated');
+  const isDataLoaded      = useSelector((state) => state.userInfo.isDataLoaded);
+  const isDataPending     = !isUnauthenticated && !isDataLoaded;
   const allRestaurants    = customRestaurants;
 
   // ── Computed flip pool ────────────────────────────────────
@@ -508,9 +514,18 @@ const HelpMeChoosePage = () => {
                 />
               </div>
             )}
-            {favorites.length === 0 && (
+            {isDataPending ? (
+              // Auth resolved but loadUserData still in flight — fill the
+              // strip with shaped placeholders so refreshes don't flash
+              // "No favorites yet" before the real list arrives.
+              <div className="flex flex-col gap-3" aria-hidden="true">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-[150px] rounded-xl bg-gray-100 animate-pulse" />
+                ))}
+              </div>
+            ) : favorites.length === 0 ? (
               <p className="text-xs text-gray-400 italic">No favorites yet.</p>
-            )}
+            ) : null}
             {/* Always-scroll at 80vh. md cards (~150px each + Add
                 button) outgrow the page faster than the legacy sm
                 variant did, so the previous "scroll only past 6
@@ -884,8 +899,18 @@ const HelpMeChoosePage = () => {
             </div>
           </div>
 
-          {/* ── EMPTY STATE ──────────────────────────────────── */}
-          {flipPool.length < 2 && (
+          {/* ── EMPTY STATE ────────────────────────────────────
+              Suppressed while loadUserData is still in flight — without
+              the gate the page briefly shows "Nothing to flip yet" on
+              every refresh before the user's real options list lands. */}
+          {isDataPending && flipPool.length < 2 && (
+            <div className="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 py-10 px-6" aria-hidden="true">
+              <div className="mx-auto h-10 w-10 rounded-full bg-gray-200 animate-pulse mb-3" />
+              <div className="mx-auto h-4 w-48 rounded bg-gray-200 animate-pulse mb-2" />
+              <div className="mx-auto h-3 w-64 rounded bg-gray-100 animate-pulse" />
+            </div>
+          )}
+          {!isDataPending && flipPool.length < 2 && (
             <div className="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 py-10 px-6 text-center">
               <p className="text-4xl mb-3">🍽️</p>
               <p className="text-lg font-semibold text-gray-800 mb-1">

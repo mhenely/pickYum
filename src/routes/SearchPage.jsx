@@ -148,6 +148,12 @@ export default function SearchPage() {
   const currentUser = useCurrentUser();
   const customRestaurants = useSelector((s) => s.userInfo.customRestaurants);
   const communityRatings  = useSelector((s) => s.rating.communityRatings);
+  // Auth + data-load gates for empty-state suppression. Without these the
+  // "Your Lists" section below flashes its "No lists selected" prompt on
+  // every refresh before loadUserData lands.
+  const isUnauthenticated = useSelector((s) => s.auth.status === 'unauthenticated');
+  const isDataLoaded      = useSelector((s) => s.userInfo.isDataLoaded);
+  const isDataPending     = !isUnauthenticated && !isDataLoaded;
 
   // O(N) precompute over the user's accepted history; the saved-restaurants
   // row map below reads last-chosen in O(1). Was a full accepted-array scan
@@ -1616,7 +1622,16 @@ export default function SearchPage() {
 
           {savedExpanded && (
             <>
-              {sortedLocal.length === 0 ? (
+              {isDataPending && sortedLocal.length === 0 ? (
+                // Skeleton grid while loadUserData is in flight — without
+                // this the section flashes "No lists are selected" on
+                // every refresh before the real lists hydrate.
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="h-48 rounded-xl bg-gray-100 animate-pulse" />
+                  ))}
+                </div>
+              ) : sortedLocal.length === 0 ? (
                 <p className="text-gray-500 text-sm">
                   {activeListEntryIds.length === 0
                     ? (activeListIds && activeListIds.length === 0

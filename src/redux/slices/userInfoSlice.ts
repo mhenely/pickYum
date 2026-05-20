@@ -300,6 +300,35 @@ export const userInfoSlice = createSlice({
       };
     },
 
+    // Identity-only refresh used by the checkAuth.fulfilled listener so a
+    // page refresh doesn't wipe an already-populated user (collections,
+    // customRestaurants, favoriteLists) back to empty before loadUserData
+    // arrives. setUserData IS the right call when the identity might be a
+    // DIFFERENT user (login flow) — there we want collections empty until
+    // loadUserData replaces them. checkAuth is the session-restore path,
+    // where the previous in-memory data is still this user's own data, so
+    // a wipe just produces a visible "data → empty → data" flicker.
+    //
+    // If the id changes (rare: cookie now belongs to a different user),
+    // the reducer wipes collections defensively — we never want user A's
+    // favorites visible to user B even for a frame.
+    patchUserIdentity: (state, action: PayloadAction<{ id: number; email: string; username: string; flipCount?: number }>) => {
+      const { id, email, username, flipCount } = action.payload;
+      const prevId = state.user.id;
+      const sameUser = prevId != null && prevId === id;
+      state.user.id = id;
+      state.user.email = email;
+      state.user.username = username;
+      if (flipCount !== undefined) state.user.flipCount = flipCount;
+      if (!sameUser) {
+        state.user.favorites = [];
+        state.user.options   = [];
+        state.user.accepted  = [];
+        state.user.archived  = [];
+        state.user.reviews   = {};
+      }
+    },
+
     // ── Address book mutations ─────────────────────────────────
     setAddresses: (state, action: PayloadAction<Address[] | null | undefined>) => {
       state.user.addresses = action.payload ?? [];
@@ -674,6 +703,7 @@ export const userInfoSlice = createSlice({
 
 export const {
   setUserData,
+  patchUserIdentity,
   updateUserInfo,
   addUserReview,
   editUserReview,

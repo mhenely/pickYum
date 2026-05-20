@@ -4,6 +4,7 @@ import { socialApi } from '../lib/socialApi';
 import { groupsApi } from '../lib/groupsApi';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import SectionEmpty from '../components/SectionEmpty';
+import { SkeletonSection, SkeletonList } from '../components/Skeleton';
 
 // ── Shared helpers ────────────────────────────────────────────
 
@@ -163,7 +164,14 @@ function GroupsTab() {
   const hostedGroups = groups.filter((g) => g.role === 'host');
   const memberGroups = groups.filter((g) => g.role === 'member');
 
-  if (loading) return <p className="text-center text-sm text-gray-400 py-12">Loading…</p>;
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-8">
+        <SkeletonSection count={2} />
+        <SkeletonSection count={2} />
+      </div>
+    );
+  }
   if (error)   return <p className="text-center text-sm text-red-500 py-12">{error}</p>;
 
   return (
@@ -380,7 +388,13 @@ function FriendsTab() {
     try { await socialApi.unfriend(userId); setFriends((f) => f.filter((u) => u.id !== userId)); } catch { /* ignore */ } finally { setActionId(null); }
   };
 
-  if (loading) return <p className="text-center text-sm text-gray-400 py-12">Loading…</p>;
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-8">
+        <SkeletonSection count={3} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-8">
@@ -605,7 +619,14 @@ function FollowersTab() {
     try { await socialApi.follow(userId); await load(); } catch { /* ignore */ } finally { setActionId(null); }
   };
 
-  if (loading) return <p className="text-center text-sm text-gray-400 py-12">Loading…</p>;
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-5">
+        <div className="h-9 w-56 rounded-lg bg-gray-100 animate-pulse" />
+        <SkeletonList count={3} />
+      </div>
+    );
+  }
 
   const list = subTab === 'following' ? following : followers;
 
@@ -718,7 +739,13 @@ function RecommendationsTab() {
     // changing anything.
   };
 
-  if (loading) return <p className="text-center text-sm text-gray-400 py-12">Loading…</p>;
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-4">
+        <SkeletonList count={3} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">

@@ -10,6 +10,7 @@ import DietaryTagChips from '../components/DietaryTagChips';
 import MembersSection from '../components/trip/MembersSection';
 import AnchorsSection from '../components/trip/AnchorsSection';
 import MealEventsSection from '../components/trip/MealEventsSection';
+import { SkeletonDetailPage, SkeletonLine, SkeletonStatGrid } from '../components/Skeleton';
 
 // Trip detail — members + anchors management. Meal events live in
 // phase 2 (placeholder section below). The host gets edit affordances
@@ -57,6 +58,10 @@ function TripInsightsPanel({ tripId }) {
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
   const [infoForId, setInfoForId] = useState(null);
+  // Threaded into RestaurantDetailModal so it can render instantly for any
+  // restaurant the user has touched before (covers most insight clicks).
+  // Without this the modal sits blank until /api/restaurants/:id resolves.
+  const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? EMPTY_OBJECT);
 
   const handleToggle = async () => {
     if (open) { setOpen(false); return; }
@@ -90,7 +95,13 @@ function TripInsightsPanel({ tripId }) {
 
       {open && (
         <div className="mt-2 rounded-xl border border-gray-200 bg-white p-4">
-          {loading && <p className="text-sm text-gray-400">Loading insights…</p>}
+          {loading && (
+            <div className="flex flex-col gap-3">
+              <SkeletonStatGrid tiles={3} />
+              <SkeletonLine width="w-2/3" height="h-3" />
+              <SkeletonLine width="w-1/2" height="h-3" />
+            </div>
+          )}
           {error && <p className="text-sm text-red-500">{error}</p>}
           {data && !loading && !error && (
             data.totalEvents === 0 ? (
@@ -328,7 +339,7 @@ export default function TripDetailPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return <p className="text-center text-sm text-gray-400 py-20">Loading trip…</p>;
+  if (loading) return <SkeletonDetailPage />;
   if (error)   return <p className="text-center text-sm text-red-500 py-20">{error}</p>;
   if (!trip)   return null;
 

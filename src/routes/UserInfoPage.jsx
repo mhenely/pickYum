@@ -64,6 +64,12 @@ const UserInfoPage = () => {
   const [selectedRestaurantId, setSelectedRestaurantId] = useState(null);
 
   const isAuthenticated = useSelector((state) => state.auth.status === 'authenticated');
+  // Empty-state suppression: hide "No history yet" until loadUserData
+  // lands so refreshes don't briefly flash the prompt before the
+  // user's real history shows up.
+  const isUnauthenticated = useSelector((state) => state.auth.status === 'unauthenticated');
+  const isDataLoaded      = useSelector((state) => state.userInfo.isDataLoaded);
+  const isDataPending     = !isUnauthenticated && !isDataLoaded;
 
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameSuccess, setUsernameSuccess] = useState(false);
@@ -661,7 +667,13 @@ const UserInfoPage = () => {
           <h2 className="text-2xl font-bold text-gray-900 mb-1">Top Picks</h2>
           <p className="text-sm text-gray-500 mb-4">Your 4 most chosen restaurants</p>
 
-          {top4.length === 0 ? (
+          {isDataPending && top4.length === 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4" aria-hidden="true">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="h-32 rounded-lg bg-gray-100 animate-pulse" />
+              ))}
+            </div>
+          ) : top4.length === 0 ? (
             <p className="text-gray-500 text-sm italic">
               No history yet. Accept a restaurant from the coin flip to get started.
             </p>

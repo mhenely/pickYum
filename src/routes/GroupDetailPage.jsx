@@ -17,6 +17,7 @@ import { api } from '../lib/api';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import BallotDetailModal from '../components/BallotDetailModal';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
+import { SkeletonDetailPage } from '../components/Skeleton';
 import ResultDisplay from '../components/group/ResultDisplay';
 import GroupInsightsPanel from '../components/group/GroupInsightsPanel';
 import GroupFavoritesSection from '../components/group/GroupFavoritesSection';
@@ -85,7 +86,7 @@ const GroupDetailPage = () => {
     } : prev);
   }, []);
 
-  if (loading) return <p className="text-center text-sm text-gray-400 py-20">Loading…</p>;
+  if (loading) return <SkeletonDetailPage />;
   if (error)   return <p className="text-center text-sm text-red-500 py-20">{error}</p>;
   if (!group)  return null;
 

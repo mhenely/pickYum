@@ -14,6 +14,7 @@ import {
   unarchiveRestaurant,
   incrementFlipCount,
   setUserData,
+  patchUserIdentity,
   clearUserData,
   loadUserData,
 } from './slices/userInfoSlice';
@@ -72,15 +73,23 @@ listen({
 // immediately (mirroring the login path) so components that read
 // userInfo.username / .email — the delete-account confirm modal, the
 // change-username placeholder, etc. — have correct values before
-// loadUserData's network round-trip resolves. Previously, only
-// loadUserData was dispatched here, which meant any UI rendered
-// before the GET /me/all promise settled saw the slice's empty
-// initial values (id: null, email: '', username: '').
+// loadUserData's network round-trip resolves.
+//
+// patchUserIdentity (vs setUserData(emptyUserData)) is the key here:
+// the wipe-to-empty path produced a visible "data → empty → real data"
+// flicker on every refresh, because checkAuth.fulfilled lands ~300ms
+// before loadUserData.fulfilled and the UI rendered with empty
+// collections in that gap. patchUserIdentity touches only id / email /
+// username / flipCount (the fields callers expect to be fresh post-
+// session-restore) and preserves collections, so the next render shows
+// the prior in-memory data until loadUserData lands and replaces it.
+// If the returned id doesn't match the prior user (rare: cookie reuse
+// across accounts), the reducer wipes defensively.
 listen({
   actionCreator: checkAuth.fulfilled,
   effect: (_action, api_) => {
     try { localStorage.removeItem('pickyum_guest'); } catch { /* ignore */ }
-    api_.dispatch(setUserData(emptyUserData(_action.payload)));
+    api_.dispatch(patchUserIdentity(_action.payload));
     api_.dispatch(loadUserData(_action.payload));
   },
 });

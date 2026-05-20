@@ -1,15 +1,12 @@
 import { Outlet } from 'react-router-dom';
 import { useSelector } from 'react-redux';
+import { SkeletonDetailPage } from './Skeleton';
 
 const ProtectedRoute = () => {
   const status = useSelector((state: { auth: { status: string } }) => state.auth.status);
 
   if (status === 'idle' || status === 'loading') {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-gray-400 text-sm animate-pulse">Loading…</div>
-      </div>
-    );
+    return <SkeletonDetailPage />;
   }
 
   // Guests (unauthenticated) are allowed through — data lives only in Redux for the session.

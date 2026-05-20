@@ -9,6 +9,7 @@
 import { useState } from 'react';
 import { groupsApi } from '../../lib/groupsApi';
 import RestaurantDetailModal from '../RestaurantDetailModal';
+import { SkeletonLine, SkeletonStatGrid } from '../Skeleton';
 
 const METHOD_LABELS = { vote: '🗳 Vote', flip: '🪙 Flip', spin: '🎰 Spin' };
 
@@ -51,7 +52,13 @@ export default function GroupInsightsPanel({ groupId }) {
 
       {open && (
         <div className="mt-2 rounded-xl border border-gray-200 bg-white p-4">
-          {loading && <p className="text-sm text-gray-400">Loading insights…</p>}
+          {loading && (
+            <div className="flex flex-col gap-3">
+              <SkeletonStatGrid tiles={3} />
+              <SkeletonLine width="w-2/3" height="h-3" />
+              <SkeletonLine width="w-1/2" height="h-3" />
+            </div>
+          )}
           {error && <p className="text-sm text-red-500">{error}</p>}
           {data && !loading && !error && (
             data.totalEvents === 0 ? (

@@ -96,6 +96,12 @@ const RestaurantPage = () => {
   const dispatch = useDispatch();
   const userInfo = useCurrentUser();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
+  // Suppress favorites/options empty states until loadUserData lands —
+  // without this the Compare page flashes "No favorites yet" / "No
+  // options yet" on every refresh.
+  const isUnauthenticated = useSelector((state) => state.auth.status === 'unauthenticated');
+  const isDataLoaded      = useSelector((state) => state.userInfo.isDataLoaded);
+  const isDataPending     = !isUnauthenticated && !isDataLoaded;
   const allRestaurants = customRestaurants;
   const { options, reviews } = userInfo;
 
@@ -569,7 +575,7 @@ const RestaurantPage = () => {
                 </div>
               )}
 
-              {favorites.length === 0 && options.length === 0 && (
+              {!isDataPending && favorites.length === 0 && options.length === 0 && (
                 <p className="text-sm text-gray-400 italic text-center">
                   No restaurants in your favorites or options yet.
                 </p>
@@ -622,7 +628,13 @@ const RestaurantPage = () => {
               />
             </div>
           )}
-          {favorites.length === 0 ? (
+          {isDataPending && favorites.length === 0 ? (
+            <div className="flex flex-col gap-3" aria-hidden="true">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="h-[150px] rounded-xl bg-gray-100 animate-pulse" />
+              ))}
+            </div>
+          ) : favorites.length === 0 ? (
             <p className="text-xs text-gray-400 italic">No favorites yet.</p>
           ) : (
             // Cap at roughly 6 sm-cards-tall when the list is longer, so a
@@ -824,7 +836,13 @@ const RestaurantPage = () => {
               </span>
             )}
           </h2>
-          {options.length === 0 ? (
+          {isDataPending && options.length === 0 ? (
+            <div className="flex flex-col gap-3" aria-hidden="true">
+              {[0, 1].map((i) => (
+                <div key={i} className="h-[150px] rounded-xl bg-gray-100 animate-pulse" />
+              ))}
+            </div>
+          ) : options.length === 0 ? (
             <p className="text-xs text-gray-400 italic">No options yet.</p>
           ) : (
             // Mirror of the Favorites sidebar above — same 6-card cap so

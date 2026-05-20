@@ -41,3 +41,54 @@ export function SkeletonList({ count = 3 }) {
     </div>
   );
 }
+
+// Page-title placeholder: a chunky title line + thinner subtitle line.
+// Sized to roughly match `<h1 className="text-2xl"> + <p className="text-sm">`
+// so detail pages don't reflow when the real title lands.
+export function SkeletonHeader() {
+  return (
+    <div className="flex flex-col gap-2 mb-4">
+      <SkeletonLine width="w-1/2" height="h-6" />
+      <SkeletonLine width="w-1/3" height="h-3" />
+    </div>
+  );
+}
+
+// Labeled section placeholder: small uppercase-style title line + a list
+// of cards underneath. Mirrors the `<h3>Section</h3> + list` pattern most
+// detail/list pages use.
+export function SkeletonSection({ count = 2 }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <SkeletonLine width="w-24" height="h-3" />
+      <SkeletonList count={count} />
+    </div>
+  );
+}
+
+// Three-up stat-tile placeholder. Matches the grid InsightsPage and
+// TripInsightsPanel render once data lands (3 stat cards in a row).
+export function SkeletonStatGrid({ tiles = 3 }) {
+  return (
+    <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${tiles}, minmax(0, 1fr))` }}>
+      {Array.from({ length: tiles }, (_, i) => (
+        <div key={i} className="rounded-lg bg-gray-100 animate-pulse h-16" />
+      ))}
+    </div>
+  );
+}
+
+// Composed detail-page skeleton: header + 2 sections. Used by
+// GroupDetailPage / TripDetailPage to fill the whole page while the
+// initial fetch is in flight.
+export function SkeletonDetailPage() {
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 lg:px-8">
+      <SkeletonHeader />
+      <div className="flex flex-col gap-8 mt-6">
+        <SkeletonSection count={2} />
+        <SkeletonSection count={2} />
+      </div>
+    </div>
+  );
+}

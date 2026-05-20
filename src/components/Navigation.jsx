@@ -59,6 +59,15 @@ const NavBar = () => {
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const allRestaurants = customRestaurants;
   const isAuthenticated = useSelector((state) => state.auth.status === 'authenticated');
+  // Gate guest-mode UI on the explicit 'unauthenticated' status rather than
+  // `!isAuthenticated`, which is also true during 'idle' / 'loading'. Without
+  // this, every refresh briefly flashes the "you're a guest" banner and the
+  // "Sign in" button while checkAuth is in flight.
+  const isUnauthenticated = useSelector((state) => state.auth.status === 'unauthenticated');
+  // Flips true once loadUserData lands. We use it to gate the Options
+  // chip strip below — without this, refreshes flash the "No options
+  // yet" empty state while the real options list is in flight.
+  const isDataLoaded = useSelector((state) => state.userInfo.isDataLoaded);
   // Drives the "verify your email" banner. We trust the field from auth.user
   // (populated by api.auth.me on session restore) over userInfo since it's
   // the canonical post-login signal. Defaults to true so a missing field
@@ -600,7 +609,10 @@ const NavBar = () => {
                     </Menu>
                   )}
 
-                  {/* Profile dropdown / Sign in */}
+                  {/* Profile dropdown / Sign in. During the 'idle'/'loading'
+                      window we render a neutral placeholder so the slot doesn't
+                      flicker between the Sign-in CTA and the avatar on every
+                      refresh. */}
                   {isAuthenticated ? (
                     <Menu as="div" className="relative ml-1">
                       <MenuButton className="flex items-center rounded-full bg-white text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 focus:ring-offset-white">
@@ -632,13 +644,15 @@ const NavBar = () => {
                         </MenuItem>
                       </MenuItems>
                     </Menu>
-                  ) : (
+                  ) : isUnauthenticated ? (
                     <Link
                       to="/authentication"
                       className="bg-gradient-to-br from-orange-500 to-red-500 text-white rounded-lg px-4 py-2 text-sm font-semibold shadow-brand-sm hover:from-orange-400 hover:to-red-400 transition-all ml-1"
                     >
                       Log in / Sign up
                     </Link>
+                  ) : (
+                    <div className="ml-1 h-8 w-8 rounded-full bg-gray-100 animate-pulse" aria-hidden="true" />
                   )}
                 </div>
 
@@ -897,7 +911,18 @@ const NavBar = () => {
         <header className="bg-gradient-to-r from-orange-50 to-amber-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 py-3 sm:px-6 lg:px-8 flex items-center gap-3 flex-wrap">
             <h1 className="text-xs font-bold tracking-widest text-orange-800 uppercase shrink-0">Options</h1>
-            {currentOptions.length === 0 ? (
+            {/* While authenticated but data is in flight, show skeleton
+                chips so refreshes don't briefly flash "No options yet"
+                before the real options list lands. Guest users (no
+                pending loadUserData) skip the skeleton — their empty
+                state is the truth, not a transient. */}
+            {!isUnauthenticated && !isDataLoaded ? (
+              <div className="flex items-center gap-2" aria-hidden="true">
+                <div className="h-7 w-24 rounded-full bg-orange-100 animate-pulse" />
+                <div className="h-7 w-32 rounded-full bg-orange-100 animate-pulse" />
+                <div className="h-7 w-20 rounded-full bg-orange-100 animate-pulse" />
+              </div>
+            ) : currentOptions.length === 0 ? (
               <span className="text-sm text-orange-400 italic">No options yet — add one from the Search page.</span>
             ) : (
               <div className="flex items-center gap-2 flex-wrap">
@@ -926,7 +951,7 @@ const NavBar = () => {
         </header>
         )}
 
-      {!isAuthenticated && (
+      {isUnauthenticated && (
         <div className="bg-orange-50 border-b border-orange-200">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-2 flex items-center justify-between gap-4">
             <p className="text-xs text-orange-800">

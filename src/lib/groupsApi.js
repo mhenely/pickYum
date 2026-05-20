@@ -1,6 +1,39 @@
 const BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
 
+// In-memory GET cache. Mirrors the pattern in lib/api.ts so navigating
+// back to /socials or /groups within ~1 min doesn't re-pay the round
+// trip (the list endpoint runs 4 parallel Prisma queries; not free).
+// Any mutation on this client clears the whole cache — conservative but
+// avoids drift, and group mutations are rare enough that the throughput
+// hit is invisible.
+const CACHE = new Map();
+const CACHE_TTL_MS = 60_000;
+
+function cacheGet(path) {
+  const hit = CACHE.get(path);
+  if (!hit) return undefined;
+  if (hit.expiresAt <= Date.now()) {
+    CACHE.delete(path);
+    return undefined;
+  }
+  return hit.data;
+}
+
+function cacheSet(path, data) {
+  CACHE.set(path, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+function clearCache() {
+  CACHE.clear();
+}
+
 async function req(path, init) {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method === 'GET') {
+    const cached = cacheGet(path);
+    if (cached !== undefined) return cached;
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -10,7 +43,17 @@ async function req(path, init) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? `HTTP ${res.status}`);
   }
-  return res.json();
+  const data = await res.json();
+
+  if (method === 'GET') {
+    cacheSet(path, data);
+  } else {
+    // Any write through this client invalidates everything — the list +
+    // detail endpoints overlap on enough fields that pinpoint matching
+    // isn't worth the maintenance cost for the volume of writes here.
+    clearCache();
+  }
+  return data;
 }
 
 const post  = (path, body) => req(path, { method: 'POST',   body: body != null ? JSON.stringify(body) : undefined });
