@@ -20,6 +20,7 @@ import {
 } from "../redux/slices/searchSlice";
 import { CUISINE_OPTIONS } from "../utils/cuisineTypes";
 import useCurrentUser from "../hooks/useCurrentUser";
+import { useSearchFilters } from "../hooks/useSearchFilters";
 import RestaurantCard from "../components/RestaurantCard";
 // Lazy: the maps chunk (~13 KB gzip via vendor-maps) loads only when the
 // user has nearby results AND has the map toggle on. Pre-search empty
@@ -156,27 +157,26 @@ export default function SearchPage() {
     [currentUser.accepted],
   );
 
-  // ── Persisted search state (Redux) ────────────────────────────
+  // ── Persisted search state (Redux, via the useSearchFilters hook) ──
+  // searchCuisineType is the SEARCH-TIME filter (passed to the API
+  // so Google only returns places of that cuisine). Distinct from
+  // `cuisineFilter`, which is a post-filter on already-fetched
+  // results — see searchSlice for the rationale.
+  //
+  // Mode toggle: 'nearby' (default) or 'name' (Google Places
+  // text-search). Both write into `nearbyResults` so the grid +
+  // filters + sort all share one pipeline.
   const {
     nearbyResults, locationInput, radiusMeters, resolvedAddress,
     resolvedLat, resolvedLng,
-    // searchCuisineType is the SEARCH-TIME filter (passed to the API
-    // so Google only returns places of that cuisine). Distinct from
-    // `cuisineFilter` below, which is a post-filter on already-fetched
-    // results — see searchSlice for the rationale.
     searchCuisineType,
     priceFilters: priceFiltersArray,
     openNowFilter, openAtTime, deliveryFilter, takeoutFilter,
     sortBy, query, cuisineFilter,
     currentPage,
-    // Mode toggle: 'nearby' (default) or 'name' (Google Places
-    // text-search). Both write into `nearbyResults` so the grid +
-    // filters + sort all share one pipeline.
     searchMode, nameQuery,
-  } = useSelector((s) => s.search);
-
-  // Convert array → Set for O(1) membership checks in filter logic
-  const priceFilters = new Set(priceFiltersArray);
+    priceFilterSet: priceFilters,
+  } = useSearchFilters();
 
   // ── Transient UI state (local only) ───────────────────────────
   const [nearbyLoading, setNearbyLoading] = useState(false);

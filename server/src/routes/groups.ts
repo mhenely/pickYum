@@ -1,12 +1,15 @@
 import { Router, Request, Response } from 'express';
-import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
-import { getSession, withSessionLock } from '../sessions';
 import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
 import { notifyUser } from '../lib/userNotifications';
 import { userMinimalSelect, eventOptionsInclude } from '../lib/prismaHelpers';
+import {
+  parseVotingStartsAt,
+  parseVoteMethod,
+  finalizeVoteUnderLock,
+} from '../lib/votingFlow';
 
 const router = Router();
 router.use(requireAuth);
@@ -760,18 +763,12 @@ router.patch('/:id/events/:eventId/schedule', async (req: Request, res: Response
   if (!event || event.groupId !== groupId) { res.status(404).json({ error: 'Event not found' }); return; }
   if (event.status !== 'OPEN') { res.status(400).json({ error: 'Cannot reschedule after voting has started' }); return; }
 
-  const { votingStartsAt } = req.body as { votingStartsAt?: string | null };
-  let newTime: Date | null = null;
-  if (votingStartsAt) {
-    const parsed = Date.parse(votingStartsAt);
-    if (isNaN(parsed)) { res.status(400).json({ error: 'Invalid date format' }); return; }
-    newTime = new Date(parsed);
-    if (newTime <= new Date()) { res.status(400).json({ error: 'Schedule must be set to a future time' }); return; }
-  }
+  const parsed = parseVotingStartsAt((req.body as { votingStartsAt?: unknown }).votingStartsAt);
+  if (!parsed.ok) { res.status(400).json({ error: parsed.error }); return; }
 
   const updated = await prisma.groupEvent.update({
     where: { id: eventId },
-    data: { votingStartsAt: newTime },
+    data: { votingStartsAt: parsed.time },
   });
   res.json({ votingStartsAt: updated.votingStartsAt });
 });
@@ -828,13 +825,11 @@ router.patch('/:id/events/:eventId/date', async (req: Request, res: Response) =>
 
 // POST /api/groups/:id/events/:eventId/accept-result — archive result and mark event DONE.
 //
-// The work runs under `withSessionLock` so two concurrent requests (host
-// double-tap, retry after flaky network) can't both write UserAccepted
-// rows. The lock serializes the read-event/check-status/write-result
-// sequence; the second request acquires the lock only after the first
-// commits, sees status='DONE', and returns the idempotent "already
-// concluded" branch — no duplicate acceptance rows. The pre-lock auth
-// + initial event read avoid even acquiring the lock on bad input.
+// Pre-lock work (auth + cheap event read) stays here; lock-bound work
+// delegates to lib/votingFlow's finalizeVoteUnderLock so groups + trips
+// share the same persistence + recovery logic. The `recordPersonalAcceptance`
+// flag is what differentiates group context (writes UserAccepted rows
+// for everyone who voted) from trip context (skips those writes).
 router.post('/:id/events/:eventId/accept-result', async (req: Request, res: Response) => {
   const groupId = Number(req.params.id);
   const eventId = Number(req.params.eventId);
@@ -855,189 +850,14 @@ router.post('/:id/events/:eventId/accept-result', async (req: Request, res: Resp
     res.status(400).json({ error: 'Event is not in voting state' }); return;
   }
 
-  // withSessionLock returns whatever the inner function does; we tunnel the
-  // response shape through so we can resolve status codes at the outer scope.
-  type LockResult =
-    | { status: 200; body: { message: string } }
-    | { status: 400; body: { error: string } };
-
-  const result: LockResult = await withSessionLock(preEvent.sessionId, async () => {
-    // Re-read the event under the lock — between the pre-check above and
-    // now, another concurrent accept-result on the same session may have
-    // already flipped status to DONE.
-    const event = await prisma.groupEvent.findUnique({ where: { id: eventId } });
-    if (!event || event.status === 'DONE') {
-      return { status: 200, body: { message: 'Event already concluded' } };
-    }
-    if (event.status !== 'VOTING' || !event.sessionId) {
-      return { status: 400, body: { error: 'Event is not in voting state' } };
-    }
-
-    const session = await getSession(event.sessionId);
-
-    if (!session || session.status !== 'done') {
-      const existing = await prisma.groupEventResult.findUnique({ where: { eventId } });
-      if (existing) {
-        // Back-fill any missing UserAccepted rows before flipping status.
-        // This covers the edge case where the original accept-result wrote
-        // GroupEventResult, then crashed (worker death, network blip)
-        // before / during the UserAccepted spread. Members whose rows
-        // didn't land would otherwise never get personal-Insights credit,
-        // since the status flip below moves the event into the "Event
-        // already concluded" branch on all subsequent calls. We resolve
-        // userIds from the persisted voterMeta JSON the same way the
-        // happy path resolves them from session.voterMeta.
-        const pool = (existing.restaurantPool as unknown as Array<{ id?: string; name?: string }>) ?? [];
-        const winnerEntry = pool.find((p) => p?.name === existing.winnerName);
-        const winnerId = winnerEntry?.id ? Number(winnerEntry.id) : NaN;
-        if (!isNaN(winnerId)) {
-          const meta = (existing.voterMeta as unknown as Record<string, { isGuest?: boolean; userId?: number | null } | null>) ?? {};
-          const wantedUserIds = new Set<number>([req.userId]);
-          for (const v of Object.values(meta)) {
-            if (!v || v.isGuest || v.userId == null) continue;
-            wantedUserIds.add(v.userId);
-          }
-          const already = await prisma.userAccepted.findMany({
-            where:  { eventId, userId: { in: [...wantedUserIds] } },
-            select: { userId: true },
-          });
-          const alreadySet = new Set(already.map((r) => r.userId));
-          const missing = [...wantedUserIds].filter((id) => !alreadySet.has(id));
-          if (missing.length > 0) {
-            const optionsSnapshot = pool.map((p) => p?.id).filter((x): x is string => typeof x === 'string');
-            // Single INSERT covers every missing row in one round-trip.
-            // skipDuplicates piggybacks on the unique constraint to make
-            // this idempotent — concurrent back-fills can't double-insert.
-            await prisma.userAccepted.createMany({
-              data: missing.map((userId) => ({
-                userId,
-                restaurantId: winnerId,
-                eventId,
-                optionsSnapshot: optionsSnapshot as Prisma.InputJsonValue,
-                chooseMethod: existing.method ?? null,
-              })),
-              skipDuplicates: true,
-            });
-          }
-        }
-        await prisma.groupEvent.update({ where: { id: eventId }, data: { status: 'DONE', sessionId: null } });
-        return { status: 200, body: { message: 'Event concluded' } };
-      }
-      return { status: 400, body: { error: 'Voting session is not complete or has expired' } };
-    }
-
-    const winnerSnap = session.result ? session.restaurants[session.result] : null;
-    const participants = [session.hostName, ...Object.keys(session.voters).filter((n) => n !== session.hostName)];
-
-    const dbRestaurants = await prisma.restaurant.findMany({
-      where: { id: { in: session.candidates.map(Number).filter(Boolean) } },
-      select: { id: true, address: true, website: true },
-    });
-    const dbMap = Object.fromEntries(dbRestaurants.map((r) => [String(r.id), r]));
-
-    const restaurantPool = session.candidates.map((id) => ({
-      id,
-      name: session.restaurants[id]?.name ?? id,
-      type: session.restaurants[id]?.type,
-      price: session.restaurants[id]?.price,
-      address: dbMap[id]?.address ?? null,
-      website: dbMap[id]?.website ?? null,
-    }));
-
-    const winnerId = session.result ? Number(session.result) : NaN;
-
-    // Resolve participant → userId via session.voterMeta (the authoritative
-    // identity sidecar) rather than by matching display name to group
-    // member username. Voters whose display name differs from their auth
-    // username used to be silently dropped from UserAccepted writes; this
-    // change credits them correctly. Guests (isGuest: true, userId: null)
-    // are still skipped because they don't have an account to credit.
-    let memberUserIds: number[] = [];
-    if (!isNaN(winnerId)) {
-      const seen = new Set<number>([req.userId]); // host gets their row below; dedupe here
-      for (const meta of Object.values(session.voterMeta ?? {})) {
-        if (!meta || meta.isGuest || meta.userId == null) continue;
-        if (seen.has(meta.userId)) continue;
-        seen.add(meta.userId);
-        memberUserIds.push(meta.userId);
-      }
-    }
-
-    // Persist ballots so /events/:eventId can render per-voter detail later.
-    // We snapshot the full shape — voters (approval ballots) for simple, rankings
-    // (ordered lists) for ranked. Both can be empty objects.
-    const ballotsSnapshot = session.voteMethod === 'ranked'
-      ? session.rankings
-      : session.voters;
-
-    await prisma.$transaction([
-      prisma.groupEventResult.upsert({
-        where: { eventId },
-        create: {
-          eventId,
-          hostUsername: session.hostName,
-          winnerName: winnerSnap?.name ?? session.result ?? '',
-          method: session.method ?? 'flip',
-          // voteMethod is only meaningful when the winner came from a vote —
-          // a pure flip/spin gets null here (the `method` field tells the story).
-          voteMethod: session.method === 'vote' ? session.voteMethod : null,
-          participants,
-          scores: session.scores ?? undefined,
-          ballots: ballotsSnapshot as any,
-          // Identity sidecar: lets the ballot detail modal show guest/signed-in
-          // tags + an auth username when it differs from the display name.
-          voterMeta: session.voterMeta as any,
-          irvRounds: (session.irvRounds ?? undefined) as any,
-          restaurantPool: restaurantPool as any,
-        },
-        update: {},
-      }),
-      prisma.groupEvent.update({
-        where: { id: eventId },
-        data: { status: 'DONE', sessionId: null },
-      }),
-      // Each member's acceptance carries the group's full candidate pool as the
-      // optionsSnapshot — that's the "what they were considering" data for
-      // anyone who participated in this vote. chooseMethod mirrors session.method
-      // so flips vs. spins vs. votes show up correctly in personal Insights.
-      // eventId stamps the link back to this GroupEvent so the user's Insights
-      // page can deep-link "Recent decisions" rows into the ballot detail.
-      // One createMany INSERT for everyone — host + all signed-in voters
-      // resolved from voterMeta. The @@unique([userId, eventId]) constraint
-      // (migration 20260519000000) makes `skipDuplicates: true` work, which
-      // also bakes in idempotency: a host who retries doesn't get a P2002
-      // and never produces dup rows even if the lock check missed.
-      // Was previously N individual `userAccepted.create` calls inside the
-      // transaction — N round-trips per accept.
-      ...(!isNaN(winnerId)
-        ? [
-            prisma.userAccepted.createMany({
-              data: [
-                {
-                  userId: req.userId,
-                  restaurantId: winnerId,
-                  eventId,
-                  optionsSnapshot: session.candidates as Prisma.InputJsonValue,
-                  chooseMethod: session.method ?? null,
-                },
-                ...memberUserIds.map((userId) => ({
-                  userId,
-                  restaurantId: winnerId,
-                  eventId,
-                  optionsSnapshot: session.candidates as Prisma.InputJsonValue,
-                  chooseMethod: session.method ?? null,
-                })),
-              ],
-              skipDuplicates: true,
-            }),
-          ]
-        : []),
-    ]);
-
-    return { status: 200, body: { message: 'Event concluded' } };
+  const result = await finalizeVoteUnderLock(eventId, preEvent.sessionId, {
+    recordPersonalAcceptance: true,
+    actingUserId: req.userId,
   });
 
-  res.status(result.status).json(result.body);
+  if (result.kind === 'concluded')         res.json({ message: 'Event concluded' });
+  else if (result.kind === 'already-concluded') res.json({ message: 'Event already concluded' });
+  else res.status(400).json({ error: result.message });
 });
 
 // PATCH /api/groups/:id/events/:eventId/vote-method — set 'SIMPLE' or 'RANKED'
@@ -1059,8 +879,8 @@ router.patch('/:id/events/:eventId/vote-method', async (req: Request, res: Respo
     res.status(400).json({ error: "Vote method is locked once voting has started" }); return;
   }
 
-  const { voteMethod } = req.body as { voteMethod?: unknown };
-  if (voteMethod !== 'SIMPLE' && voteMethod !== 'RANKED') {
+  const voteMethod = parseVoteMethod((req.body as { voteMethod?: unknown }).voteMethod);
+  if (!voteMethod) {
     res.status(400).json({ error: "voteMethod must be 'SIMPLE' or 'RANKED'" }); return;
   }
 

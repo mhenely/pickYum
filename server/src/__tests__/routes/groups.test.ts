@@ -1088,3 +1088,228 @@ describe('GET /api/groups/:id (voterMeta enrichment)', () => {
     });
   });
 });
+
+// ── Phase 14 backfill: start-voting / cancel-voting / schedule ────
+// These three host-only routes were previously covered only by
+// indirect integration through accept-result. Direct coverage on
+// the state-machine transitions catches regressions that move pre-
+// or post-conditions (e.g. archived guard, OPEN → VOTING gate, the
+// shared parseVotingStartsAt validator from lib/votingFlow).
+
+describe('POST /api/groups/:id/events/:eventId/start-voting', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).post('/api/groups/1/events/10/start-voting');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 when the group does not exist', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(null);
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/start-voting')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 403 when caller is not the host', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/start-voting')
+      .set('Cookie', authCookie(999));
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an archived group', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue({
+      ...fakeGroup, archivedAt: new Date(),
+    });
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/start-voting')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/archived/i);
+  });
+
+  it('returns 404 when the event does not belong to the group', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 999, status: 'OPEN',
+    });
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/start-voting')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 400 when the event has already started voting', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'VOTING',
+    });
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/start-voting')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/already started/i);
+  });
+});
+
+describe('POST /api/groups/:id/events/:eventId/cancel-voting', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).post('/api/groups/1/events/10/cancel-voting');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 403 when caller is not the host', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/cancel-voting')
+      .set('Cookie', authCookie(999));
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an archived group', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue({
+      ...fakeGroup, archivedAt: new Date(),
+    });
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/cancel-voting')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when the event is not currently VOTING', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/cancel-voting')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not in voting state/i);
+  });
+
+  it('flips a VOTING event back to OPEN and clears sessionId', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'VOTING', sessionId: 'sess-xyz',
+    });
+    (mockPrisma.groupEvent.update as jest.Mock).mockResolvedValue({
+      id: 10, status: 'OPEN', sessionId: null,
+    });
+
+    const res = await request(buildApp())
+      .post('/api/groups/1/events/10/cancel-voting')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.groupEvent.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 10 },
+        data: { status: 'OPEN', sessionId: null },
+      }),
+    );
+  });
+});
+
+describe('PATCH /api/groups/:id/events/:eventId/schedule', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).patch('/api/groups/1/events/10/schedule');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 403 when caller is not the host', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    const res = await request(buildApp())
+      .patch('/api/groups/1/events/10/schedule')
+      .set('Cookie', authCookie(999))
+      .send({ votingStartsAt: '2099-01-01T12:00:00Z' });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects past timestamps', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const res = await request(buildApp())
+      .patch('/api/groups/1/events/10/schedule')
+      .set('Cookie', authCookie(1))
+      .send({ votingStartsAt: past });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/future/i);
+  });
+
+  it('rejects unparseable date strings', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    const res = await request(buildApp())
+      .patch('/api/groups/1/events/10/schedule')
+      .set('Cookie', authCookie(1))
+      .send({ votingStartsAt: 'not-a-date' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid date/i);
+  });
+
+  it('rejects scheduling once voting has already started', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'VOTING',
+    });
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const res = await request(buildApp())
+      .patch('/api/groups/1/events/10/schedule')
+      .set('Cookie', authCookie(1))
+      .send({ votingStartsAt: future });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Cannot reschedule/i);
+  });
+
+  it('accepts a valid future time and persists it', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    const future = new Date(Date.now() + 60 * 60 * 1000);
+    (mockPrisma.groupEvent.update as jest.Mock).mockResolvedValue({
+      votingStartsAt: future,
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/groups/1/events/10/schedule')
+      .set('Cookie', authCookie(1))
+      .send({ votingStartsAt: future.toISOString() });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.groupEvent.update).toHaveBeenCalled();
+  });
+
+  it('clears the schedule when votingStartsAt is null', async () => {
+    (mockPrisma.group.findUnique as jest.Mock).mockResolvedValue(fakeGroup);
+    (mockPrisma.groupEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 10, groupId: 1, status: 'OPEN',
+    });
+    (mockPrisma.groupEvent.update as jest.Mock).mockResolvedValue({ votingStartsAt: null });
+
+    const res = await request(buildApp())
+      .patch('/api/groups/1/events/10/schedule')
+      .set('Cookie', authCookie(1))
+      .send({ votingStartsAt: null });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.groupEvent.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { votingStartsAt: null },
+      }),
+    );
+  });
+});

@@ -4,13 +4,15 @@ import jwt from 'jsonwebtoken';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
-import {
-  getSession, withSessionLock,
-} from '../sessions';
 import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
 import { notifyUser } from '../lib/userNotifications';
 import { parseNumericId } from '../lib/validators';
 import { userMinimalSelect, eventOptionsInclude } from '../lib/prismaHelpers';
+import {
+  parseVotingStartsAt,
+  parseVoteMethod,
+  finalizeVoteUnderLock,
+} from '../lib/votingFlow';
 
 // 30d expiry strikes a balance: long enough to share a link to someone
 // who responds slowly, short enough that an exposed link doesn't grant
@@ -1245,8 +1247,8 @@ router.patch('/:id/events/:eventId/vote-method', async (req: Request, res: Respo
     res.status(400).json({ error: 'Vote method is locked once voting has started' }); return;
   }
 
-  const { voteMethod } = req.body as { voteMethod?: string };
-  if (voteMethod !== 'SIMPLE' && voteMethod !== 'RANKED') {
+  const voteMethod = parseVoteMethod((req.body as { voteMethod?: unknown }).voteMethod);
+  if (!voteMethod) {
     res.status(400).json({ error: 'voteMethod must be SIMPLE or RANKED' }); return;
   }
 
@@ -1321,20 +1323,12 @@ router.patch('/:id/events/:eventId/schedule', async (req: Request, res: Response
     res.status(400).json({ error: 'Cannot reschedule after voting has started' }); return;
   }
 
-  const { votingStartsAt } = req.body as { votingStartsAt?: string | null };
-  let newTime: Date | null = null;
-  if (votingStartsAt) {
-    const parsed = Date.parse(votingStartsAt);
-    if (isNaN(parsed)) { res.status(400).json({ error: 'Invalid date format' }); return; }
-    newTime = new Date(parsed);
-    if (newTime <= new Date()) {
-      res.status(400).json({ error: 'Schedule must be set to a future time' }); return;
-    }
-  }
+  const parsed = parseVotingStartsAt((req.body as { votingStartsAt?: unknown }).votingStartsAt);
+  if (!parsed.ok) { res.status(400).json({ error: parsed.error }); return; }
 
   const updated = await prisma.groupEvent.update({
     where: { id: eventId },
-    data:  { votingStartsAt: newTime },
+    data:  { votingStartsAt: parsed.time },
   });
   res.json({ votingStartsAt: updated.votingStartsAt });
 });
@@ -1399,85 +1393,19 @@ router.post('/:id/events/:eventId/accept-result', async (req: Request, res: Resp
     res.status(400).json({ error: 'Event is not in voting state' }); return;
   }
 
-  type LockResult =
-    | { status: 200; body: { message: string } }
-    | { status: 400; body: { error: string } };
-
-  const result: LockResult = await withSessionLock(preEvent.sessionId, async () => {
-    // Re-check inside the lock.
-    const event = await prisma.groupEvent.findUnique({ where: { id: eventId } });
-    if (!event || event.status === 'DONE') {
-      return { status: 200, body: { message: 'Event already concluded' } };
-    }
-    if (event.status !== 'VOTING' || !event.sessionId) {
-      return { status: 400, body: { error: 'Event is not in voting state' } };
-    }
-
-    const session = await getSession(event.sessionId);
-    if (!session || session.status !== 'done') {
-      // Fallback path: session has expired but a result was already persisted
-      // (e.g. a prior accept-result that crashed mid-update). Re-stamp the
-      // event status and idempotently succeed.
-      const existing = await prisma.groupEventResult.findUnique({ where: { eventId } });
-      if (existing) {
-        await prisma.groupEvent.update({ where: { id: eventId }, data: { status: 'DONE', sessionId: null } });
-        return { status: 200, body: { message: 'Event concluded' } };
-      }
-      return { status: 400, body: { error: 'Voting session is not complete or has expired' } };
-    }
-
-    const winnerSnap   = session.result ? session.restaurants[session.result] : null;
-    const participants = [session.hostName, ...Object.keys(session.voters).filter((n) => n !== session.hostName)];
-
-    const dbRestaurants = await prisma.restaurant.findMany({
-      where:  { id: { in: session.candidates.map(Number).filter(Boolean) } },
-      select: { id: true, address: true, website: true },
-    });
-    const dbMap = Object.fromEntries(dbRestaurants.map((r) => [String(r.id), r]));
-
-    const restaurantPool = session.candidates.map((id) => ({
-      id,
-      name:    session.restaurants[id]?.name ?? id,
-      type:    session.restaurants[id]?.type,
-      price:   session.restaurants[id]?.price,
-      address: dbMap[id]?.address ?? null,
-      website: dbMap[id]?.website ?? null,
-    }));
-
-    const ballotsSnapshot = session.voteMethod === 'ranked' ? session.rankings : session.voters;
-
-    await prisma.$transaction([
-      prisma.groupEventResult.upsert({
-        where: { eventId },
-        create: {
-          eventId,
-          hostUsername:  session.hostName,
-          winnerName:    winnerSnap?.name ?? session.result ?? '',
-          method:        session.method ?? 'flip',
-          voteMethod:    session.method === 'vote' ? session.voteMethod : null,
-          participants,
-          scores:        session.scores ?? undefined,
-          // Prisma's InputJsonValue is an indexable signature; our session
-          // shapes are typed records that don't structurally widen to it.
-          // The cast-through-unknown mirrors groups.ts and is safe — these
-          // values are all JSON-serializable by construction.
-          ballots:        ballotsSnapshot as unknown as Prisma.InputJsonValue,
-          voterMeta:      session.voterMeta as unknown as Prisma.InputJsonValue,
-          irvRounds:      (session.irvRounds ?? undefined) as unknown as Prisma.InputJsonValue,
-          restaurantPool: restaurantPool as unknown as Prisma.InputJsonValue,
-        },
-        update: {},
-      }),
-      prisma.groupEvent.update({
-        where: { id: eventId },
-        data:  { status: 'DONE', sessionId: null },
-      }),
-    ]);
-
-    return { status: 200, body: { message: 'Event concluded' } };
+  // Lock-bound finalize work delegates to lib/votingFlow so groups + trips
+  // share the same persistence + recovery logic. Trip context passes
+  // recordPersonalAcceptance:false to skip the UserAccepted writes — those
+  // are group-specific personal-Insights entries that don't yet have a
+  // trip equivalent.
+  const result = await finalizeVoteUnderLock(eventId, preEvent.sessionId, {
+    recordPersonalAcceptance: false,
+    actingUserId: req.userId,
   });
 
-  res.status(result.status).json(result.body);
+  if (result.kind === 'concluded')               res.json({ message: 'Event concluded' });
+  else if (result.kind === 'already-concluded')  res.json({ message: 'Event already concluded' });
+  else res.status(400).json({ error: result.message });
 });
 
 // GET /api/trips/:id/events/:eventId — single-event read for the ballot
