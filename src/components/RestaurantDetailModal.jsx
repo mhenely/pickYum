@@ -6,6 +6,7 @@ import { addUserOption, removeUserOption, setRestaurantNote, persistAddReview, p
 import { showChosenCelebration } from '../redux/slices/celebrationSlice';
 import { pushToast } from '../redux/slices/toastSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
+import { useFetchData } from '../hooks/useFetchData';
 import InfoRow from './InfoRow';
 import HeartWithKebab from './HeartWithKebab';
 import RestaurantPhotoGallery from './RestaurantPhotoGallery';
@@ -203,20 +204,16 @@ const RestaurantDetailModal = ({
   // Self-fetched copy of the row from /api/restaurants/:id. Used when
   // restaurantMap is missing the entry (e.g. group voting page —
   // guests have no Redux user-data). The endpoint is public + cached
-  // server-side, so this is cheap.
-  const [fetched, setFetched] = useState(null);
-  useEffect(() => {
-    const numId = Number(restaurantId);
-    if (!numId) return;
-    // Skip when restaurantMap already has it — that's the authoritative
-    // source for authenticated users (carries notes/etc. for the user).
-    if (restaurantMap?.[restaurantId]) return;
-    let cancelled = false;
-    api.restaurants.get(numId)
-      .then(({ restaurant }) => { if (!cancelled) setFetched(restaurant); })
-      .catch(() => { /* fall through to fallback below */ });
-    return () => { cancelled = true; };
-  }, [restaurantId, restaurantMap]);
+  // server-side, so this is cheap. Skipped when restaurantMap already
+  // has the entry — that's the authoritative source for authenticated
+  // users (carries notes/etc. for the user).
+  const numIdForFetch = Number(restaurantId) || 0;
+  const shouldSelfFetch = numIdForFetch > 0 && !restaurantMap?.[restaurantId];
+  const { data: fetched } = useFetchData(
+    () => api.restaurants.get(numIdForFetch).then(({ restaurant }) => restaurant),
+    [restaurantId, restaurantMap],
+    { enabled: shouldSelfFetch },
+  );
 
   // ── On-demand refresh-if-stale ──────────────────────────────
   // Fire `refresh-restaurant/:id` on modal mount so the Google

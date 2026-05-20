@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useFetchData } from '../hooks/useFetchData';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { api, placePhotoUrl } from '../lib/api';
@@ -26,19 +26,10 @@ const Row = ({ label, value }) => {
 };
 
 const PublicRestaurantInfoModal = ({ restaurantId, fallback, onClose }) => {
-  const [restaurant, setRestaurant] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true); setError('');
-    api.restaurants.get(restaurantId)
-      .then(({ restaurant: r }) => { if (!cancelled) setRestaurant(r); })
-      .catch((err) => { if (!cancelled) setError(err.message ?? 'Failed to load restaurant info'); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, [restaurantId]);
+  const { data: restaurant, loading, error } = useFetchData(
+    () => api.restaurants.get(restaurantId).then(({ restaurant: r }) => r),
+    [restaurantId],
+  );
 
   // While the fetch is pending, render whatever the caller already knew about
   // the restaurant (name / type / price from the session snapshot). Means the

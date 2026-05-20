@@ -5,14 +5,10 @@ import { requireAuth, getOptionalAuthUserId } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
 import { downloadAndStoreAll, type StoredPhoto } from '../lib/photoStorage';
 import { logger } from '../lib/logger';
+import { parseNumericId } from '../lib/validators';
 
 const router = Router();
 router.use(writeLimiter);
-
-const parseId = (raw: string): number | null => {
-  const id = Number(raw);
-  return Number.isInteger(id) && id > 0 ? id : null;
-};
 
 // Visibility predicate — a row is visible to a viewer if it isn't private, or
 // if the viewer is the creator. Anonymous viewers (userId = null) see only
@@ -50,7 +46,7 @@ router.get('/', async (req: Request, res: Response) => {
 
 // GET /api/restaurants/:id
 router.get('/:id', async (req: Request, res: Response) => {
-  const id = parseId(req.params.id);
+  const id = parseNumericId(req.params.id);
   if (!id) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
   const userId = getOptionalAuthUserId(req);
   const restaurant = await prisma.restaurant.findUnique({ where: { id } });
@@ -378,7 +374,7 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
 
 // GET /api/restaurants/:id/reviews — community reviews for a restaurant
 router.get('/:id/reviews', async (req: Request, res: Response) => {
-  const restaurantId = parseId(req.params.id);
+  const restaurantId = parseNumericId(req.params.id);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
 
   // Same visibility rule as /:id — don't surface community reviews for a row
@@ -430,7 +426,7 @@ router.get('/:id/reviews', async (req: Request, res: Response) => {
 // toggle — there's no useful flag state for Google-sourced rows
 // since they can't match themselves.
 router.patch('/:id/match-settings', requireAuth, async (req: Request, res: Response) => {
-  const restaurantId = parseId(req.params.id);
+  const restaurantId = parseNumericId(req.params.id);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }
 
   const { excludeFromPlaceMatching } = req.body as { excludeFromPlaceMatching?: unknown };
@@ -480,7 +476,7 @@ router.patch('/:id/match-settings', requireAuth, async (req: Request, res: Respo
 // Place in the same collection — handled via `skipDuplicates` on
 // each migration (delete from old, ignore if already present in new).
 router.post('/:customId/link-to-place', requireAuth, async (req: Request, res: Response) => {
-  const customId = parseId(req.params.customId);
+  const customId = parseNumericId(req.params.customId);
   if (!customId) { res.status(400).json({ error: 'Invalid custom restaurant ID' }); return; }
 
   const { placeRestaurantId } = req.body as { placeRestaurantId?: unknown };

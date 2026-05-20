@@ -9,6 +9,8 @@ import {
 } from '../sessions';
 import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
 import { notifyUser } from '../lib/userNotifications';
+import { parseNumericId } from '../lib/validators';
+import { userMinimalSelect, eventOptionsInclude } from '../lib/prismaHelpers';
 
 // 30d expiry strikes a balance: long enough to share a link to someone
 // who responds slowly, short enough that an exposed link doesn't grant
@@ -40,11 +42,6 @@ const MAX_ANCHORS_PER_TRIP     = 10;
 const MAX_EVENT_NAME_LEN       = 80;
 const VALID_MEAL_SLOTS = ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK'] as const;
 type MealSlotInput = typeof VALID_MEAL_SLOTS[number];
-
-const parseId = (raw: string): number | null => {
-  const id = Number(raw);
-  return Number.isInteger(id) && id > 0 ? id : null;
-};
 
 // ── Auth helper ───────────────────────────────────────────────
 // Returns the trip with membership info for the requesting user in ONE
@@ -171,10 +168,10 @@ const tripInclude = {
       options: {
         include: {
           restaurant: { select: { id: true, name: true, cuisineType: true, priceLevel: true, address: true, lat: true, lng: true } },
-          addedBy:    { select: { id: true, username: true } },
+          addedBy:    { select: userMinimalSelect },
         },
       },
-      createdBy: { select: { id: true, username: true } },
+      createdBy: { select: userMinimalSelect },
       result:    true,
     },
     orderBy: [
@@ -260,7 +257,7 @@ router.post('/', async (req: Request, res: Response) => {
 
 // GET /api/trips/:id
 router.get('/:id', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isMember } = await checkTripAuth(tripId, req.userId);
@@ -304,7 +301,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 // PATCH /api/trips/:id — update name / destination / dates. Host only.
 // Locked out once archived (read-only after the trip ends).
 router.patch('/:id', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -353,7 +350,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
 // row stays so members can still browse meal results; everything else
 // becomes read-only.
 router.post('/:id/archive', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -376,7 +373,7 @@ router.post('/:id/archive', async (req: Request, res: Response) => {
 // accept before becoming a member. Idempotent for existing pending
 // invites; re-invites declined ones by flipping status back to PENDING.
 router.post('/:id/invites', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -436,7 +433,7 @@ router.post('/:id/invites', async (req: Request, res: Response) => {
 // member of the named group. Caller must be a member of the source
 // group (prevents using trip-host position to enumerate group rosters).
 router.post('/:id/invites/import-from-group', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -511,8 +508,8 @@ router.post('/:id/invites/import-from-group', async (req: Request, res: Response
 // DELETE /api/trips/:id/invites/:inviteId — host rescinds a pending
 // invite. Always-200 even if the row was already gone (idempotent).
 router.delete('/:id/invites/:inviteId', async (req: Request, res: Response) => {
-  const tripId   = parseId(req.params.id);
-  const inviteId = parseId(req.params.inviteId);
+  const tripId   = parseNumericId(req.params.id);
+  const inviteId = parseNumericId(req.params.inviteId);
   if (!tripId || !inviteId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -527,8 +524,8 @@ router.delete('/:id/invites/:inviteId', async (req: Request, res: Response) => {
 // POST /api/trips/:id/invites/:inviteId/respond — invitee accepts or
 // declines. Accept atomically converts the invite into a TripMember row.
 router.post('/:id/invites/:inviteId/respond', async (req: Request, res: Response) => {
-  const tripId   = parseId(req.params.id);
-  const inviteId = parseId(req.params.inviteId);
+  const tripId   = parseNumericId(req.params.id);
+  const inviteId = parseNumericId(req.params.inviteId);
   if (!tripId || !inviteId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { action } = req.body as { action?: string };
@@ -577,7 +574,7 @@ router.post('/:id/invites/:inviteId/respond', async (req: Request, res: Response
 // Returns the token alone; the client builds the final URL from
 // CLIENT_URL since the server doesn't know what the public app URL is.
 router.post('/:id/invite-link', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -701,8 +698,8 @@ router.get('/me/participant-meals', async (req: Request, res: Response) => {
 // member removes themselves (leave). Host can't remove themselves; they
 // must archive the trip or (future) transfer host first.
 router.delete('/:id/members/:userId', async (req: Request, res: Response) => {
-  const tripId   = parseId(req.params.id);
-  const targetId = parseId(req.params.userId);
+  const tripId   = parseNumericId(req.params.id);
+  const targetId = parseNumericId(req.params.userId);
   if (!tripId || !targetId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost, isMember } = await checkTripAuth(tripId, req.userId);
@@ -745,7 +742,7 @@ router.delete('/:id/members/:userId', async (req: Request, res: Response) => {
 // primary; setting isPrimary on a later anchor demotes the current
 // primary atomically (mirrors SavedAddress "default" semantics).
 router.post('/:id/anchors', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -794,8 +791,8 @@ router.post('/:id/anchors', async (req: Request, res: Response) => {
 
 // PATCH /api/trips/:id/anchors/:anchorId — host only.
 router.patch('/:id/anchors/:anchorId', async (req: Request, res: Response) => {
-  const tripId   = parseId(req.params.id);
-  const anchorId = parseId(req.params.anchorId);
+  const tripId   = parseNumericId(req.params.id);
+  const anchorId = parseNumericId(req.params.anchorId);
   if (!tripId || !anchorId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -855,8 +852,8 @@ router.patch('/:id/anchors/:anchorId', async (req: Request, res: Response) => {
 // DELETE /api/trips/:id/anchors/:anchorId — host only. Auto-promotes
 // the oldest remaining anchor to primary if the deleted one was.
 router.delete('/:id/anchors/:anchorId', async (req: Request, res: Response) => {
-  const tripId   = parseId(req.params.id);
-  const anchorId = parseId(req.params.anchorId);
+  const tripId   = parseNumericId(req.params.id);
+  const anchorId = parseNumericId(req.params.anchorId);
   if (!tripId || !anchorId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -895,13 +892,15 @@ router.delete('/:id/anchors/:anchorId', async (req: Request, res: Response) => {
 // pulls inline, but as a top-level field). Centralized so list/create/update
 // responses all return the same denormalized event row.
 const mealEventInclude = {
-  options: {
-    include: {
-      restaurant: { select: { id: true, name: true, cuisineType: true, priceLevel: true, address: true, lat: true, lng: true } },
-      addedBy:    { select: { id: true, username: true } },
-    },
-  },
-  createdBy: { select: { id: true, username: true } },
+  // options.include composed via eventOptionsInclude — same slim
+  // restaurant projection + addedBy(userMinimalSelect) + asc createdAt
+  // as before. Sharing the helper with groups.ts means the
+  // "who/when added it" surface stays in sync across event surfaces.
+  options: eventOptionsInclude({
+    id: true, name: true, cuisineType: true, priceLevel: true,
+    address: true, lat: true, lng: true,
+  }),
+  createdBy: { select: userMinimalSelect },
   result:    true,
 };
 
@@ -909,7 +908,7 @@ const mealEventInclude = {
 // Mirrors `POST /api/groups/:id/events`; trip-specific fields (mealSlot,
 // scheduledFor, participantUserIds) are optional in the create payload.
 router.post('/:id/events', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
 
   const { trip: tripMeta, isMember } = await checkTripAuth(tripId, req.userId);
@@ -1008,8 +1007,8 @@ router.post('/:id/events', async (req: Request, res: Response) => {
 // Editable while still OPEN; the host or original creator may edit. Mirrors
 // how groups handle event creator-vs-host permissions.
 router.patch('/:id/events/:eventId', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1101,8 +1100,8 @@ router.patch('/:id/events/:eventId', async (req: Request, res: Response) => {
 // creator can delete, and only while still OPEN. (Trip-wide "I made a
 // mistake" cleanup; once voting starts, cancel-voting first.)
 router.delete('/:id/events/:eventId', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1129,8 +1128,8 @@ router.delete('/:id/events/:eventId', async (req: Request, res: Response) => {
 // Any trip member can. Privacy semantics match groups: a private restaurant
 // can only be shared in by its creator; sharing implicitly publishes it.
 router.post('/:id/events/:eventId/options', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember } = await checkTripAuth(tripId, req.userId);
@@ -1163,7 +1162,7 @@ router.post('/:id/events/:eventId/options', async (req: Request, res: Response) 
     update: {},
     include: {
       restaurant: true,
-      addedBy:    { select: { id: true, username: true } },
+      addedBy:    { select: userMinimalSelect },
     },
   });
   res.status(201).json({ option });
@@ -1173,9 +1172,9 @@ router.post('/:id/events/:eventId/options', async (req: Request, res: Response) 
 // option. Removable by: the host, the member who added it, OR any member
 // when the adder has left. Mirrors the group rule.
 router.delete('/:id/events/:eventId/options/:restaurantId', async (req: Request, res: Response) => {
-  const tripId       = parseId(req.params.id);
-  const eventId      = parseId(req.params.eventId);
-  const restaurantId = parseId(req.params.restaurantId);
+  const tripId       = parseNumericId(req.params.id);
+  const eventId      = parseNumericId(req.params.eventId);
+  const restaurantId = parseNumericId(req.params.restaurantId);
   if (!tripId || !eventId || !restaurantId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1226,8 +1225,8 @@ router.delete('/:id/events/:eventId/options/:restaurantId', async (req: Request,
 // PATCH /api/trips/:id/events/:eventId/vote-method — set SIMPLE or RANKED.
 // Locked once voting starts; host-or-creator only (same as edit).
 router.patch('/:id/events/:eventId/vote-method', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1263,8 +1262,8 @@ router.patch('/:id/events/:eventId/vote-method', async (req: Request, res: Respo
 // in GET /:id share their implementation. GroupSessionPage on the frontend
 // handles both group and trip contexts uniformly.
 router.post('/:id/events/:eventId/start-voting', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1305,8 +1304,8 @@ router.post('/:id/events/:eventId/start-voting', async (req: Request, res: Respo
 // auto-open the vote. Locked once the event leaves OPEN. Mirrors the
 // corresponding group endpoint so /trips and /groups have the same shape.
 router.patch('/:id/events/:eventId/schedule', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1343,8 +1342,8 @@ router.patch('/:id/events/:eventId/schedule', async (req: Request, res: Response
 // POST /api/trips/:id/events/:eventId/cancel-voting — host resets a VOTING
 // event back to OPEN. Used when "we changed our minds, restart the vote".
 router.post('/:id/events/:eventId/cancel-voting', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1377,8 +1376,8 @@ router.post('/:id/events/:eventId/cancel-voting', async (req: Request, res: Resp
 // the lock after the first commits, sees status='DONE' on re-read, and
 // returns the idempotent "already concluded" branch.
 router.post('/:id/events/:eventId/accept-result', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
@@ -1485,8 +1484,8 @@ router.post('/:id/events/:eventId/accept-result', async (req: Request, res: Resp
 // detail modal. Same shape as the inline `events[i]` from GET /api/trips/:id
 // but standalone so deep-links work.
 router.get('/:id/events/:eventId', async (req: Request, res: Response) => {
-  const tripId  = parseId(req.params.id);
-  const eventId = parseId(req.params.eventId);
+  const tripId  = parseNumericId(req.params.id);
+  const eventId = parseNumericId(req.params.eventId);
   if (!tripId || !eventId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember } = await checkTripAuth(tripId, req.userId);
@@ -1512,7 +1511,7 @@ router.get('/:id/events/:eventId', async (req: Request, res: Response) => {
 
 // GET /api/trips/:id/insights
 router.get('/:id/insights', async (req: Request, res: Response) => {
-  const tripId = parseId(req.params.id);
+  const tripId = parseNumericId(req.params.id);
   if (!tripId) { res.status(400).json({ error: 'Invalid id' }); return; }
 
   const { trip: tripMeta, isMember } = await checkTripAuth(tripId, req.userId);

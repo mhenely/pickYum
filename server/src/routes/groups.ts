@@ -6,6 +6,7 @@ import { writeLimiter } from '../middleware/rateLimits';
 import { getSession, withSessionLock } from '../sessions';
 import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
 import { notifyUser } from '../lib/userNotifications';
+import { userMinimalSelect, eventOptionsInclude } from '../lib/prismaHelpers';
 
 const router = Router();
 router.use(requireAuth);
@@ -69,13 +70,11 @@ async function checkGroupAuth(groupId: number, userId: number): Promise<GroupAut
 // with 20 past events × 30 voters could ship 50+ KB of unused ballots
 // here otherwise.
 const eventInclude = {
-  options: {
-    include: {
-      restaurant: true,
-      addedBy: { select: { id: true, username: true } },
-    },
-    orderBy: { createdAt: 'asc' as const },
-  },
+  // options.include composed via eventOptionsInclude(true) — same
+  // restaurant: true + addedBy(userMinimalSelect) + asc createdAt as
+  // before, just sourced from lib/prismaHelpers so trips.ts and any
+  // future caller share one definition.
+  options: eventOptionsInclude(true),
   result: {
     select: {
       id: true,
@@ -94,7 +93,7 @@ const eventInclude = {
   },
   // Surface who proposed the event so the UI can show "Proposed by Sarah" —
   // null on legacy rows from before any-member creation rolled out.
-  createdBy: { select: { id: true, username: true } },
+  createdBy: { select: userMinimalSelect },
 } as const;
 
 // Stamps `currentUsername` onto each voterMeta entry — the user's username
@@ -122,7 +121,7 @@ async function enrichVoterMeta(results: Array<{ voterMeta: unknown } | null | un
 
   const users = await prisma.user.findMany({
     where: { id: { in: [...allIds] } },
-    select: { id: true, username: true },
+    select: userMinimalSelect,
   });
   const idToCurrent = new Map(users.map((u) => [u.id, u.username]));
 
@@ -180,7 +179,7 @@ router.get('/', async (req: Request, res: Response) => {
       votingStartsAt: true,
       scheduledFor: true,
       createdAt: true,
-      createdBy: { select: { id: true, username: true } },
+      createdBy: { select: userMinimalSelect },
     },
     orderBy: { createdAt: 'desc' as const },
   };
@@ -195,7 +194,7 @@ router.get('/', async (req: Request, res: Response) => {
       votingStartsAt: true,
       scheduledFor: true,
       createdAt: true,
-      createdBy: { select: { id: true, username: true } },
+      createdBy: { select: userMinimalSelect },
       result: { select: { winnerName: true, method: true, voteMethod: true, participants: true, createdAt: true } },
     },
     orderBy: { createdAt: 'desc' as const },
@@ -326,7 +325,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       invites: {
         include: {
           invited:   { select: { id: true, username: true, avatarUrl: true } },
-          invitedBy: { select: { id: true, username: true } },
+          invitedBy: { select: userMinimalSelect },
         },
         orderBy: { createdAt: 'desc' },
       },
@@ -660,7 +659,7 @@ router.post('/:id/events/:eventId/options', async (req: Request, res: Response) 
     update: {},
     include: {
       restaurant: true,
-      addedBy: { select: { id: true, username: true } },
+      addedBy: { select: userMinimalSelect },
     },
   });
   res.status(201).json({ option });
@@ -1090,7 +1089,7 @@ router.get('/:id/events/:eventId', async (req: Request, res: Response) => {
       options: {
         include: {
           restaurant: { select: { id: true, name: true, cuisineType: true, priceLevel: true, address: true, website: true } },
-          addedBy:    { select: { id: true, username: true } },
+          addedBy:    { select: userMinimalSelect },
         },
         orderBy: { createdAt: 'asc' as const },
       },
@@ -1124,7 +1123,7 @@ router.get('/:id/favorites', async (req: Request, res: Response) => {
     where: { groupId },
     include: {
       restaurant: { select: { id: true, name: true, cuisineType: true, priceLevel: true, hours: true, phone: true, website: true, takeout: true, delivery: true, googleRating: true } },
-      addedBy:    { select: { id: true, username: true } },
+      addedBy:    { select: userMinimalSelect },
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -1168,7 +1167,7 @@ router.post('/:id/favorites/:restaurantId', async (req: Request, res: Response) 
       update: {},
       include: {
         restaurant: { select: { id: true, name: true, cuisineType: true, priceLevel: true, hours: true, phone: true, website: true, takeout: true, delivery: true, googleRating: true } },
-        addedBy:    { select: { id: true, username: true } },
+        addedBy:    { select: userMinimalSelect },
       },
     });
     res.status(201).json({ favorite });

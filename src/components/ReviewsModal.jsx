@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useSelector } from 'react-redux';
 import { api } from '../lib/api';
+import { useFetchData } from '../hooks/useFetchData';
 import StarRating from './star-rating/star-rating.component';
 
 const SORT_OPTIONS = [
@@ -29,21 +30,20 @@ const ReviewsModal = ({
 }) => {
   const currentUserId = useSelector((state) => state.auth.user?.id ?? null);
 
-  const [sources, setSources]           = useState(new Set(ALL_SOURCES));
-  const [sortBy, setSortBy]             = useState('date-desc');
-  const [communityReviews, setCommunity] = useState([]);
-  const [loading, setLoading]           = useState(false);
-  const [fetchError, setFetchError]     = useState(false);
+  const [sources, setSources] = useState(new Set(ALL_SOURCES));
+  const [sortBy, setSortBy]   = useState('date-desc');
 
-  useEffect(() => {
-    if (!isDbRestaurant(restaurantId)) return;
-    setLoading(true);
-    api.restaurants
-      .getReviews(Number(restaurantId))
-      .then((data) => setCommunity(data.reviews ?? []))
-      .catch(() => setFetchError(true))
-      .finally(() => setLoading(false));
-  }, [restaurantId]);
+  // Community reviews load through useFetchData — same shape as the
+  // previous inline useEffect but with cancellation on prop change
+  // (previously missing, which let a stale promise overwrite the
+  // new restaurant's reviews when this modal was reopened quickly).
+  const isDbRow = isDbRestaurant(restaurantId);
+  const { data: communityData, loading, error: fetchError } = useFetchData(
+    () => api.restaurants.getReviews(Number(restaurantId)),
+    [restaurantId],
+    { enabled: isDbRow },
+  );
+  const communityReviews = communityData?.reviews ?? [];
 
   const allSelected = sources.size === ALL_SOURCES.length;
 
