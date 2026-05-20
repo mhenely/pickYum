@@ -26,6 +26,10 @@ export const CUISINE_OPTIONS = [
   { value: 'buffet_restaurant',         label: 'Buffet' },
   { value: 'hamburger_restaurant',      label: 'Burgers' },
   { value: 'cafe',                      label: 'Café' },
+  // `caribbean_restaurant` is the closest Table A type to "Jamaican";
+  // Google doesn't expose a country-specific Jamaican slug, so this
+  // catches Jamaican plus the rest of the West Indian umbrella.
+  { value: 'caribbean_restaurant',      label: 'Caribbean' },
   { value: 'chinese_restaurant',        label: 'Chinese' },
   { value: 'coffee_shop',               label: 'Coffee Shop' },
   { value: 'deli',                      label: 'Deli' },
@@ -35,6 +39,7 @@ export const CUISINE_OPTIONS = [
   { value: 'fine_dining_restaurant',    label: 'Fine Dining' },
   { value: 'french_restaurant',         label: 'French' },
   { value: 'greek_restaurant',          label: 'Greek' },
+  { value: 'hawaiian_restaurant',       label: 'Hawaiian' },
   { value: 'ice_cream_shop',            label: 'Ice Cream' },
   { value: 'indian_restaurant',         label: 'Indian' },
   { value: 'indonesian_restaurant',     label: 'Indonesian' },

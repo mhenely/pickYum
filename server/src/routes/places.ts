@@ -232,8 +232,20 @@ function normalizeQueryKey(s: string): string {
   return s.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-async function textGet(q: string): Promise<TextEntry | null> {
-  const key = normalizeQueryKey(q);
+// Cache key for an optional location bias. Coords are quantized to 4
+// decimal places (~11m) so e.g. lat=45.12345 and lat=45.12346 share the
+// same cache entry — the bias only nudges Google's ranking, hundredth-of-a-meter
+// precision wouldn't change results. `null` returns '' so unbiased
+// queries get a stable shared key.
+function biasCacheKey(bias: LocationBias | null): string {
+  if (!bias) return '';
+  const lat = bias.lat.toFixed(4);
+  const lng = bias.lng.toFixed(4);
+  return `|${lat},${lng},${bias.radius}`;
+}
+
+async function textGet(q: string, bias: LocationBias | null): Promise<TextEntry | null> {
+  const key = normalizeQueryKey(q) + biasCacheKey(bias);
   if (redis && redis.status === 'ready') {
     const raw = await redis.get(`places:text:${key}`).catch(() => null);
     return raw ? (JSON.parse(raw) as TextEntry) : null;
@@ -242,14 +254,16 @@ async function textGet(q: string): Promise<TextEntry | null> {
   return e && e.expiresAt > Date.now() ? e : null;
 }
 
-async function textSet(q: string, value: TextEntry): Promise<void> {
-  const key = normalizeQueryKey(q);
+async function textSet(q: string, bias: LocationBias | null, value: TextEntry): Promise<void> {
+  const key = normalizeQueryKey(q) + biasCacheKey(bias);
   if (redis && redis.status === 'ready') {
     await redis.setex(`places:text:${key}`, TEXT_TTL_S, JSON.stringify(value)).catch(() => {});
     return;
   }
   inMemText.set(key, { ...value, expiresAt: Date.now() + TEXT_TTL_S * 1000 });
 }
+
+interface LocationBias { lat: number; lng: number; radius: number }
 
 // Kept as a separate exported alias for backward compat with the existing
 // geocode call sites. Internally just normalizeQueryKey.
@@ -480,12 +494,35 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
 router.use(requireAuth);
 router.use(placesLimiter);
 
-// GET /api/places/text-search?q=<query>
+// GET /api/places/text-search?q=<query>&lat=<n>&lng=<n>&radius=<m>
+//
+// The optional lat/lng/radius triple is forwarded to Google as a
+// `locationBias.circle` so results rank closer to the user's intent.
+// Without bias the search is global — useful for "is this restaurant
+// on Google anywhere?" lookups, less useful for "where can I eat near
+// me?" intent. The client decides whether to send bias based on
+// whether the user has a resolved location.
 router.get('/text-search', async (req: Request, res: Response) => {
   const q = ((req.query.q as string) ?? '').trim();
   if (q.length < 2) {
     res.status(400).json({ error: 'q must be at least 2 characters' });
     return;
+  }
+
+  // Parse + validate the optional bias triple. All three must be present
+  // and well-formed, otherwise we silently fall back to a global search
+  // (no error — half-specified bias is just a caller bug, no need to
+  // 400 the user-visible request over it).
+  const latRaw    = parseFloat(req.query.lat    as string);
+  const lngRaw    = parseFloat(req.query.lng    as string);
+  const radiusRaw = parseFloat(req.query.radius as string);
+  let bias: LocationBias | null = null;
+  if (
+    Number.isFinite(latRaw) && latRaw >= -90  && latRaw <= 90 &&
+    Number.isFinite(lngRaw) && lngRaw >= -180 && lngRaw <= 180 &&
+    Number.isFinite(radiusRaw) && radiusRaw > 0 && radiusRaw <= 50_000 // Google's max for searchText
+  ) {
+    bias = { lat: latRaw, lng: lngRaw, radius: radiusRaw };
   }
 
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
@@ -494,11 +531,24 @@ router.get('/text-search', async (req: Request, res: Response) => {
     return;
   }
 
-  const cached = await textGet(q);
+  const cached = await textGet(q, bias);
   if (cached) {
     trackGoogleCall(req, 'textSearch', { cacheHit: true });
     res.json({ restaurants: cached.restaurants, configured: true });
     return;
+  }
+
+  const requestBody: Record<string, unknown> = {
+    textQuery:      `${q} restaurant`,
+    maxResultCount: 10,
+  };
+  if (bias) {
+    requestBody.locationBias = {
+      circle: {
+        center: { latitude: bias.lat, longitude: bias.lng },
+        radius: bias.radius,
+      },
+    };
   }
 
   const searchRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
@@ -508,7 +558,7 @@ router.get('/text-search', async (req: Request, res: Response) => {
       'X-Goog-Api-Key': apiKey,
       'X-Goog-FieldMask': TEXT_FIELD_MASK,
     },
-    body: JSON.stringify({ textQuery: `${q} restaurant`, maxResultCount: 10 }),
+    body: JSON.stringify(requestBody),
   });
 
   const data = await searchRes.json() as any;
@@ -543,7 +593,7 @@ router.get('/text-search', async (req: Request, res: Response) => {
       website:       (p.websiteUri as string | undefined) ?? null,
     }));
 
-  await textSet(q, { restaurants });
+  await textSet(q, bias, { restaurants });
   res.json({ restaurants, configured: true });
 });
 
@@ -638,10 +688,10 @@ const EXCLUDED_PRIMARY_TYPES = [
 const ALLOWED_CUISINE_TYPES = new Set([
   'american_restaurant', 'bakery', 'bar', 'bar_and_grill', 'barbecue_restaurant',
   'breakfast_restaurant', 'brunch_restaurant', 'buffet_restaurant',
-  'cafe', 'chinese_restaurant', 'coffee_shop', 'deli',
+  'cafe', 'caribbean_restaurant', 'chinese_restaurant', 'coffee_shop', 'deli',
   'dessert_restaurant', 'diner', 'fast_food_restaurant', 'fine_dining_restaurant',
   'french_restaurant', 'greek_restaurant', 'hamburger_restaurant',
-  'ice_cream_shop', 'indian_restaurant', 'indonesian_restaurant',
+  'hawaiian_restaurant', 'ice_cream_shop', 'indian_restaurant', 'indonesian_restaurant',
   'italian_restaurant', 'japanese_restaurant', 'korean_restaurant',
   'lebanese_restaurant', 'mediterranean_restaurant', 'mexican_restaurant',
   'middle_eastern_restaurant', 'pizza_restaurant', 'pub', 'ramen_restaurant',

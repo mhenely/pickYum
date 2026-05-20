@@ -3,6 +3,14 @@ import { createSlice } from "@reduxjs/toolkit";
 // Redux state must be serializable, so priceFilters is stored as an array.
 // SearchPage converts it to a Set for O(1) membership checks.
 const initialState = {
+  // Search mode toggles between "Nearby" (location → near me) and
+  // "By name" (text search against Google Places, optionally biased
+  // to the user's last resolved location). Both modes write results
+  // into `nearbyResults` so the existing grid / sort / filter pipeline
+  // is reused; only the input UI and the fetcher differ.
+  searchMode: 'nearby',     // 'nearby' | 'name'
+  nameQuery: '',            // user's text-search input
+
   // Nearby search
   nearbyResults: null,      // PlacesRestaurant[] | null — null means local-list mode
   locationInput: "",
@@ -60,6 +68,8 @@ export const searchSlice = createSlice({
       resetPage(state);
     },
     setLocationInput:    (state, action) => { state.locationInput  = action.payload; },
+    setSearchMode:       (state, action) => { state.searchMode     = action.payload === 'name' ? 'name' : 'nearby'; },
+    setNameQuery:        (state, action) => { state.nameQuery      = action.payload; },
     setRadiusMeters:     (state, action) => { state.radiusMeters   = action.payload; },
     // Accepts a slug from CUISINE_OPTIONS or null/'' to clear. No
     // resetPage call — changing the cuisine doesn't change the
@@ -99,6 +109,8 @@ export const searchSlice = createSlice({
 export const {
   setNearbyResults,
   setLocationInput,
+  setSearchMode,
+  setNameQuery,
   setRadiusMeters,
   setSearchCuisineType,
   clearNearby,

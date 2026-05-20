@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
+import { pushToast } from '../redux/slices/toastSlice';
 import { api } from '../lib/api';
 import { groupsApi } from '../lib/groupsApi';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -50,6 +51,7 @@ function tripDateToInputValue(iso) {
 
 function MembersSection({ trip, canHostAct, currentUserId, onRefresh }) {
   const navigate = useNavigate();
+  const dispatch = useDispatch();
   const [username, setUsername] = useState('');
   const [inviting,    setInviting]    = useState(false);
   const [inviteError, setInviteError] = useState('');
@@ -62,6 +64,38 @@ function MembersSection({ trip, canHostAct, currentUserId, onRefresh }) {
   const [groupsLoaded, setGroupsLoaded] = useState(false);
   const [importingId,  setImportingId]  = useState(null);
   const [importError,  setImportError]  = useState('');
+  const [generatingLink, setGeneratingLink] = useState(false);
+
+  const handleCopyInviteLink = async () => {
+    setGeneratingLink(true);
+    try {
+      const { token } = await api.trips.createInviteLink(trip.id);
+      const url = `${window.location.origin}/trips/join/${token}`;
+      // Some browsers gate clipboard.writeText behind a "secure context"
+      // (HTTPS or localhost). Fall through to selectable text in the toast
+      // when the API isn't available so the user can still copy manually.
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(url);
+        copied = true;
+      } catch { /* fall through */ }
+      dispatch(pushToast({
+        id: `trip-invite-${Date.now()}`,
+        status: copied ? 'success' : 'info',
+        label: copied
+          ? 'Invite link copied — share it with anyone you want to add.'
+          : `Invite link: ${url}`,
+      }));
+    } catch (err) {
+      dispatch(pushToast({
+        id: `trip-invite-err-${Date.now()}`,
+        status: 'error',
+        label: err.message ?? 'Could not generate invite link.',
+      }));
+    } finally {
+      setGeneratingLink(false);
+    }
+  };
 
   const handleInvite = async (e) => {
     e.preventDefault();
@@ -201,6 +235,19 @@ function MembersSection({ trip, canHostAct, currentUserId, onRefresh }) {
           </form>
           {inviteError && <p className="text-xs text-red-500 mb-2">{inviteError}</p>}
 
+          {/* Shareable link — alternative to username-by-username invite.
+              Generates a signed token; anyone with the resulting URL
+              who's signed in is auto-added as a member when they open it.
+              30-day expiry on the server side; rotate JWT_SECRET to
+              invalidate every outstanding link. */}
+          <button
+            onClick={handleCopyInviteLink}
+            disabled={generatingLink}
+            className="text-xs font-medium text-orange-600 hover:text-orange-800 disabled:opacity-40 mb-2"
+          >
+            {generatingLink ? 'Generating…' : '🔗 Copy invite link'}
+          </button>
+
           <div className="border-t border-gray-100 pt-2">
             {!showImport ? (
               <button
@@ -297,7 +344,7 @@ function AnchorsSection({ trip, canHostAct, onRefresh }) {
   };
 
   return (
-    <section className="rounded-xl border border-gray-200 bg-white p-4">
+    <section id="trip-anchors" className="rounded-xl border border-gray-200 bg-white p-4 scroll-mt-4">
       <h2 className="text-sm font-semibold text-gray-700 mb-3">
         Anchors <span className="text-gray-400 font-normal">({trip.anchors.length})</span>
       </h2>
@@ -1736,7 +1783,60 @@ export default function TripDetailPage() {
           </span>
         )}
       </div>
-      <p className="text-xs text-gray-400 mb-5">{formatDateRange(trip.startDate, trip.endDate)}</p>
+      <p className="text-xs text-gray-400 mb-3">{formatDateRange(trip.startDate, trip.endDate)}</p>
+
+      {/* Primary anchor pill — surfaces what nearby-search will use as
+          its center. Click jumps to the anchors section for management.
+          When no anchor is set, a CTA explains why nearby-search is
+          disabled on meal events (the prior silent-disable was confusing). */}
+      {(() => {
+        const primary = (trip.anchors ?? []).find((a) => a.isPrimary) ?? (trip.anchors ?? [])[0];
+        if (primary) {
+          return (
+            <a
+              href="#trip-anchors"
+              className="inline-flex items-center gap-1.5 rounded-full bg-gray-50 border border-gray-200 px-2.5 py-1 text-xs text-gray-600 hover:bg-gray-100 mb-3"
+              title="Manage trip anchors"
+            >
+              <span aria-hidden="true">📍</span>
+              <span className="truncate max-w-[200px]">{primary.label}</span>
+            </a>
+          );
+        }
+        if (canHostAct) {
+          return (
+            <a
+              href="#trip-anchors"
+              className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100 mb-3"
+            >
+              <span aria-hidden="true">📍</span>
+              <span>Add an anchor to enable nearby search</span>
+            </a>
+          );
+        }
+        return null;
+      })()}
+
+      {/* Next-meal callout — surfaces the nearest upcoming meal so users
+          don't have to scroll the events list to answer "what's next?".
+          Only shows when there's at least one scheduled, non-DONE meal in
+          the future. */}
+      {(() => {
+        const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+        const next = (trip.events ?? [])
+          .filter((e) => e.status !== 'DONE' && e.scheduledFor && new Date(e.scheduledFor) >= startOfToday)
+          .sort((a, b) => new Date(a.scheduledFor) - new Date(b.scheduledFor))[0];
+        if (!next) return null;
+        const dt = new Date(next.scheduledFor);
+        const whenLabel = dt.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        return (
+          <div className="mb-5 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm">
+            <span className="text-orange-700 font-semibold shrink-0">Next:</span>
+            <span className="text-gray-800 truncate min-w-0">{next.name}</span>
+            <span className="text-orange-700/80 text-xs shrink-0 ml-auto">{whenLabel}</span>
+          </div>
+        );
+      })()}
 
       <div className="flex flex-col gap-4 mb-5">
         <MembersSection

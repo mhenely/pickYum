@@ -846,10 +846,23 @@ export const api = {
         resolvedLng?: number;
       }>(`/api/places/nearby?${params.toString()}`);
     },
-    search: (q: string) =>
-      request<{ restaurants: PlacesRestaurant[]; configured: boolean }>(
-        `/api/places/text-search?q=${encodeURIComponent(q)}`,
-      ),
+    // Optional bias triple anchors text-search results to a geographic
+    // center (Google's `locationBias.circle`). Without it the search is
+    // global. Send all three or none — partial bias is dropped server-side.
+    search: (
+      q: string,
+      bias?: { lat: number; lng: number; radius: number },
+    ) => {
+      const params = new URLSearchParams({ q });
+      if (bias && Number.isFinite(bias.lat) && Number.isFinite(bias.lng) && Number.isFinite(bias.radius)) {
+        params.set('lat',    String(bias.lat));
+        params.set('lng',    String(bias.lng));
+        params.set('radius', String(bias.radius));
+      }
+      return request<{ restaurants: PlacesRestaurant[]; configured: boolean }>(
+        `/api/places/text-search?${params.toString()}`,
+      );
+    },
   },
   trips: {
     list: () =>
@@ -867,6 +880,13 @@ export const api = {
     // TripMember) or decline.
     inviteMember: (id: number, username: string) =>
       request<{ trip: ApiTrip; invite: ApiTripInvite }>(`/api/trips/${id}/invites`, { method: 'POST', body: JSON.stringify({ username }) }),
+    // Shareable invite link — host generates a token; anyone with the
+    // resulting URL who hits joinByToken below is added as a member.
+    // Tokens expire after 30d; rotating JWT_SECRET invalidates all.
+    createInviteLink: (id: number) =>
+      request<{ token: string }>(`/api/trips/${id}/invite-link`, { method: 'POST' }),
+    joinByToken: (token: string) =>
+      request<{ tripId: number; name: string }>(`/api/trips/join/${encodeURIComponent(token)}`, { method: 'POST' }),
     importInvitesFromGroup: (id: number, groupId: number) =>
       request<{ trip: ApiTrip; invited: number; skipped: number }>(`/api/trips/${id}/invites/import-from-group`, { method: 'POST', body: JSON.stringify({ groupId }) }),
     rescindInvite: (id: number, inviteId: number) =>
@@ -1093,6 +1113,16 @@ export interface ApiTripListEntry {
   // Primary anchor only — SearchPage's trip-override banner needs it.
   // All anchors live on the detail endpoint's full ApiTrip.
   anchors: Array<{ id: number; label: string; address: string; isPrimary: boolean }>;
+  // The nearest upcoming meal (status OPEN/VOTING, scheduledFor in the
+  // future). Empty array when nothing's scheduled. Server caps at one
+  // entry so the list payload stays bounded.
+  events: Array<{
+    id: number;
+    name: string;
+    scheduledFor: string;
+    status: 'OPEN' | 'VOTING' | 'DONE';
+    mealSlot: string | null;
+  }>;
   _count: { members: number; events: number; anchors: number };
 }
 

@@ -4,6 +4,7 @@ import { XMarkIcon } from '@heroicons/react/24/outline';
 import { useDispatch, useSelector } from 'react-redux';
 import { addUserOption, removeUserOption, setRestaurantNote, persistAddReview, persistEditReview, removeUserReview, addUserAcceptance, setMatchOptOut, updateCustomRestaurant, toggleAcceptedExcludeFromInsights } from '../redux/slices/userInfoSlice';
 import { showChosenCelebration } from '../redux/slices/celebrationSlice';
+import { pushToast } from '../redux/slices/toastSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
 import InfoRow from './InfoRow';
 import HeartWithKebab from './HeartWithKebab';
@@ -518,6 +519,15 @@ const RestaurantDetailModal = ({
     setReviewDate(new Date().toLocaleDateString());
     setShowReviewForm(false);
     setReviewSubmitting(false);
+    // Visible confirmation that the review landed — previously the form
+    // just disappeared, leaving the user to wonder if it saved. The
+    // sync layer surfaces its own error toast on failure, so this only
+    // fires on the optimistic-success path.
+    dispatch(pushToast({
+      id: `review-added-${restaurantId}-${Date.now()}`,
+      status: 'success',
+      label: 'Review added.',
+    }));
   };
 
   // ── Panel body content ─────────────────────────────────────

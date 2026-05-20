@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { api } from '../lib/api';
@@ -47,15 +47,43 @@ const WINDOW_SUBTITLE = {
   week:  'in the last 7 days',
 };
 
+// Human-readable label for the sparkline window. The bucket strategy is
+// chosen server-side (see sparklineWindow() in users.ts); these labels
+// just describe what the user is looking at.
+const SPARKLINE_LABEL = {
+  all:   'picks per week over the last 12 weeks',
+  year:  'picks per month over the last year',
+  month: 'picks per 5-day bucket over the last 30 days',
+  week:  'picks per day over the last 7 days',
+};
+
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-const StatTile = ({ value, label, sub }) => (
-  <div className="rounded-xl border border-gray-200 bg-white p-4 text-center">
-    <p className="text-3xl font-black text-orange-600">{value}</p>
-    <p className="text-xs font-medium text-gray-600 mt-1">{label}</p>
-    {sub && <p className="text-[10px] text-gray-400 mt-0.5">{sub}</p>}
-  </div>
-);
+// `onClick` makes the tile a button; the orange focus ring + hover lift
+// signal that it's an interactive drill-in target. Static when no handler.
+const StatTile = ({ value, label, sub, onClick, title }) => {
+  if (!onClick) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-4 text-center">
+        <p className="text-3xl font-black text-orange-600">{value}</p>
+        <p className="text-xs font-medium text-gray-600 mt-1">{label}</p>
+        {sub && <p className="text-[10px] text-gray-400 mt-0.5">{sub}</p>}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className="rounded-xl border border-gray-200 bg-white p-4 text-center transition-colors hover:border-orange-300 hover:bg-orange-50/40 focus:outline-none focus:ring-2 focus:ring-orange-300 cursor-pointer"
+    >
+      <p className="text-3xl font-black text-orange-600">{value}</p>
+      <p className="text-xs font-medium text-gray-600 mt-1">{label}</p>
+      {sub && <p className="text-[10px] text-gray-400 mt-0.5">{sub}</p>}
+    </button>
+  );
+};
 
 // Reusable clickable list row used for every "restaurant in this insight" item.
 // The hover + focus styling is what tells the user the row is interactive — the
@@ -147,6 +175,15 @@ const InsightsPage = () => {
   // null = closed; { groupId, eventId } opens the BallotDetailModal for a
   // past group vote referenced from the "Recent decisions" list.
   const [ballotEvent, setBallotEvent] = useState(null);
+
+  // Drill-in state: the stat tiles + "Most-used method" pill let users
+  // jump to the Recent Decisions list and filter by method. Filter is
+  // cleared by an explicit "× clear" affordance on the section header.
+  const recentSectionRef = useRef(null);
+  const [methodFilter, setMethodFilter] = useState(null);
+  const scrollToRecent = useCallback(() => {
+    recentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -311,13 +348,26 @@ const InsightsPage = () => {
             const sign = diff >= 0 ? '+' : '';
             return `${sign}${pct}% vs prior period`;
           })()}
+          onClick={data.recent.length > 0 ? () => { setMethodFilter(null); scrollToRecent(); } : undefined}
+          title="See your recent decisions"
         />
         <StatTile
           value={data.distinctChosen}
           label="Different restaurants"
           sub={data.varietyScore > 0 ? `variety ${data.varietyScore.toFixed(1)}/10` : "you've ended up at"}
+          onClick={data.recent.length > 0 ? () => { setMethodFilter(null); scrollToRecent(); } : undefined}
+          title="See your recent decisions"
         />
-        <StatTile value={topMethodLabel} label="Most-used method" />
+        <StatTile
+          value={topMethodLabel}
+          label="Most-used method"
+          // Click filters the Recent Decisions list to this method and scrolls
+          // there. Lets users verify the headline metric against the source rows.
+          onClick={topMethod && data.recent.length > 0
+            ? () => { setMethodFilter(topMethod[0]); scrollToRecent(); }
+            : undefined}
+          title={topMethod ? `Filter recent decisions to ${METHOD_LABELS[topMethod[0]] ?? topMethod[0]}` : undefined}
+        />
       </div>
 
       {/* Weekday pattern */}
@@ -376,7 +426,13 @@ const InsightsPage = () => {
                 <div className="flex items-center gap-4 shrink-0 text-xs">
                   <span className="text-gray-500">{r.considered} considered</span>
                   <span className="text-orange-600 font-semibold">{r.wins} {r.wins === 1 ? 'win' : 'wins'}</span>
-                  <span className={`font-mono ${r.winRate >= 0.5 ? 'text-green-600' : 'text-gray-400'}`}>
+                  {/* Tooltip exposes the underlying ratio so a 100% win-rate
+                      from "1 of 1" is distinguishable from a 100% "8 of 8" at
+                      a glance. Same for low-sample 0%s. */}
+                  <span
+                    className={`font-mono ${r.winRate >= 0.5 ? 'text-green-600' : 'text-gray-400'}`}
+                    title={`${r.wins} of ${r.considered} considerations`}
+                  >
                     {Math.round(r.winRate * 100)}%
                   </span>
                 </div>
@@ -456,8 +512,8 @@ const InsightsPage = () => {
             Cuisine trends
           </h2>
           <p className="text-xs text-gray-400 mb-3">
-            What you think about vs. what you actually pick. The trend line shows
-            picks per week over the last 12 weeks (fixed, ignores the window above).
+            What you think about vs. what you actually pick. The trend line shows{' '}
+            {SPARKLINE_LABEL[since] ?? 'picks over the selected window'}.
           </p>
           <div className="rounded-xl border border-gray-200 bg-white">
             <table className="w-full text-sm">
@@ -482,7 +538,7 @@ const InsightsPage = () => {
                       <td className="px-4 py-2 text-right font-mono text-orange-600 font-semibold">{r.chosen}</td>
                       <td className="px-4 py-2 text-right">
                         {series ? (
-                          <div className="inline-flex" title={`${series.reduce((a, b) => a + b, 0)} in last 12 weeks`}>
+                          <div className="inline-flex" title={`${series.reduce((a, b) => a + b, 0)} ${WINDOW_SUBTITLE[since] ?? 'in window'}`}>
                             <Sparkline values={series} />
                           </div>
                         ) : (
@@ -503,12 +559,36 @@ const InsightsPage = () => {
           but a "View ballot" affordance lives inside for rows that originated
           from a group vote. Since nesting a real <button> inside another
           <button> is invalid HTML, the outer is a <div role="button"> with
-          its own keyboard handler. */}
-      {data.recent.length > 0 && (
-        <section className="mb-4">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3">Recent decisions</h2>
+          its own keyboard handler.
+
+          methodFilter (set by clicking the "Most-used method" tile above)
+          narrows the list to rows where chooseMethod matches. A pill in
+          the section header reflects the active filter and clears it.  */}
+      {data.recent.length > 0 && (() => {
+        const filteredRecent = methodFilter
+          ? data.recent.filter((r) => (r.chooseMethod ?? 'unknown') === methodFilter)
+          : data.recent;
+        return (
+        <section className="mb-4" ref={recentSectionRef}>
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Recent decisions</h2>
+            {methodFilter && (
+              <button
+                type="button"
+                onClick={() => setMethodFilter(null)}
+                className="inline-flex items-center gap-1 rounded-full bg-orange-50 border border-orange-200 px-2 py-0.5 text-[11px] font-medium text-orange-700 hover:bg-orange-100"
+              >
+                <span>{METHOD_LABELS[methodFilter] ?? methodFilter}</span>
+                <span aria-hidden="true">×</span>
+                <span className="sr-only">Clear filter</span>
+              </button>
+            )}
+          </div>
+          {filteredRecent.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">No recent decisions match this filter.</p>
+          ) : (
           <ul className="space-y-2">
-            {data.recent.map((r, idx) => {
+            {filteredRecent.map((r, idx) => {
               const hasBallot = r.chooseMethod === 'vote' && r.eventId != null && r.groupId != null;
               const openDetail = () => handleOpenDetail(r.restaurantId);
               return (
@@ -552,8 +632,10 @@ const InsightsPage = () => {
               );
             })}
           </ul>
+          )}
         </section>
-      )}
+        );
+      })()}
 
       {detailId && (
         <RestaurantDetailModal

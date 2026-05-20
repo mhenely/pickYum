@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { socialApi } from '../lib/socialApi';
 import { groupsApi } from '../lib/groupsApi';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
@@ -69,14 +69,26 @@ function CreateGroupModal({ onClose, onCreate }) {
 }
 
 function GroupCard({ group }) {
+  const navigate = useNavigate();
   const events       = group.events ?? [];
   const votingEvent  = events.find((e) => e.status === 'VOTING');
   const activeCount  = events.filter((e) => e.status === 'OPEN' || e.status === 'VOTING').length;
   // List endpoint returns _count.members (members excluding host). +1 for the host.
   const memberCount  = (group._count?.members ?? 0) + 1;
 
+  // Outer is a div role=button (not a Link) because the voting badge below
+  // is itself a Link to /vote/:sessionId — nested anchors are invalid HTML.
+  // The card body still navigates to the group detail via the keyboard /
+  // click handlers here.
+  const openGroup = () => navigate(`/groups/${group.id}`);
   return (
-    <Link to={`/groups/${group.id}`} className="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm hover:shadow-md hover:border-orange-200 transition-all">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={openGroup}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openGroup(); } }}
+      className="block rounded-xl border border-gray-200 bg-white p-4 shadow-sm hover:shadow-md hover:border-orange-200 focus:outline-none focus:ring-2 focus:ring-orange-300 transition-all cursor-pointer"
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="font-semibold text-gray-900 truncate">{group.name}</p>
@@ -84,10 +96,17 @@ function GroupCard({ group }) {
             {group.role === 'host' ? 'You are the host' : `Hosted by ${group.host?.username ?? '—'}`}
           </p>
         </div>
-        {votingEvent && (
-          <span className="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700">
-            Voting active
-          </span>
+        {votingEvent && votingEvent.sessionId && (
+          <Link
+            to={`/vote/${votingEvent.sessionId}`}
+            // stopPropagation so the outer card-click doesn't also fire and
+            // bounce the user through the group detail page first.
+            onClick={(e) => e.stopPropagation()}
+            className="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700 hover:bg-orange-200 transition-colors"
+            title="Open the active vote"
+          >
+            Voting active →
+          </Link>
         )}
       </div>
       <div className="mt-3 flex items-center gap-4 text-xs text-gray-500">
@@ -96,11 +115,8 @@ function GroupCard({ group }) {
         {activeCount > 0 && (
           <span className="text-orange-600 font-medium">{activeCount} active</span>
         )}
-        {votingEvent && (
-          <span className="text-orange-600 font-medium">Voting in progress →</span>
-        )}
       </div>
-    </Link>
+    </div>
   );
 }
 
@@ -270,6 +286,9 @@ function FriendsTab() {
   const [friends, setFriends]         = useState([]);
   const [incoming, setIncoming]       = useState([]);
   const [friendPicks, setFriendPicks] = useState([]);
+  // Drill-in filter for the picks feed — click a friend's avatar/username
+  // to narrow the list to just their picks. Null = show all friends.
+  const [pickFilterUserId, setPickFilterUserId] = useState(null);
   const [searchQ, setSearchQ]         = useState('');
   const [searchResults, setSearchResults] = useState(null);
   const [searching, setSearching]     = useState(false);
@@ -487,19 +506,54 @@ function FriendsTab() {
       </section>
 
       {/* Friends' recent picks */}
-      {friendPicks.length > 0 && (
+      {friendPicks.length > 0 && (() => {
+        const filteredPicks = pickFilterUserId
+          ? friendPicks.filter((p) => p.user.id === pickFilterUserId)
+          : friendPicks;
+        const filterName = pickFilterUserId
+          ? friendPicks.find((p) => p.user.id === pickFilterUserId)?.user?.username
+          : null;
+        return (
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Friends' recent picks</h3>
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Friends' recent picks</h3>
+            {filterName && (
+              <button
+                type="button"
+                onClick={() => setPickFilterUserId(null)}
+                className="inline-flex items-center gap-1 rounded-full bg-orange-50 border border-orange-200 px-2 py-0.5 text-[11px] font-medium text-orange-700 hover:bg-orange-100"
+              >
+                <span>{filterName}</span>
+                <span aria-hidden="true">×</span>
+                <span className="sr-only">Clear filter</span>
+              </button>
+            )}
+          </div>
           <ul className="divide-y divide-gray-100 rounded-xl border border-gray-200 overflow-hidden">
-            {friendPicks.map((pick) => (
+            {filteredPicks.map((pick) => (
               <li key={pick.id} className="flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50 gap-3">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="h-8 w-8 rounded-full bg-orange-100 flex items-center justify-center text-orange-600 font-bold text-sm shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setPickFilterUserId(pick.user.id)}
+                    title={`Show only ${pick.user.username}'s picks`}
+                    className="h-8 w-8 rounded-full bg-orange-100 hover:bg-orange-200 transition-colors flex items-center justify-center text-orange-600 font-bold text-sm shrink-0"
+                  >
                     {pick.user.username[0].toUpperCase()}
-                  </div>
+                  </button>
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-gray-900 truncate">{pick.restaurant.name}</p>
-                    <p className="text-xs text-gray-400">{pick.user.username} · {new Date(pick.acceptedAt).toLocaleDateString()}</p>
+                    <p className="text-xs text-gray-400">
+                      <button
+                        type="button"
+                        onClick={() => setPickFilterUserId(pick.user.id)}
+                        className="hover:text-orange-600 underline-offset-2 hover:underline"
+                      >
+                        {pick.user.username}
+                      </button>
+                      {' · '}
+                      {new Date(pick.acceptedAt).toLocaleDateString()}
+                    </p>
                   </div>
                 </div>
                 {pick.restaurant.cuisineType && (
@@ -511,7 +565,8 @@ function FriendsTab() {
             ))}
           </ul>
         </section>
-      )}
+        );
+      })()}
     </div>
   );
 }
@@ -680,7 +735,17 @@ function RecommendationsTab() {
               onClick={() => setModalId(String(rec.restaurantId))}
             >
               <div className="min-w-0 flex-1">
-                <p className="font-medium text-sm text-gray-900">{rec.restaurant?.name ?? `Restaurant ${rec.restaurantId}`}</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="font-medium text-sm text-gray-900">{rec.restaurant?.name ?? `Restaurant ${rec.restaurantId}`}</p>
+                  {/* Social proof — count of friends/follows that ALSO
+                      recommend this restaurant. Helps the user see which
+                      of their recommendations are community favorites. */}
+                  {rec.friendCount > 0 && (
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700">
+                      Also recommended by {rec.friendCount} {rec.friendCount === 1 ? 'friend' : 'friends'}
+                    </span>
+                  )}
+                </div>
                 {rec.tip
                   ? <p className="text-xs text-gray-500 italic mt-0.5">"{rec.tip}"</p>
                   : <p className="text-xs text-gray-400 mt-0.5">No tip added</p>

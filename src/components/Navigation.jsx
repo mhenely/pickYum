@@ -284,6 +284,15 @@ const NavBar = () => {
           status: 'info',
           label: 'A vote you joined just concluded — check your groups or trips for the winner.',
         }));
+      } else if (reason === 'meal-participant') {
+        // Fires for both subset meals (you were specifically added) and
+        // "everyone" meals (just added to a trip you're in). Generic copy
+        // works for both — the bell badge handles surfacing subset rows.
+        dispatch(pushToast({
+          id: `meal-${Date.now()}`,
+          status: 'info',
+          label: 'A new meal was added to a trip you\'re in.',
+        }));
       }
     });
     // No need to handle the default `message` event — the server only
@@ -293,32 +302,44 @@ const NavBar = () => {
     return () => { es.close(); };
   }, [isAuthenticated, fetchNotifications, dispatch]);
 
+  // Tiny helper so every accept/decline path below toasts with the same
+  // shape. The previous handlers were silent on success — users had to
+  // watch the bell badge to confirm anything happened.
+  const showInviteToast = (label, status = 'success') =>
+    dispatch(pushToast({ id: `invite-${Date.now()}`, status, label }));
+
   const handleAccept = async (requestId) => {
     try {
       await socialApi.respondRequest(requestId, 'accept');
       await fetchNotifications();
-    } catch { /* ignore */ }
+      showInviteToast('Friend request accepted.');
+    } catch { showInviteToast('Could not respond to friend request.', 'error'); }
   };
 
   const handleReject = async (requestId) => {
     try {
       await socialApi.respondRequest(requestId, 'reject');
       await fetchNotifications();
-    } catch { /* ignore */ }
+      showInviteToast('Friend request declined.');
+    } catch { showInviteToast('Could not respond to friend request.', 'error'); }
   };
 
   const handleGroupInviteRespond = async (invite, action) => {
     try {
       await groupsApi.respondInvite(invite.group.id, invite.id, action);
       await fetchNotifications();
-    } catch { /* ignore */ }
+      const verb = action === 'accept' ? 'Joined' : 'Declined invite to';
+      showInviteToast(`${verb} ${invite.group?.name ?? 'group'}.`);
+    } catch { showInviteToast('Could not respond to group invite.', 'error'); }
   };
 
   const handleTripInviteRespond = async (invite, action) => {
     try {
       await api.trips.respondToInvite(invite.tripId, invite.id, action);
       await fetchNotifications();
-    } catch { /* ignore */ }
+      const verb = action === 'accept' ? 'Joined trip' : 'Declined invite to';
+      showInviteToast(`${verb} ${invite.tripName ?? ''}`.trim() + '.');
+    } catch { showInviteToast('Could not respond to trip invite.', 'error'); }
   };
 
   const handleLogout = () => {

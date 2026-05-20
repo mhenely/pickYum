@@ -320,6 +320,9 @@ router.get('/friends', async (req: Request, res: Response) => {
 // ── Recommendations ───────────────────────────────────────────
 
 // GET /api/social/recommendations/mine — all of the current user's recommendations
+// Each row carries a `friendCount` = how many of the user's friends OR
+// follows also recommend the same restaurant. Powers the social-proof
+// chip on the Recommendations tab ("Also recommended by 3 friends").
 router.get('/recommendations/mine', async (req: Request, res: Response) => {
   const rows = await prisma.recommendation.findMany({
     where: { fromUserId: req.userId },
@@ -329,7 +332,40 @@ router.get('/recommendations/mine', async (req: Request, res: Response) => {
     orderBy: { createdAt: 'desc' },
     take: 100,
   });
-  res.json({ recommendations: rows });
+  if (rows.length === 0) { res.json({ recommendations: [] }); return; }
+
+  // Resolve the user's "network" (friends ∪ follows) in parallel, then a
+  // single groupBy to count overlap per restaurant.
+  const [following, friends] = await Promise.all([
+    prisma.follow.findMany({ where: { followerId: req.userId }, select: { followingId: true }, take: 200 }),
+    prisma.friendRequest.findMany({
+      where: { status: 'ACCEPTED', OR: [{ senderId: req.userId }, { receiverId: req.userId }] },
+      select: { senderId: true, receiverId: true },
+      take: 200,
+    }),
+  ]);
+  const networkIds = new Set<number>();
+  for (const f of following) networkIds.add(f.followingId);
+  for (const f of friends) networkIds.add(f.senderId === req.userId ? f.receiverId : f.senderId);
+  networkIds.delete(req.userId);
+
+  const friendCountByRestaurant = new Map<number, number>();
+  if (networkIds.size > 0) {
+    const restaurantIds = rows.map((r) => r.restaurantId);
+    const overlap = await prisma.recommendation.groupBy({
+      by: ['restaurantId'],
+      where: { restaurantId: { in: restaurantIds }, fromUserId: { in: Array.from(networkIds) } },
+      _count: { _all: true },
+    });
+    for (const o of overlap) friendCountByRestaurant.set(o.restaurantId, o._count._all);
+  }
+
+  res.json({
+    recommendations: rows.map((r) => ({
+      ...r,
+      friendCount: friendCountByRestaurant.get(r.restaurantId) ?? 0,
+    })),
+  });
 });
 
 // GET /api/social/recommendations/:restaurantId/me — my recommendation for one restaurant

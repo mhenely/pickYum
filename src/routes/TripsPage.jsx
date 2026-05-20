@@ -18,37 +18,55 @@ function formatDateRange(startDate, endDate) {
   return start ?? end;
 }
 
-const TripCard = ({ trip }) => (
-  <Link
-    to={`/trips/${trip.id}`}
-    className={`block rounded-xl border bg-white shadow-sm p-4 hover:border-orange-300 hover:shadow-md transition-all ${
-      trip.archivedAt ? 'opacity-70' : ''
-    }`}
-  >
-    <div className="flex items-start justify-between gap-3">
-      <div className="min-w-0 flex-1">
-        <p className="font-semibold text-gray-900 truncate">{trip.name}</p>
-        <p className="text-sm text-gray-500 truncate">{trip.destination}</p>
-        <p className="text-xs text-gray-400 mt-1">
-          {formatDateRange(trip.startDate, trip.endDate)}
-        </p>
+const TripCard = ({ trip }) => {
+  const nextMeal = (trip.events ?? [])[0] ?? null;
+  const nextMealWhen = nextMeal?.scheduledFor
+    ? new Date(nextMeal.scheduledFor).toLocaleString(undefined, {
+        weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      })
+    : null;
+  return (
+    <Link
+      to={`/trips/${trip.id}`}
+      className={`block rounded-xl border bg-white shadow-sm p-4 hover:border-orange-300 hover:shadow-md transition-all ${
+        trip.archivedAt ? 'opacity-70' : ''
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-gray-900 truncate">{trip.name}</p>
+          <p className="text-sm text-gray-500 truncate">{trip.destination}</p>
+          <p className="text-xs text-gray-400 mt-1">
+            {formatDateRange(trip.startDate, trip.endDate)}
+          </p>
+        </div>
+        {trip.archivedAt && (
+          <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 shrink-0">
+            Archived
+          </span>
+        )}
       </div>
-      {trip.archivedAt && (
-        <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 shrink-0">
-          Archived
-        </span>
+      {/* Next-meal callout — only renders when the server returned a
+          scheduled upcoming meal for this trip. Helps users answer
+          "what's next?" without clicking into the trip. */}
+      {nextMeal && !trip.archivedAt && (
+        <div className="mt-3 flex items-center gap-2 rounded-md border border-orange-100 bg-orange-50 px-2.5 py-1.5 text-xs">
+          <span className="text-orange-700 font-semibold shrink-0">Next:</span>
+          <span className="text-gray-800 truncate min-w-0">{nextMeal.name}</span>
+          {nextMealWhen && <span className="text-orange-700/80 shrink-0 ml-auto">{nextMealWhen}</span>}
+        </div>
       )}
-    </div>
-    <div className="flex items-center gap-2 mt-3 text-xs text-gray-500">
-      <span>👤 {trip.host.username}</span>
-      <span>·</span>
-      {/* List endpoint now returns `_count` instead of full member arrays
-          (saves O(trips × members × …) payload on every Trips page load).
-          See ApiTripListEntry in api.ts. */}
-      <span>{trip._count.members} member{trip._count.members === 1 ? '' : 's'}</span>
-    </div>
-  </Link>
-);
+      <div className="flex items-center gap-2 mt-3 text-xs text-gray-500">
+        <span>👤 {trip.host.username}</span>
+        <span>·</span>
+        {/* List endpoint now returns `_count` instead of full member arrays
+            (saves O(trips × members × …) payload on every Trips page load).
+            See ApiTripListEntry in api.ts. */}
+        <span>{trip._count.members} member{trip._count.members === 1 ? '' : 's'}</span>
+      </div>
+    </Link>
+  );
+};
 
 export default function TripsPage() {
   const navigate = useNavigate();

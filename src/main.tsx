@@ -27,6 +27,7 @@ const GroupDetailPage     = lazy(() => import('./routes/GroupDetailPage'));
 const SocialsPage         = lazy(() => import('./routes/SocialsPage'));
 const TripsPage           = lazy(() => import('./routes/TripsPage'));
 const TripDetailPage      = lazy(() => import('./routes/TripDetailPage'));
+const TripJoinPage        = lazy(() => import('./routes/TripJoinPage'));
 const InsightsPage        = lazy(() => import('./routes/InsightsPage'));
 const PrivacyPage         = lazy(() => import('./routes/PrivacyPage'));
 const TermsPage           = lazy(() => import('./routes/TermsPage'));
@@ -84,8 +85,11 @@ const router = createBrowserRouter([
           { path: 'socials', element: <Suspense fallback={PageFallback}><SocialsPage /></Suspense> },
           { path: 'insights', element: <Suspense fallback={PageFallback}><InsightsPage /></Suspense> },
           { path: 'groups/:id', element: <Suspense fallback={PageFallback}><GroupDetailPage /></Suspense> },
-          { path: 'trips',       element: <Suspense fallback={PageFallback}><TripsPage /></Suspense> },
-          { path: 'trips/:id',   element: <Suspense fallback={PageFallback}><TripDetailPage /></Suspense> },
+          { path: 'trips',           element: <Suspense fallback={PageFallback}><TripsPage /></Suspense> },
+          // Order matters — `:id` is greedy, so the more specific
+          // `trips/join/:token` must come first or it gets shadowed.
+          { path: 'trips/join/:token', element: <Suspense fallback={PageFallback}><TripJoinPage /></Suspense> },
+          { path: 'trips/:id',       element: <Suspense fallback={PageFallback}><TripDetailPage /></Suspense> },
         ],
       },
     ],

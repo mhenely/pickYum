@@ -1767,10 +1767,12 @@ import {
 } from '../config/insights';
 export { INSIGHTS_ALL_TIME_CAP_DAYS };
 
-// First Sunday cell of the sparkline window. Sunday of the week containing
-// today, minus (SPARKLINE_WEEKS − 1) weeks. The current week is always the
-// rightmost bucket, with prior weeks marching back in time. Aligning the
-// start to Sunday keeps the week boundaries consistent across runs.
+// First Sunday cell of the all-time sparkline window. Sunday of the week
+// containing today, minus (SPARKLINE_WEEKS − 1) weeks. The current week
+// is always the rightmost bucket, with prior weeks marching back in time.
+// Aligning the start to Sunday keeps the week boundaries consistent
+// across runs. Only used when `since=all` — windowed runs use the
+// adaptive strategy in `sparklineWindow()` below.
 function sparklineWindowStartUtc(): Date {
   const now = new Date();
   const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -1779,6 +1781,42 @@ function sparklineWindowStartUtc(): Date {
   const start = new Date(sundayOfThisWeek);
   start.setUTCDate(start.getUTCDate() - (SPARKLINE_WEEKS - 1) * 7);
   return start;
+}
+
+// Adaptive bucket strategy for the cuisine sparkline. Returns the start,
+// bucket count, and days-per-bucket for the given `since` window so the
+// trend line tracks the same time slice as the main rollup above —
+// previously sparklines were a fixed 12-week window regardless of picker,
+// which contradicted the table totals when the user selected a tighter
+// window.
+//
+//   week  (7d)   → 7 daily buckets
+//   month (30d)  → 6 buckets × 5 days
+//   year  (365d) → 12 buckets × ~30 days (≈ months)
+//   all          → 12 weekly buckets (legacy behavior preserved)
+function sparklineWindow(windowDays: number | undefined): {
+  start: Date;
+  buckets: number;
+  daysPerBucket: number;
+} {
+  if (!windowDays) {
+    return { start: sparklineWindowStartUtc(), buckets: SPARKLINE_WEEKS, daysPerBucket: 7 };
+  }
+  let buckets: number;
+  let daysPerBucket: number;
+  if (windowDays <= 7) {
+    buckets = 7;  daysPerBucket = 1;
+  } else if (windowDays <= 30) {
+    buckets = 6;  daysPerBucket = 5;
+  } else {
+    buckets = 12; daysPerBucket = Math.ceil(windowDays / 12);
+  }
+  // Anchor on UTC start-of-today so buckets are stable across a single
+  // request's clock reads. The rightmost bucket includes today.
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const start = new Date(todayUtc - (buckets * daysPerBucket - 1) * DAY_MS);
+  return { start, buckets, daysPerBucket };
 }
 
 // GET /api/users/me/insights?since=week|month|year|all
@@ -1800,7 +1838,8 @@ router.get('/me/insights', async (req: Request, res: Response) => {
   // sequentially across the handler — for power users the first-paint
   // wait could exceed 400ms. Parallelizing collapses the wait to the
   // single slowest query.
-  const sparklineStart = sparklineWindowStartUtc();
+  const sparklineCfg = sparklineWindow(windowDays);
+  const sparklineStart = sparklineCfg.start;
   const prevStart = windowDays ? new Date(Date.now() - 2 * windowDays * DAY_MS) : null;
   const prevEnd   = windowDays ? new Date(Date.now() - windowDays * DAY_MS) : null;
 
@@ -2053,25 +2092,29 @@ router.get('/me/insights', async (req: Request, res: Response) => {
       .map(({ _sortKey: _unused, ...rest }) => rest);
   }
 
-  // ── Cuisine sparklines — 12 weekly buckets, top 5 cuisines ────────────
+  // ── Cuisine sparklines — adaptive buckets for the current window ───────
   // sparklineRows was prefetched in Phase 1 above. Bucket index 0 is the
-  // oldest week, so the sparkline reads left-to-right oldest→newest.
+  // oldest, so the sparkline reads left-to-right oldest→newest. Bucket
+  // count / span comes from sparklineWindow() so the trend tracks the
+  // same time slice as the rollup table — previously the sparkline was
+  // hard-coded to 12 weeks regardless of `since`.
+  const bucketMs = sparklineCfg.daysPerBucket * DAY_MS;
   const cuisineWeekly = new Map<string, number[]>();
   for (const row of sparklineRows) {
     const cuisine = row.restaurant?.cuisineType;
     if (!cuisine) continue; // skip uncategorized — the sparkline is per-cuisine
     if (!cuisineWeekly.has(cuisine)) {
-      cuisineWeekly.set(cuisine, Array(SPARKLINE_WEEKS).fill(0));
+      cuisineWeekly.set(cuisine, Array(sparklineCfg.buckets).fill(0));
     }
-    const weekIdx = Math.min(
-      SPARKLINE_WEEKS - 1,
-      Math.max(0, Math.floor((row.acceptedAt.getTime() - sparklineStart.getTime()) / (7 * DAY_MS))),
+    const bucketIdx = Math.min(
+      sparklineCfg.buckets - 1,
+      Math.max(0, Math.floor((row.acceptedAt.getTime() - sparklineStart.getTime()) / bucketMs)),
     );
-    cuisineWeekly.get(cuisine)![weekIdx] += 1;
+    cuisineWeekly.get(cuisine)![bucketIdx] += 1;
   }
   // Top 5 cuisines by total acceptances in the window — matches the cuisine
   // table above. Cuisines that appear in `cuisineChosen` but had zero
-  // acceptances in the last 12 weeks are excluded (a flat-zero sparkline is
+  // acceptances in the trend window are excluded (a flat-zero sparkline is
   // not informative).
   const cuisineWeeklyCounts: Record<string, number[]> = {};
   [...cuisineWeekly.entries()]

@@ -16,7 +16,7 @@ import {
   setNearbyResults, setLocationInput, setRadiusMeters, setSearchCuisineType, clearNearby,
   togglePriceFilter, clearPriceFilters, toggleOpenNow, setOpenAtTime,
   toggleDeliveryFilter, toggleTakeoutFilter, setSortBy, setQuery, setCuisineFilter,
-  setCurrentPage,
+  setCurrentPage, setSearchMode, setNameQuery,
 } from "../redux/slices/searchSlice";
 import { CUISINE_OPTIONS } from "../utils/cuisineTypes";
 import useCurrentUser from "../hooks/useCurrentUser";
@@ -169,6 +169,10 @@ export default function SearchPage() {
     openNowFilter, openAtTime, deliveryFilter, takeoutFilter,
     sortBy, query, cuisineFilter,
     currentPage,
+    // Mode toggle: 'nearby' (default) or 'name' (Google Places
+    // text-search). Both write into `nearbyResults` so the grid +
+    // filters + sort all share one pipeline.
+    searchMode, nameQuery,
   } = useSelector((s) => s.search);
 
   // Convert array → Set for O(1) membership checks in filter logic
@@ -513,6 +517,45 @@ export default function SearchPage() {
   }, [nearbyResults, customRestaurants]);
 
   // ── Handlers ──────────────────────────────────────────────────
+
+  const canNameSearch = nameQuery.trim().length >= 2;
+
+  // Text-search by name. Reuses `nearbyResults` as the result slot so
+  // the existing grid / pagination / filters / sort work unchanged. The
+  // bias triple is sent only when the user has already resolved a
+  // location (zip/address) — otherwise the search runs globally. Note
+  // that text-search results don't include lat/lng, so the map view is
+  // hidden in this mode by the conditional further down.
+  const handleNameSearch = async () => {
+    if (!canNameSearch) return;
+    setNearbyLoading(true);
+    setNearbyError('');
+    try {
+      const q = nameQuery.trim();
+      const bias =
+        resolvedLat != null && resolvedLng != null && radiusMeters != null
+          ? { lat: resolvedLat, lng: resolvedLng, radius: radiusMeters }
+          : undefined;
+      const { restaurants } = await api.places.search(q, bias);
+      dispatch(setNearbyResults({
+        results:         restaurants,
+        // Label the result-set header with the query string. The grid
+        // header reads `resolvedAddress`; in name-mode it doubles as
+        // "what you searched for".
+        resolvedAddress: q,
+        // Text-search results lack geometry; leave both null so the
+        // map block (gated on resolvedLat/resolvedLng below) doesn't
+        // render with stale coords.
+        resolvedLat:     null,
+        resolvedLng:     null,
+      }));
+    } catch (err) {
+      setNearbyError(err.message ?? 'Name search failed. Please try again.');
+      dispatch(clearNearby());
+    } finally {
+      setNearbyLoading(false);
+    }
+  };
 
   const handleNearbySearch = async () => {
     if (!canSearch) return;
@@ -867,10 +910,13 @@ export default function SearchPage() {
   // we only have to clamp here for the edge case where the persisted page
   // is out of bounds (e.g. user had page=2 but a hot reload swapped in
   // shorter results). Math.max guards against -Infinity from an empty set.
-  // Page size swings with map visibility — see the constants at the top.
-  // Read off mapVisible directly (a state below) so toggling the map mid-
-  // session re-paginates without a remount.
-  const nearbyPageSize = mapVisible ? NEARBY_PAGE_SIZE_WITH_MAP : NEARBY_PAGE_SIZE_WITHOUT_MAP;
+  // Page size swings with whether the map is actually rendering — not
+  // just the toggle. `mapVisible` is a sticky preference, but
+  // `mapShown` accounts for the fact that name-search results lack
+  // lat/lng and the map auto-hides regardless. Without this guard the
+  // grid stays in 2-col mode after switching to name-mode.
+  const mapShown = mapVisible && resolvedLat != null && resolvedLng != null;
+  const nearbyPageSize = mapShown ? NEARBY_PAGE_SIZE_WITH_MAP : NEARBY_PAGE_SIZE_WITHOUT_MAP;
   const pageCount = Math.max(1, Math.ceil(sortedNearby.length / nearbyPageSize));
   const safePage  = Math.min(currentPage, pageCount - 1);
   const pagedNearby = useMemo(
@@ -941,12 +987,84 @@ export default function SearchPage() {
         </div>
       )}
 
-      {/* ── Location search panel ────────────────────────────── */}
+      {/* ── Search panel ─────────────────────────────────────── */}
       <div className="rounded-xl border border-orange-100 bg-orange-50 p-4 mb-4">
+        {/* Mode toggle. Two intents, one results grid:
+              • Nearby — location-driven; results within a radius of the
+                given address/zip.
+              • By name — Google Places text-search for a restaurant
+                name. Falls back to global if no location is resolved;
+                otherwise biases results to the last-resolved center. */}
+        <div className="inline-flex items-center gap-1 rounded-full bg-white border border-orange-200 p-0.5 mb-3 text-xs">
+          {[
+            { id: 'nearby', label: '📍 Nearby' },
+            { id: 'name',   label: '🔎 By name' },
+          ].map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => dispatch(setSearchMode(m.id))}
+              className={`px-3 py-1 rounded-full font-medium transition-colors ${
+                searchMode === m.id
+                  ? 'bg-orange-500 text-white'
+                  : 'text-orange-600 hover:bg-orange-50'
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+
         <p className="text-xs font-semibold text-orange-500 uppercase tracking-wider mb-3">
-          📍 Search Nearby
+          {searchMode === 'name' ? '🔎 Search by name' : '📍 Search Nearby'}
         </p>
 
+        {/* By-name input — simpler than the location panel; no chevron /
+            radius / cuisine because Google's text-search ignores those.
+            Shown only in 'name' mode; the existing nearby panel below
+            renders when in 'nearby' mode. */}
+        {searchMode === 'name' && (
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <input
+              type="text"
+              placeholder="Restaurant name (e.g. Pok Pok)…"
+              value={nameQuery}
+              onChange={(e) => { dispatch(setNameQuery(e.target.value)); setNearbyError(''); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && canNameSearch) handleNameSearch(); }}
+              className="flex-1 rounded-md border-0 py-1.5 px-3 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-orange-500 sm:text-sm"
+            />
+            <div className="flex gap-2 shrink-0 flex-wrap">
+              <button
+                onClick={handleNameSearch}
+                disabled={!canNameSearch || nearbyLoading}
+                className="px-4 py-1.5 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-brand-sm"
+              >
+                {nearbyLoading ? 'Searching…' : 'Search'}
+              </button>
+              {isNearbyMode && (
+                <button
+                  onClick={handleClearNearby}
+                  className="px-4 py-1.5 rounded-md border border-gray-300 bg-white text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  Clear results
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {searchMode === 'name' && (
+          <p className="text-[11px] text-orange-700/70 mt-2">
+            {resolvedLat != null && resolvedLng != null
+              ? `Biased to the area you last searched (${resolvedAddress || 'saved center'}). Switch to Nearby and clear to widen.`
+              : 'No location set — results will be global. Run a Nearby search first to anchor name-searches near you.'}
+          </p>
+        )}
+
+        {/* Existing nearby UI — only render in 'nearby' mode. The fragment
+            scopes the input row + the radius / cuisine row together; it
+            closes near the end of the panel just before the outer </div>. */}
+        {searchMode === 'nearby' && (
+        <>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
           {/* Input + address-book dropdown sit in a relative wrapper so
               the dropdown menu can position-absolute beneath the input.
@@ -1078,7 +1196,11 @@ export default function SearchPage() {
             {geoError}
           </p>
         )}
+        </>
+        )}
 
+        {/* Shared between both modes — name-search uses the same loading
+            error path as nearby. */}
         {nearbyError && (
           <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-1.5 mt-2">
             {nearbyError}
@@ -1272,7 +1394,7 @@ export default function SearchPage() {
         <div className="mb-8">
           <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
             <p className="text-sm font-semibold text-gray-700">
-              Nearby
+              {searchMode === 'name' ? 'Results' : 'Nearby'}
               <span className="text-sm font-normal text-gray-500 ml-1">— {resolvedAddress}</span>
               <span className="ml-1.5 text-sm font-normal text-gray-400">({sortedNearby.length})</span>
             </p>
@@ -1307,8 +1429,8 @@ export default function SearchPage() {
               is narrower. On <md the map stacks above the grid; from md
               onwards the map sits beside the cards and the grid drops
               to a single column to fit the narrower left track. */}
-          <div className={mapVisible ? 'md:flex md:gap-5 md:items-start' : ''}>
-            <div className={mapVisible ? 'md:flex-1 md:min-w-0' : ''}>
+          <div className={mapShown ? 'md:flex md:gap-5 md:items-start' : ''}>
+            <div className={mapShown ? 'md:flex-1 md:min-w-0' : ''}>
               {sortedNearby.length === 0 && !nearbyLoading ? (
                 <p className="text-gray-500 text-sm">No nearby restaurants match your filters.</p>
               ) : (
@@ -1318,7 +1440,7 @@ export default function SearchPage() {
                 //     enough horizontal room for both.
                 //   - Map hidden:  the full responsive ladder (1 → 2 at sm,
                 //     → 3 at lg). Same as before.
-                <div className={`grid grid-cols-1 gap-4 ${mapVisible ? 'lg:grid-cols-2' : 'sm:grid-cols-2 lg:grid-cols-3'}`}>
+                <div className={`grid grid-cols-1 gap-4 ${mapShown ? 'lg:grid-cols-2' : 'sm:grid-cols-2 lg:grid-cols-3'}`}>
                   {pagedNearby.map((place) => {
                     const { googlePlaceId: placeId, name } = place;
 

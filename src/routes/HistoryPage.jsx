@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { archiveRestaurant, unarchiveRestaurant, removeFromHistory } from '../redux/slices/userInfoSlice';
@@ -102,21 +103,67 @@ const UserHistoryPage = () => {
   // write-review form). Replaces the previous split between
   // RestaurantReviewModal and RestaurantDetailModal.
   const [modalState, setModalState] = useState(null);
-  const [sortBy, setSortBy] = useState('date');
-  const [sortDir, setSortDir] = useState('desc');
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [showArchives, setShowArchives] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null); // { type, id }
+
+  // Bulk select-mode state. Toggling "Select" exits the detail-modal-on-click
+  // flow and turns card clicks into checkbox toggles. The bulk-action bar
+  // (rendered above the grid) reads `selectedIds` to enable archive /
+  // unarchive / delete in batch.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkConfirm, setBulkConfirm] = useState(null); // null | 'archive' | 'unarchive' | 'delete'
+
+  const toggleSelectMode = () => {
+    setSelectMode((s) => {
+      if (s) setSelectedIds(new Set()); // exiting select-mode clears the selection
+      return !s;
+    });
+  };
+
+  const toggleSelection = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const key = String(id);
+      if (next.has(key)) next.delete(key);
+      else               next.add(key);
+      return next;
+    });
+  };
+
+  // URL-backed UI state — sort/filter/archive-toggle survive reload and
+  // are shareable as part of the URL. Only non-default values are written
+  // to the query string so the bare `/History/:id` URL stays clean.
+  //   ?sort=count          (default 'date' = omitted)
+  //   ?dir=asc             (default 'desc' = omitted)
+  //   ?fav=1               (default off = omitted)
+  //   ?archives=1          (default off = omitted)
+  const [searchParams, setSearchParams] = useSearchParams();
+  const sortBy        = searchParams.get('sort') === 'count' ? 'count' : 'date';
+  const sortDir       = searchParams.get('dir')  === 'asc'   ? 'asc'   : 'desc';
+  const favoritesOnly = searchParams.get('fav')      === '1';
+  const showArchives  = searchParams.get('archives') === '1';
+
+  // Falsy / empty values delete the param so the URL stays minimal.
+  // `replace: true` so toggling sort doesn't fill the back-button history.
+  const updateUrl = (changes) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      for (const [k, v] of Object.entries(changes)) {
+        if (!v) next.delete(k);
+        else    next.set(k, v);
+      }
+      return next;
+    }, { replace: true });
+  };
 
   const openDetail      = (id) => setModalState({ id, defaultWriteReview: false });
   const openAddReview   = (id) => setModalState({ id, defaultWriteReview: true });
 
   const handleSortClick = (key) => {
     if (sortBy === key) {
-      setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'));
+      updateUrl({ dir: sortDir === 'desc' ? 'asc' : '' });
     } else {
-      setSortBy(key);
-      setSortDir('desc');
+      updateUrl({ sort: key === 'date' ? '' : key, dir: '' });
     }
   };
 
@@ -129,6 +176,23 @@ const UserHistoryPage = () => {
     else if (type === 'unarchive') dispatch(unarchiveRestaurant(id));
     else if (type === 'delete') dispatch(removeFromHistory(id));
     setConfirmAction(null);
+  };
+
+  // Bulk handlers — applied to every id in selectedIds. Each dispatch is
+  // routed through the existing per-item action so all the slice
+  // bookkeeping (favorites cleanup, reviews preservation, etc.) is
+  // identical to single-row operations. After the action the selection
+  // clears and select-mode exits so the user lands in a clean state.
+  const runBulk = (type) => {
+    const ids = [...selectedIds];
+    for (const id of ids) {
+      if      (type === 'archive')   dispatch(archiveRestaurant(id));
+      else if (type === 'unarchive') dispatch(unarchiveRestaurant(id));
+      else if (type === 'delete')    dispatch(removeFromHistory(id));
+    }
+    setBulkConfirm(null);
+    setSelectedIds(new Set());
+    setSelectMode(false);
   };
 
   // Heavy derivation block wrapped in a single useMemo. Every keystroke
@@ -191,7 +255,7 @@ const UserHistoryPage = () => {
       {/* ── Controls bar ──────────────────────────────────────── */}
       <div className="flex items-center gap-2 mb-6 flex-wrap">
         <button
-          onClick={() => setFavoritesOnly((f) => !f)}
+          onClick={() => updateUrl({ fav: favoritesOnly ? '' : '1' })}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
             favoritesOnly
               ? 'bg-red-50 border-red-200 text-red-600'
@@ -202,7 +266,7 @@ const UserHistoryPage = () => {
         </button>
 
         <button
-          onClick={() => setShowArchives((s) => !s)}
+          onClick={() => updateUrl({ archives: showArchives ? '' : '1' })}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
             showArchives
               ? 'bg-amber-50 border-amber-300 text-amber-700'
@@ -215,6 +279,21 @@ const UserHistoryPage = () => {
               {displayArchivedIds.length}
             </span>
           )}
+        </button>
+
+        {/* Select toggle — turns card clicks into checkbox toggles so the
+            user can archive / unarchive / delete multiple entries in
+            one pass. Hidden in the controls bar by default; the bulk-
+            action bar below surfaces when selectMode is active. */}
+        <button
+          onClick={toggleSelectMode}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
+            selectMode
+              ? 'bg-orange-50 border-orange-200 text-orange-600'
+              : 'bg-white border-gray-200 text-gray-500 hover:border-gray-300'
+          }`}
+        >
+          {selectMode ? 'Done selecting' : 'Select'}
         </button>
 
         <div className="flex items-center gap-1 ml-auto">
@@ -238,6 +317,56 @@ const UserHistoryPage = () => {
           ))}
         </div>
       </div>
+
+      {/* Bulk-action bar — appears whenever selectMode is on. When nothing
+          is selected, it nudges the user with the help copy; once they've
+          picked something, the action buttons activate. Active vs archived
+          context is computed from each selected id so both modes (archive
+          active items / unarchive archived items) work in the same UI. */}
+      {selectMode && (() => {
+        const archivedSet = new Set((currentUser.archived ?? []).map(String));
+        const ids = [...selectedIds];
+        const activeCount   = ids.filter((id) => !archivedSet.has(id)).length;
+        const archivedCount = ids.filter((id) =>  archivedSet.has(id)).length;
+        return (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm flex-wrap">
+            <span className="text-orange-700 font-semibold">
+              {ids.length === 0 ? 'Select cards to bulk-edit' : `${ids.length} selected`}
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              {activeCount > 0 && (
+                <button
+                  onClick={() => runBulk('archive')}
+                  className="rounded-md bg-white border border-amber-300 px-3 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-50"
+                >
+                  Archive ({activeCount})
+                </button>
+              )}
+              {archivedCount > 0 && (
+                <button
+                  onClick={() => runBulk('unarchive')}
+                  className="rounded-md bg-white border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Unarchive ({archivedCount})
+                </button>
+              )}
+              <button
+                disabled={ids.length === 0}
+                onClick={() => setBulkConfirm('delete')}
+                className="rounded-md bg-white border border-red-300 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Delete ({ids.length})
+              </button>
+              <button
+                onClick={() => { setSelectedIds(new Set()); setSelectMode(false); }}
+                className="text-xs text-gray-500 hover:text-gray-700 ml-1"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Active history ────────────────────────────────────── */}
       {/* While loadUserData is still in flight, show a skeleton grid
@@ -268,43 +397,60 @@ const UserHistoryPage = () => {
           const restaurant = allRestaurants[id];
           if (!restaurant) return null;
           const personalRating = getUserAvgRating(currentUser.reviews, id);
+          const reviewCount = currentUser.reviews[String(id)]?.length ?? 0;
+          const isSelected = selectedIds.has(String(id));
+          // In select-mode the card click toggles selection instead of
+          // opening the detail modal. A ring highlight + checkbox dot in
+          // the corner signal which cards are currently picked up.
           return (
-            <RestaurantCard
+            <div
               key={id}
-              id={id}
-              size="md"
-              restaurantMap={allRestaurants}
-              personalRating={personalRating}
-              lastChosen={formatLastChosen(acceptedStats, id)}
-              // Whole-card click opens the detail modal (read view).
-              // Heart toggle + multi-list kebab via HeartWithKebab —
-              // same component the other favoriting surfaces use, so
-              // a user can favorite / move-between-lists from history
-              // without bouncing through the modal. <HistoryRowKebab>
-              // sits beside it for the HistoryPage-only "exclude from
-              // insights" toggle; kept as a separate component so the
-              // shared HeartWithKebab metaphor (list management only)
-              // stays uncluttered across the other surfaces that use it.
-              onCardClick={() => openDetail(id)}
-              cornerSlot={(
-                <div className="inline-flex items-center gap-1 shrink-0">
-                  <HeartWithKebab restaurantId={id} size="md" />
-                  {showInsightsKebab && <HistoryRowKebab restaurantId={id} size="md" />}
-                </div>
-              )}
+              className={selectMode && isSelected
+                ? 'ring-2 ring-orange-500 rounded-2xl transition-shadow'
+                : selectMode
+                  ? 'ring-1 ring-transparent rounded-2xl transition-shadow'
+                  : ''}
             >
-              {/* "Add Review" bottom action — opens the detail modal
-                  with the write-review form pre-expanded. Archive /
-                  Delete used to also live here; they moved into the
-                  modal so the card stays focused on a single
-                  primary action. */}
-              <button
-                onClick={(e) => { e.stopPropagation(); openAddReview(id); }}
-                className="mt-2 w-full rounded-lg text-xs bg-gradient-to-br from-orange-500 to-red-500 text-white py-1.5 hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
+              <RestaurantCard
+                id={id}
+                size="md"
+                restaurantMap={allRestaurants}
+                personalRating={personalRating}
+                lastChosen={formatLastChosen(acceptedStats, id)}
+                onCardClick={selectMode ? () => toggleSelection(id) : () => openDetail(id)}
+                cornerSlot={(
+                  <div className="inline-flex items-center gap-1 shrink-0">
+                    {selectMode && (
+                      <span
+                        className={`inline-flex items-center justify-center h-5 w-5 rounded-full border text-xs font-bold ${
+                          isSelected
+                            ? 'bg-orange-500 border-orange-500 text-white'
+                            : 'bg-white border-gray-300 text-transparent'
+                        }`}
+                        aria-hidden="true"
+                      >
+                        ✓
+                      </span>
+                    )}
+                    <HeartWithKebab restaurantId={id} size="md" />
+                    {showInsightsKebab && <HistoryRowKebab restaurantId={id} size="md" />}
+                  </div>
+                )}
               >
-                + Add Review
-              </button>
-            </RestaurantCard>
+                {/* Hide the Add Review CTA while in select-mode so click
+                    target collisions don't accidentally open the modal. */}
+                {!selectMode && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); openAddReview(id); }}
+                    className="mt-2 w-full rounded-lg text-xs bg-gradient-to-br from-orange-500 to-red-500 text-white py-1.5 hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
+                  >
+                    {reviewCount > 0
+                      ? `+ Add Review · ${reviewCount} written`
+                      : '+ Add Review'}
+                  </button>
+                )}
+              </RestaurantCard>
+            </div>
           );
         })}
       </div>
@@ -327,19 +473,39 @@ const UserHistoryPage = () => {
                 const restaurant = allRestaurants[id];
                 if (!restaurant) return null;
                 const personalRating = getUserAvgRating(currentUser.reviews, id);
+                const isSelected = selectedIds.has(String(id));
                 return (
-                  <RestaurantCard
+                  <div
                     key={id}
-                    id={id}
-                    size="md"
-                    restaurantMap={allRestaurants}
-                    personalRating={personalRating}
-                    lastChosen={formatLastChosen(acceptedStats, id)}
-                    // Archived rows open the modal for Restore /
-                    // Remove; no inline action button — those
-                    // operations live exclusively in the modal now.
-                    onCardClick={() => openDetail(id)}
-                  />
+                    className={selectMode && isSelected
+                      ? 'ring-2 ring-orange-500 rounded-2xl transition-shadow'
+                      : selectMode
+                        ? 'ring-1 ring-transparent rounded-2xl transition-shadow'
+                        : ''}
+                  >
+                    <RestaurantCard
+                      id={id}
+                      size="md"
+                      restaurantMap={allRestaurants}
+                      personalRating={personalRating}
+                      lastChosen={formatLastChosen(acceptedStats, id)}
+                      // In select-mode click toggles selection; otherwise
+                      // archived rows open the modal for Restore / Remove.
+                      onCardClick={selectMode ? () => toggleSelection(id) : () => openDetail(id)}
+                      cornerSlot={selectMode ? (
+                        <span
+                          className={`inline-flex items-center justify-center h-5 w-5 rounded-full border text-xs font-bold ${
+                            isSelected
+                              ? 'bg-orange-500 border-orange-500 text-white'
+                              : 'bg-white border-gray-300 text-transparent'
+                          }`}
+                          aria-hidden="true"
+                        >
+                          ✓
+                        </span>
+                      ) : undefined}
+                    />
+                  </div>
                 );
               })}
             </div>
@@ -381,6 +547,40 @@ const UserHistoryPage = () => {
           onConfirm={handleConfirm}
           onCancel={() => setConfirmAction(null)}
         />
+      )}
+
+      {/* Bulk-delete confirmation — irreversible, so an explicit step is
+          required. Bulk archive/unarchive skip this since they're
+          undo-able from the same page. */}
+      {bulkConfirm === 'delete' && (
+        <Dialog open onClose={() => setBulkConfirm(null)} className="relative z-50">
+          <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
+          <div className="fixed inset-0 flex items-center justify-center p-4">
+            <DialogPanel className="w-full max-w-sm rounded-xl bg-white shadow-xl p-6">
+              <DialogTitle className="text-base font-semibold text-gray-900 mb-2">
+                Remove {selectedIds.size} from history?
+              </DialogTitle>
+              <p className="text-sm text-gray-500 mb-2">
+                All accepted entries and reviews for these restaurants will be deleted.
+              </p>
+              <p className="text-xs text-red-500 font-medium mb-4">This cannot be undone.</p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setBulkConfirm(null)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => runBulk('delete')}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-red-600 hover:bg-red-500 transition-colors"
+                >
+                  Remove {selectedIds.size}
+                </button>
+              </div>
+            </DialogPanel>
+          </div>
+        </Dialog>
       )}
     </div>
   );

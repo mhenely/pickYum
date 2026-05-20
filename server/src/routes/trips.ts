@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
+import jwt from 'jsonwebtoken';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
@@ -8,6 +9,17 @@ import {
 } from '../sessions';
 import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
 import { notifyUser } from '../lib/userNotifications';
+
+// 30d expiry strikes a balance: long enough to share a link to someone
+// who responds slowly, short enough that an exposed link doesn't grant
+// permanent trip access. Tokens are not revokable individually (we don't
+// persist them); to invalidate every outstanding link rotate JWT_SECRET.
+const TRIP_INVITE_TTL = '30d';
+
+interface TripInviteTokenPayload {
+  tripId: number;
+  kind: 'trip-invite';
+}
 
 const router = Router();
 router.use(requireAuth);
@@ -90,6 +102,18 @@ const tripListInclude = {
   anchors: {
     select: { id: true, label: true, address: true, isPrimary: true },
     where:  { isPrimary: true },
+  },
+  // Next-meal callout on each trip card. The TripsPage list view shows
+  // "Next: <meal name> · <when>" so users can answer "what's next?"
+  // without opening the trip. take:1 keeps the payload bounded.
+  events: {
+    where: {
+      status:       { in: ['OPEN' as const, 'VOTING' as const] },
+      scheduledFor: { gte: new Date() },
+    },
+    orderBy: { scheduledFor: 'asc' as const },
+    take:    1,
+    select:  { id: true, name: true, scheduledFor: true, status: true, mealSlot: true },
   },
   _count: {
     select: {
@@ -542,6 +566,73 @@ router.post('/:id/invites/:inviteId/respond', async (req: Request, res: Response
   res.json({ trip: accepted });
 });
 
+// ── Shareable invite link ────────────────────────────────────
+// Token-based (no schema migration). The host generates a signed JWT
+// scoped to one trip; anyone authenticated who hits POST /join with
+// that token is added as a member. Rotating JWT_SECRET invalidates
+// every outstanding token; the 30d expiry caps how long a leaked URL
+// stays useful.
+
+// POST /api/trips/:id/invite-link — host generates a shareable token.
+// Returns the token alone; the client builds the final URL from
+// CLIENT_URL since the server doesn't know what the public app URL is.
+router.post('/:id/invite-link', async (req: Request, res: Response) => {
+  const tripId = parseId(req.params.id);
+  if (!tripId) { res.status(400).json({ error: 'Invalid trip id' }); return; }
+
+  const { trip: tripMeta, isHost } = await checkTripAuth(tripId, req.userId);
+  if (!tripMeta) { res.status(404).json({ error: 'Trip not found' }); return; }
+  if (!isHost)   { res.status(403).json({ error: 'Only the host can mint an invite link' }); return; }
+  if (tripMeta.archivedAt) { res.status(400).json({ error: 'Trip is archived' }); return; }
+
+  const payload: TripInviteTokenPayload = { tripId, kind: 'trip-invite' };
+  const token = jwt.sign(payload, process.env.JWT_SECRET!, { expiresIn: TRIP_INVITE_TTL });
+  res.json({ token });
+});
+
+// POST /api/trips/join/:token — consume an invite token. Adds the
+// requesting user to the trip; idempotent (already-members succeed).
+router.post('/join/:token', async (req: Request, res: Response) => {
+  const { token } = req.params;
+  if (!token) { res.status(400).json({ error: 'Missing invite token' }); return; }
+
+  let payload: TripInviteTokenPayload;
+  try {
+    payload = jwt.verify(token, process.env.JWT_SECRET!) as TripInviteTokenPayload;
+  } catch {
+    res.status(400).json({ error: 'Invite link is invalid or expired' });
+    return;
+  }
+  if (payload.kind !== 'trip-invite' || typeof payload.tripId !== 'number') {
+    res.status(400).json({ error: 'Invite link is invalid' });
+    return;
+  }
+
+  const trip = await prisma.trip.findUnique({
+    where:  { id: payload.tripId },
+    select: { id: true, name: true, archivedAt: true, hostId: true },
+  });
+  if (!trip) { res.status(404).json({ error: 'Trip not found' }); return; }
+  if (trip.archivedAt) { res.status(400).json({ error: 'Trip is archived' }); return; }
+
+  // Already-a-member is success — links can be safely shared widely.
+  // upsert keeps the join idempotent without a SELECT-then-INSERT race.
+  await prisma.tripMember.upsert({
+    where:  { tripId_userId: { tripId: trip.id, userId: req.userId } },
+    create: { tripId: trip.id, userId: req.userId },
+    update: {},
+  });
+
+  // Clean up any pending invite from the host-by-username flow — once
+  // they've joined via link, that row is moot. Best-effort; non-fatal.
+  await prisma.tripInvite.updateMany({
+    where: { tripId: trip.id, invitedId: req.userId, status: 'PENDING' },
+    data:  { status: 'ACCEPTED' },
+  }).catch(() => { /* ignore */ });
+
+  res.json({ tripId: trip.id, name: trip.name });
+});
+
 // GET /api/trips/me/invites — pending invites for the current user.
 // Used by the navbar notifications bell + the Trips landing page.
 router.get('/me/invites', async (req: Request, res: Response) => {
@@ -887,12 +978,27 @@ router.post('/:id/events', async (req: Request, res: Response) => {
     },
     include: mealEventInclude,
   });
-  // Real-time ping for every explicitly-invited participant (excluding
-  // the creator themselves — they obviously know about their own meal).
-  // The navbar bell will refetch /api/trips/me/participant-meals to surface
-  // the row. Subset-meals only: an "everyone" meal (empty participants)
-  // is visible on the trip page and doesn't need a directed nudge.
-  for (const id of participants) {
+  // Real-time ping so members learn about the new meal without having to
+  // re-visit the trip page (previously they only saw it on next mount).
+  // Two cases:
+  //   - Subset meal (participantUserIds non-empty) → ping each invited
+  //     participant. The navbar bell refetches participant-meals to
+  //     surface the row.
+  //   - "Everyone" meal (empty participantUserIds) → ping every other
+  //     trip member. They won't see a participant-meal row (those are
+  //     subset-only by design), but they get the toast + their next
+  //     trip-page visit will show the meal already populated.
+  let notifyTargets: number[] = [];
+  if (participants.length > 0) {
+    notifyTargets = participants;
+  } else {
+    const members = await prisma.tripMember.findMany({
+      where:  { tripId },
+      select: { userId: true },
+    });
+    notifyTargets = members.map((m) => m.userId);
+  }
+  for (const id of notifyTargets) {
     if (id !== req.userId) notifyUser(id, 'meal-participant');
   }
   res.status(201).json({ event });
