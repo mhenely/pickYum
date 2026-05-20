@@ -19,6 +19,7 @@
 //     (upsert), so a stale ref can be repaired by simply calling
 //     downloadAndStoreAll again.
 
+import crypto from 'crypto';
 import { StorageClient } from '@supabase/storage-js';
 import { logger } from './logger';
 
@@ -166,6 +167,142 @@ export interface StoredPhoto {
   name: string;             // Supabase public URL
   widthPx: number | null;
   heightPx: number | null;
+}
+
+// ── Proxy-level mirror for unmaterialized search-result photos ──────────
+//
+// The downloadAndStorePhoto / downloadAndStoreAll pair handles photos
+// for restaurants the user has actually saved (favorites, selections,
+// etc.) — those rows get materialized via POST /api/restaurants and
+// their photos persist permanently in Supabase with predictable
+// {restaurantId}/{n}.jpg paths.
+//
+// But a user browsing nearby-search results sees photos for restaurants
+// they never save. Those photos still go through /api/places/photo,
+// which proxies to Google's /media endpoint (billed). Without
+// mirroring, every cold view of an unsaved restaurant photo = one
+// Google call.
+//
+// This helper mirrors those photos too, keyed by a deterministic hash
+// of (googleName, maxWidthPx) under `proxy-cache/`. Storage cost is
+// small (~100 KB/photo, ~$0.021/GB/mo). Once a photo is mirrored,
+// subsequent views hit Supabase directly via /api/places/photo's
+// tier-1 cache check.
+//
+// Idempotent — same input always produces the same path, so a re-mirror
+// (e.g. from a different instance) overwrites the same bytes.
+function proxyCachePath(googleName: string, maxWidthPx: number): string {
+  const hash = crypto.createHash('md5').update(`${googleName}::${maxWidthPx}`).digest('hex');
+  return `proxy-cache/${hash}.jpg`;
+}
+
+// Returns the public Supabase URL a mirrored photo WOULD live at.
+// Pure computation — does not check existence. Caller decides whether
+// to use the URL based on a separate "is this mirrored" flag (kept in
+// Redis with a long TTL so we don't HEAD Supabase on every photo
+// request).
+export function proxyMirroredPublicUrl(googleName: string, maxWidthPx: number): string | null {
+  const url = process.env.SUPABASE_URL?.trim();
+  if (!url) return null;
+  return `${url}/storage/v1/object/public/${BUCKET()}/${proxyCachePath(googleName, maxWidthPx)}`;
+}
+
+// Mirror a Google photo to Supabase using the bytes Google's CDN
+// serves at `cdnUrl` (the redirect target Google returns from the
+// billed /media endpoint). Caller passes in the URL they already
+// extracted — re-fetching /media to get the URL again would cost a
+// second billed call.
+//
+// CDN fetches themselves are free — Google's CDN serves bytes with no
+// API-key check once the signed URL is in hand. So the net cost of
+// mirroring is: 0 extra Google calls + 1 Supabase upload (~$negligible).
+//
+// Returns the public Supabase URL on success, or null on failure
+// (e.g. signed URL expired, Supabase down). Caller is fire-and-forget
+// — a failed mirror just means the next view pays Google again.
+// Allow-list of hostnames the CDN URL is permitted to live under.
+// Defense-in-depth — Google's Places API hands us this URL via the
+// Location header on /v1/{name}/media, so under normal operation it
+// always points to one of these. Validating before fetch closes a
+// theoretical SSRF where a compromised upstream could redirect us
+// to an internal-network address (e.g. cloud-metadata services).
+const ALLOWED_PHOTO_HOSTS = [
+  'googleusercontent.com',
+  'ggpht.com',
+  'gstatic.com',
+];
+
+function isAllowedPhotoHost(cdnUrl: string): boolean {
+  try {
+    const parsed = new URL(cdnUrl);
+    if (parsed.protocol !== 'https:') return false;
+    return ALLOWED_PHOTO_HOSTS.some((h) =>
+      parsed.hostname === h || parsed.hostname.endsWith('.' + h),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function mirrorPhotoFromCdnUrl(args: {
+  googleName: string;
+  maxWidthPx: number;
+  cdnUrl: string;
+}): Promise<string | null> {
+  const { googleName, maxWidthPx, cdnUrl } = args;
+  const storage = getStorageClient();
+  if (!storage) return null;
+
+  if (!isAllowedPhotoHost(cdnUrl)) {
+    logger.warn({ googleName }, 'photo mirror: CDN URL host not in allow-list — skipping');
+    return null;
+  }
+
+  let bytes: ArrayBuffer;
+  let contentType: string;
+  try {
+    const r = await fetch(cdnUrl);
+    if (!r.ok) {
+      logger.warn({ status: r.status, googleName }, 'photo mirror: CDN fetch failed');
+      return null;
+    }
+    contentType = r.headers.get('content-type') || 'image/jpeg';
+    // Defensive content-type check — Supabase serves whatever
+    // content-type we upload with. If Google's CDN ever returned a
+    // non-image (compromised upstream, or weird edge case), uploading
+    // as text/html would let an attacker phish via the Supabase URL.
+    // Reject anything not starting with image/.
+    if (!contentType.startsWith('image/')) {
+      logger.warn({ contentType, googleName }, 'photo mirror: non-image content-type — skipping');
+      return null;
+    }
+    bytes = await r.arrayBuffer();
+  } catch (err) {
+    logger.warn({ err, googleName }, 'photo mirror: CDN fetch threw');
+    return null;
+  }
+
+  const path = proxyCachePath(googleName, maxWidthPx);
+  try {
+    const { error } = await storage.from(BUCKET()).upload(path, bytes, {
+      contentType,
+      upsert: true,
+      // 1-year CDN cache — paths are deterministic per
+      // (googleName, maxWidthPx), and even when Google rotates the
+      // photo name the new name maps to a different path, so we'll
+      // never serve old bytes under a new ref.
+      cacheControl: '31536000',
+    });
+    if (error) {
+      logger.warn({ err: error, path }, 'photo mirror: Supabase upload failed');
+      return null;
+    }
+  } catch (err) {
+    logger.warn({ err, path }, 'photo mirror: Supabase upload threw');
+    return null;
+  }
+
+  return proxyMirroredPublicUrl(googleName, maxWidthPx);
 }
 
 export async function downloadAndStoreAll(args: {

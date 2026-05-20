@@ -1,9 +1,11 @@
 // Google Places (New) primary types used to filter the nearby search at
 // API level. When a user picks a cuisine from the SearchPage dropdown,
 // we pass that `value` to /api/places/nearby — the server validates it
-// against this same whitelist and issues a single searchNearby call
-// with `includedTypes: [value]` instead of the default 3-slice fan-out
-// across all food categories.
+// against this same whitelist and issues a paired searchNearby call
+// (cuisine type + a broader `restaurant` call post-filtered to the
+// cuisine) instead of the default 2-slice fan-out across all food
+// categories. The pairing lets cuisine searches surface up to ~30
+// matches instead of the 20-result hard cap on a single call.
 //
 // Note: distinct from the existing client-side `cuisineFilter` in
 // searchSlice, which post-filters the already-fetched results. This

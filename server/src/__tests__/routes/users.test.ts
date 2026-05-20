@@ -46,6 +46,13 @@ beforeEach(() => {
   });
   // The advisory-lock SELECT is a no-op for tests; just resolve.
   (mockPrisma.$executeRaw as jest.Mock).mockResolvedValue(0);
+  // Drop the per-restaurant refresh locks so a test that hits
+  // refreshOnePlace(restaurantId=N) doesn't leave a lock around to
+  // block the next test from doing the same. Production code never
+  // calls this — the locks just naturally expire after 5 min.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  (require('../../routes/users') as { _resetRefreshLocksForTests: () => void })
+    ._resetRefreshLocksForTests();
 });
 
 describe('POST /api/users/me/flip', () => {

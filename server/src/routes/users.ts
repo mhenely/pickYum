@@ -9,6 +9,7 @@ import { issueToken } from '../lib/emailTokens';
 import { sendEmail, verifyEmailTemplate } from '../lib/email';
 import { logger } from '../lib/logger';
 import { trackGoogleCall } from '../lib/apiUsage';
+import redis from '../lib/redis';
 import {
   LIST_COLOR_PALETTE,
   LIST_WITH_ENTRIES_SELECT,
@@ -2404,9 +2405,49 @@ const DETAIL_FIELD_MASK = [
 const STALE_DAYS = 90;
 const MAX_PER_SESSION = 20; // cap API calls per login
 
+// ── Per-restaurant refresh lock ──────────────────────────────────────
+// Absorbs thundering herd when many users open the same restaurant
+// in quick succession (e.g. a popular spot shared in a group chat).
+// Without this lock, each detail-modal open would fire its own
+// Place Details call even though the data is going to be identical
+// — N users = N billed calls for the same restaurant row.
+//
+// 5-minute TTL: long enough to coalesce the rush, short enough that
+// a row that legitimately needs a re-attempt (e.g. previous refresh
+// crashed mid-write) recovers quickly. Redis when available; in-memory
+// fallback otherwise (single-instance only — App Runner instances
+// each have their own Map, so cross-instance dedup is best-effort).
+const REFRESH_LOCK_TTL_S = 5 * 60;
+const inMemRefreshLocks = new Map<number, number>(); // restaurantId → expiresAt ms
+
+async function acquireRefreshLock(restaurantId: number): Promise<boolean> {
+  if (redis && redis.status === 'ready') {
+    // SET ... NX EX atomically sets the key only if it doesn't exist,
+    // with the TTL stamped in the same op. Returns 'OK' on acquire,
+    // null on contention. catch() defends against transient Redis
+    // hiccups — we'd rather miss a dedup than crash the refresh.
+    const result = await redis
+      .set(`places:refreshLock:${restaurantId}`, '1', 'EX', REFRESH_LOCK_TTL_S, 'NX')
+      .catch(() => null);
+    return result === 'OK';
+  }
+  const exp = inMemRefreshLocks.get(restaurantId);
+  if (exp && exp > Date.now()) return false;
+  inMemRefreshLocks.set(restaurantId, Date.now() + REFRESH_LOCK_TTL_S * 1000);
+  return true;
+}
+
+// Test-only escape hatch — drops every in-memory lock so a test that
+// refreshes restaurant N doesn't leave a lock around to interfere
+// with the next test. Production code never calls this.
+export function _resetRefreshLocksForTests(): void {
+  inMemRefreshLocks.clear();
+}
+
 // Shared helper: fetch fresh Place Details from Google and apply
 // them to one Restaurant row. Returns the updated row on success,
-// or null on any failure (network / non-200 / shape mismatch).
+// or null on any failure (network / non-200 / shape mismatch / lock
+// contention).
 //
 // Used by:
 //   - POST /me/refresh-places (batch — refreshes up to N stale rows
@@ -2426,6 +2467,15 @@ async function refreshOnePlace(
   req: Request,
 ): Promise<Awaited<ReturnType<typeof prisma.restaurant.update>> | null> {
   if (!row.googlePlaceId) return null;
+  // Per-row lock — if another caller refreshed this restaurant within
+  // the last REFRESH_LOCK_TTL_S, skip the API call. The DB row will
+  // already have fresh data (or will momentarily, if the other call
+  // is in-flight). Caller treats the null return as "no refresh
+  // happened", same as the existing error path — no UI change needed.
+  if (!(await acquireRefreshLock(row.id))) {
+    trackGoogleCall(req, 'placeDetails', { cacheHit: true });
+    return null;
+  }
   try {
     const detailRes = await fetch(
       `https://places.googleapis.com/v1/places/${row.googlePlaceId}`,

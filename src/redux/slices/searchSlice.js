@@ -18,7 +18,7 @@ const initialState = {
   // SEARCH-TIME cuisine filter: a single Google Places type
   // (e.g. 'italian_restaurant') passed to /api/places/nearby so we
   // only get back restaurants of that cuisine. null = no filter,
-  // which triggers the server's default 3-slice fan-out across all
+  // which triggers the server's default 2-slice fan-out across all
   // food categories. Distinct from `cuisineFilter` below — that one
   // post-filters the already-fetched results. See utils/cuisineTypes.js
   // for the allowed values.

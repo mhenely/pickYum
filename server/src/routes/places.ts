@@ -1,9 +1,11 @@
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
+import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth';
 import redis from '../lib/redis';
 import { trackGoogleCall } from '../lib/apiUsage';
 import { logger } from '../lib/logger';
+import { mirrorPhotoFromCdnUrl, proxyMirroredPublicUrl } from '../lib/photoStorage';
 
 const router = Router();
 
@@ -20,10 +22,17 @@ const router = Router();
 // arbitrary path traversal through to Google's API key. No user data
 // flows through the photo response.
 
-// 30 requests per 5 minutes per IP — generous for normal use, blocks scripted quota abuse
+// 20 requests per 5 minutes per IP — covers normal interactive use
+// (a user iterating on filters/radius/cuisine typically issues 5-10
+// searches per session) while raising the floor against a runaway
+// client bug burning Google Places budget. Bumped down from 30 after
+// the cost-optimization pass — the previous ceiling was generous
+// enough that a misbehaving page-refresh loop could rack up real spend
+// before tripping. If a legit user hits this on a normal session, ease
+// it back up; the limiter is a safety net, not a usage gate.
 const placesLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
-  max: 30,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many search requests, please slow down' },
@@ -158,10 +167,21 @@ function extractRegularOpeningHours(p: RawPlace): RegularOpeningHours | null {
 // pressure on the Places API budget made the conservative defaults
 // hard to justify.
 //
-// NEARBY: 30 min. A user typing in a filter, hitting search, tweaking
-// the radius, and re-searching the same address-area gets a free hit
-// on the second click. Restaurants don't open/close that fast.
-const NEARBY_TTL_S   = 30 * 60; // 30 minutes
+// NEARBY: stale-while-revalidate. We serve fresh from cache for
+// NEARBY_FRESH_S, then serve stale (and kick off a background refresh)
+// up to NEARBY_TTL_S. This lets the effective hit rate climb past the
+// old hard 30-min cliff: the "unlucky first user past the boundary"
+// no longer pays a full fan-out — they get instant-stale and a
+// background fetch quietly refreshes the cache for everyone after.
+//
+// Worst-case staleness is NEARBY_TTL_S (90 min). Restaurants' hours,
+// ratings, and photo refs don't shift that fast, and the actual
+// "is open now" computation is done client-side from
+// regularOpeningHours periods (not from a cached snapshot). If a
+// place permanently closes, the 90-min worst case is acceptable —
+// users will still see them but the next refresh picks it up.
+const NEARBY_FRESH_S = 15 * 60; //  15 minutes — serve as fresh, no refresh
+const NEARBY_TTL_S   = 90 * 60; //  90 minutes — total cache lifetime (incl. stale window)
 const TEXT_TTL_S     =  5 * 60; //  5 minutes
 // Geocoding results essentially never change — an address resolves
 // to the same lat/lng forever (until the post office renumbers a
@@ -187,6 +207,14 @@ interface NearbyEntry {
   // no results came back.
   resolvedLat: number;
   resolvedLng: number;
+  // SWR boundary: epoch-ms wall-clock timestamp past which the entry is
+  // considered stale. Reads after this time still serve from cache but
+  // trigger a background refresh. Distinct from the Redis/in-memory
+  // expiry, which is NEARBY_TTL_S (the absolute eviction time). Older
+  // cache entries written before SWR shipped will read this as
+  // undefined — handled by treating them as "always fresh" until they
+  // expire normally.
+  freshUntilMs?: number;
 }
 interface TextEntry   { restaurants: unknown[]; }
 interface GeocodeEntry { lat: number; lng: number; formattedAddress: string; }
@@ -195,6 +223,20 @@ interface GeocodeEntry { lat: number; lng: number; formattedAddress: string; }
 const inMemNearby   = new Map<string, NearbyEntry  & { expiresAt: number }>();
 const inMemText     = new Map<string, TextEntry    & { expiresAt: number }>();
 const inMemGeocode  = new Map<string, GeocodeEntry & { expiresAt: number }>();
+
+// In-flight nearby fan-out promises, keyed by cacheKey(lat, lng,
+// radius, cuisineType). Two purposes:
+//   1. Concurrent dedup: if a request comes in while an identical
+//      fan-out is already running, the second request awaits the
+//      first's promise instead of issuing its own (saves duplicate
+//      Google calls when N users hit the same key in the same beat).
+//   2. SWR background refreshes: when a stale read triggers a
+//      background refresh, additional concurrent stale reads see the
+//      promise here and skip starting their own.
+// Single-instance only — App Runner instances each have their own
+// Map. Cross-instance dedup would need a Redis lock; the cost
+// savings from that don't yet justify the complexity.
+const inFlightNearby = new Map<string, Promise<NearbyEntry>>();
 // Photo signed-URL cache. Each entry maps a (photoName, maxWidthPx)
 // pair to the redirect URL Google returned for it. Photos viewed
 // repeatedly within the 30-min TTL skip the upstream /media call
@@ -202,6 +244,27 @@ const inMemGeocode  = new Map<string, GeocodeEntry & { expiresAt: number }>();
 // API call (billed) even though the actual image is served from
 // Google's CDN.
 const inMemPhotoUrl = new Map<string, { url: string; expiresAt: number }>();
+
+// Mirror flag: tracks which photos have been mirrored to Supabase
+// Storage. Once set, photo proxy reads skip Google entirely and
+// redirect directly to the Supabase public URL — permanent zero-cost
+// cache on top of the 30-min signed-URL layer.
+//
+// 30-day TTL: longer than the typical photo-ref rotation window. If
+// Google rotates a ref before the flag expires, the new ref maps to
+// a different cache path (different hash) and gets its own mirror
+// pass; the old mirrored bytes linger in Storage until we add a
+// cleanup pass.
+const PROXY_MIRROR_TTL_S = 30 * 24 * 60 * 60;
+const inMemMirrorFlags = new Map<string, number>(); // hash → expiresAt ms
+
+// In-process dedup for active mirror uploads. Multiple users hitting
+// the same unmirrored photo within seconds shouldn't each kick off
+// their own download + upload — the first one's enough. App Runner
+// instances each have their own Set, so cross-instance dedup is
+// best-effort (an extra upload here costs the same upsert with
+// identical bytes).
+const inFlightMirrors = new Set<string>();
 
 async function nearbyGet(key: string): Promise<NearbyEntry | null> {
   if (redis && redis.status === 'ready') {
@@ -213,11 +276,18 @@ async function nearbyGet(key: string): Promise<NearbyEntry | null> {
 }
 
 async function nearbySet(key: string, value: NearbyEntry): Promise<void> {
+  // Stamp the SWR boundary at write time. Reads compare against this
+  // timestamp to decide whether to trigger a background refresh; the
+  // outer TTL still caps the absolute lifetime.
+  const stamped: NearbyEntry = {
+    ...value,
+    freshUntilMs: Date.now() + NEARBY_FRESH_S * 1000,
+  };
   if (redis && redis.status === 'ready') {
-    await redis.setex(`places:nearby:${key}`, NEARBY_TTL_S, JSON.stringify(value)).catch(() => {});
+    await redis.setex(`places:nearby:${key}`, NEARBY_TTL_S, JSON.stringify(stamped)).catch(() => {});
     return;
   }
-  inMemNearby.set(key, { ...value, expiresAt: Date.now() + NEARBY_TTL_S * 1000 });
+  inMemNearby.set(key, { ...stamped, expiresAt: Date.now() + NEARBY_TTL_S * 1000 });
 }
 
 // Normalize for cache hits: lowercase + collapse whitespace. "  Main St  "
@@ -314,6 +384,71 @@ async function photoUrlSet(name: string, maxWidthPx: number, url: string): Promi
   inMemPhotoUrl.set(key, { url, expiresAt: Date.now() + PHOTO_URL_TTL_S * 1000 });
 }
 
+// Hash helper shared by the mirror-flag read/write. Must stay in sync
+// with proxyCachePath in lib/photoStorage.ts — same input → same hash
+// → same Supabase storage path → same public URL.
+function mirrorFlagKey(name: string, maxWidthPx: number): string {
+  return crypto.createHash('md5').update(`${name}::${maxWidthPx}`).digest('hex');
+}
+
+// Returns true if this photo has already been mirrored to Supabase
+// (within the PROXY_MIRROR_TTL_S window). Caller can then redirect
+// directly to the public Supabase URL without any Google call.
+async function photoMirrorIsSet(name: string, maxWidthPx: number): Promise<boolean> {
+  const key = mirrorFlagKey(name, maxWidthPx);
+  if (redis && redis.status === 'ready') {
+    const v = await redis.get(`places:mirrorFlag:${key}`).catch(() => null);
+    return v !== null;
+  }
+  const exp = inMemMirrorFlags.get(key);
+  return !!exp && exp > Date.now();
+}
+
+// Marks a photo as mirrored. Called after a successful Supabase upload
+// completes in the background. Fire-and-forget — if Redis is down we
+// just re-mirror on the next view, which is idempotent (same path).
+async function photoMirrorMarkSet(name: string, maxWidthPx: number): Promise<void> {
+  const key = mirrorFlagKey(name, maxWidthPx);
+  if (redis && redis.status === 'ready') {
+    await redis.setex(`places:mirrorFlag:${key}`, PROXY_MIRROR_TTL_S, '1').catch(() => {});
+    return;
+  }
+  inMemMirrorFlags.set(key, Date.now() + PROXY_MIRROR_TTL_S * 1000);
+}
+
+// Background mirror trigger. Fired after the proxy redirects the
+// browser to Google's CDN URL — we then quietly download those bytes
+// (from the CDN, which is free) and upload them to Supabase. Next
+// view of the same photo skips Google entirely.
+//
+// Skips if: the photo is already mirrored (flag set), or a mirror is
+// already in flight in this process. Failures are logged and
+// swallowed — the worst case is we just pay Google again on the next
+// view (which would re-trigger this).
+function triggerBackgroundMirror(name: string, maxWidthPx: number, cdnUrl: string): void {
+  const flightKey = `${name}::${maxWidthPx}`;
+  if (inFlightMirrors.has(flightKey)) return;
+
+  // Capture the apiKey before the async closure — if the env changes
+  // mid-run we want the snapshot that was valid when the request came in.
+  // (Realistically it doesn't change, but it's cheap and correct.)
+  inFlightMirrors.add(flightKey);
+  void (async () => {
+    try {
+      // Double-check the flag now that we're actually about to do work
+      // — another instance may have mirrored this photo between the
+      // proxy read and this background trigger.
+      if (await photoMirrorIsSet(name, maxWidthPx)) return;
+      const url = await mirrorPhotoFromCdnUrl({ googleName: name, maxWidthPx, cdnUrl });
+      if (url) await photoMirrorMarkSet(name, maxWidthPx);
+    } catch (err) {
+      logger.warn({ err, name, maxWidthPx }, '[places] background photo mirror failed');
+    } finally {
+      inFlightMirrors.delete(flightKey);
+    }
+  })();
+}
+
 // Round to 3 decimal places (~111 m precision) so nearby searches share
 // cache hits. cuisineType (when set) gets its own slot — a search for
 // Italian and a search for any-cuisine at the same coords must not
@@ -337,13 +472,20 @@ const TEXT_FIELD_MASK = [
   'places.rating',
   'places.userRatingCount',
   'places.priceLevel',
+  // primaryType is used server-side only (deny-list filter); the user-
+  // visible cuisine label comes from primaryTypeDisplayName. Cheap to
+  // keep — both are in the same Pro-tier slot — but listed here as a
+  // single audit cue so removals are easy to spot if Google ever
+  // tiers them differently.
   'places.primaryType',
   'places.primaryTypeDisplayName',
-  'places.currentOpeningHours',
   // regularOpeningHours feeds the structured weekly hours table in the
   // detail modal (weekdayDescriptions) AND the client-side open-now /
   // closing-soon computation (periods, evaluated fresh against the
-  // user's clock). Pro tier — same SKU as currentOpeningHours.
+  // user's clock). currentOpeningHours used to live here too for the
+  // snapshot `openNow` flag, but the frontend computes open-now fresh
+  // from periods anyway — the snapshot was redundant and contributes
+  // nothing to the UI, so it was dropped to trim the response payload.
   'places.regularOpeningHours',
   // Phone + website at search time so newly-materialized rows show
   // these fields in the detail modal immediately, without having to
@@ -423,22 +565,51 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
     res.status(400).json({ error: 'Invalid photo name' });
     return;
   }
+  // Clamp + quantize width to a fixed bucket size so an attacker
+  // can't blow up storage / Google spend by varying the width param
+  // arbitrarily for the same photo. Frontend only uses 200/400/600/1200
+  // in practice; quantizing to nearest 100 caps the distinct cache
+  // entries per photo at 16 (100..1600) and rounds UP to preserve
+  // image quality vs the requested size.
   const maxWidthRaw = Number(req.query.maxWidthPx);
-  const maxWidthPx = Number.isFinite(maxWidthRaw) ? Math.min(1600, Math.max(100, Math.floor(maxWidthRaw))) : 400;
+  const maxWidthClamped = Number.isFinite(maxWidthRaw)
+    ? Math.min(1600, Math.max(100, Math.floor(maxWidthRaw)))
+    : 400;
+  const maxWidthPx = Math.min(1600, Math.ceil(maxWidthClamped / 100) * 100);
 
-  // ── Server-side cache check ─────────────────────────────────
+  // ── Tier 1 cache: Supabase mirror (permanent, zero Google cost) ──
+  // If we've mirrored this photo to Supabase, redirect to the public
+  // URL directly. Skips both the signed-URL cache and the Google API.
+  // This is the long-tail win — once a photo is mirrored, every
+  // future view costs $0.
+  if (await photoMirrorIsSet(name, maxWidthPx)) {
+    const mirroredUrl = proxyMirroredPublicUrl(name, maxWidthPx);
+    if (mirroredUrl) {
+      trackGoogleCall(req, 'photo', { cacheHit: true });
+      // Long-lived browser cache — the Supabase CDN URL is permanent
+      // for a given (photoName, width) pair, so a 1-hour browser
+      // cache is conservative.
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.redirect(302, mirroredUrl);
+      return;
+    }
+  }
+
+  // ── Tier 2 cache: Google signed URL (30 min) ───────────────────
   // Google's signed CDN URLs are valid for several hours; we cache
   // for 30 min on our side which leaves a comfortable safety margin.
-  // This is the single biggest cost saver — without it, every <img>
-  // render = one Google /media call (billed), even though the
-  // actual image bytes are served from Google's public CDN. With
-  // the cache, the same photo viewed N times in 30 min costs 1
-  // Google call instead of N.
+  // Without this cache, every <img> render = one Google /media call
+  // (billed). With it, the same photo viewed N times in 30 min
+  // costs 1 Google call instead of N.
   const cached = await photoUrlGet(name, maxWidthPx);
   if (cached) {
     trackGoogleCall(req, 'photo', { cacheHit: true });
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.redirect(302, cached);
+    // Kick off a background mirror in case this photo gets viewed
+    // enough to be worth eliminating Google entirely. Skips itself
+    // if a mirror is already in-flight or done.
+    triggerBackgroundMirror(name, maxWidthPx, cached);
     return;
   }
 
@@ -463,6 +634,11 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
         // page loads of the same photo skip both our proxy and the redirect.
         res.setHeader('Cache-Control', 'public, max-age=3600');
         res.redirect(302, location);
+        // Fire off the permanent Supabase mirror in the background so
+        // future views of this photo skip Google entirely. The CDN
+        // URL we just got is fresh and good for a few hours, plenty
+        // of time for the background download + upload to complete.
+        triggerBackgroundMirror(name, maxWidthPx, location);
         return;
       }
     }
@@ -610,11 +786,18 @@ const FIELD_MASK = [
   'places.rating',
   'places.userRatingCount',
   'places.priceLevel',
+  // `places.types` is not rendered to the user but is consumed
+  // server-side by the cuisine-broaden post-filter (see merge loop in
+  // the /nearby handler — when slice 2 is the broader `restaurant`
+  // call, we drop results whose `primaryType` AND `types[]` both miss
+  // the cuisine slug). Keeping it costs only response bytes, no SKU
+  // change — adding/removing fields within the Pro tier is free.
   'places.types',
   'places.primaryType',
   'places.primaryTypeDisplayName',
-  'places.currentOpeningHours',
-  // See TEXT_FIELD_MASK comment — same rationale.
+  // See TEXT_FIELD_MASK comment — same rationale. currentOpeningHours
+  // dropped because the frontend computes openNow fresh from
+  // regularOpeningHours periods.
   'places.regularOpeningHours',
   // Phone + website surfaced at search time so the modal can show
   // them without waiting on the refresh-places back-fill. Pro tier,
@@ -705,35 +888,228 @@ const ALLOWED_CUISINE_TYPES = new Set([
 // Google's `searchNearby` is hard-capped at 20 results per call AND
 // doesn't support pagination. The only way to get more results without
 // resorting to multi-region geometry tricks is to issue multiple calls
-// with DISJOINT type sets and merge the responses. With three slices we
-// land up to ~60 unique places per search (typical: 30-50 after the
+// with DISJOINT type sets and merge the responses. With two slices we
+// land up to ~40 unique places per search (typical: 25-35 after the
 // dedupe + deny-list filtering).
 //
 // Slices grouped by intent so the cost stays proportional to user
-// value: A is the broadest "restaurant" tag, B captures
-// coffee/dessert spots Google often tags WITHOUT the `restaurant`
-// type, C grabs bars/quick-service places that often don't appear
-// under `restaurant` either. Cuisine-specific types (sushi_restaurant,
-// pizza_restaurant, etc.) implicitly belong to `restaurant` already,
-// so listing them separately doesn't add new results — they'd just
-// double up our spend.
+// value: A is the broadest "restaurant" tag, B is everything else
+// food-related that Google often tags WITHOUT a top-level `restaurant`
+// type (cafés, bakeries, desserts, bars, quick-service). Cuisine-
+// specific types (sushi_restaurant, pizza_restaurant, etc.) implicitly
+// belong to `restaurant` already, so listing them separately doesn't
+// add new results — they'd just double up our spend.
 //
-// Each slice is its own Pro-tier API call, so 3 slices = 3× the
-// search-tier cost (~$0.10/search instead of $0.035). Adjust the
-// SLICE_COUNT downward if budget pressure shows up; bumping further
-// runs into diminishing returns (a 4th slice would only add the
-// long-tail "donut_shop"/"juice_shop" places already mostly covered
-// by slice B).
+// Each slice is its own Pro-tier API call, so 2 slices = 2× the
+// search-tier cost (~$0.065/search instead of $0.10 for the older
+// 3-slice version). Going down to 1 slice ('restaurant' only) loses
+// the long-tail bar / café / dessert hits that don't carry the
+// restaurant type; staying at 2 is the current cost-vs-coverage knee.
 const NEARBY_TYPE_SETS: string[][] = [
   // A — the main "restaurant" anchor type
   ['restaurant'],
-  // B — coffee / bakery / dessert spots
-  ['cafe', 'coffee_shop', 'tea_house', 'bakery', 'dessert_shop', 'ice_cream_shop', 'juice_shop', 'donut_shop'],
-  // C — bars + quick-service (often not tagged `restaurant`)
-  ['bar', 'bar_and_grill', 'pub', 'wine_bar',
-   'meal_takeaway', 'meal_delivery', 'food_court',
-   'fast_food_restaurant', 'sandwich_shop', 'deli', 'diner'],
+  // B — everything else food-related: cafés, bakeries, desserts, bars,
+  // and quick-service places. Combined from two former slices into one
+  // call to cut search-tier cost. Tradeoff: shares one 20-result cap
+  // across all these groups, so in dense urban areas with a wide
+  // radius the long-tail bar / dessert items can get crowded out by
+  // closer cafés. Reasonable on cost; if users complain about missing
+  // bars or quick-service results, split this back into two slices.
+  [
+    'cafe', 'coffee_shop', 'tea_house', 'bakery', 'dessert_shop',
+    'ice_cream_shop', 'juice_shop', 'donut_shop',
+    'bar', 'bar_and_grill', 'pub', 'wine_bar',
+    'meal_takeaway', 'meal_delivery', 'food_court',
+    'fast_food_restaurant', 'sandwich_shop', 'deli', 'diner',
+  ],
 ];
+
+// ── Error type for fan-out failures ──────────────────────────────────────
+// Thrown by runNearbyFanOut when every slice errors. The handler maps
+// it to a structured 502 response. Other failures (typed JSON parse,
+// transform crashes) propagate as plain Errors and turn into a 500
+// via express-async-errors.
+class NearbyFanOutError extends Error {
+  status: number;
+  constructor(message: string, status = 502) {
+    super(message);
+    this.name = 'NearbyFanOutError';
+    this.status = status;
+  }
+}
+
+// ── runNearbyFanOut: shared fan-out + transform + cache write ────────────
+// Extracted from the inline /nearby logic so it can be used by both:
+//   1. The cache-miss path (await + send response)
+//   2. The SWR background refresh kicked off by stale reads (fire-and-forget)
+//   3. In-flight coalescing — concurrent requests for the same cache key
+//      share the same promise instead of each issuing duplicate Google calls
+//
+// On success: writes the result to the nearby cache (which stamps the
+// SWR freshUntil boundary) and returns the entry. On total failure
+// (all slices error): throws NearbyFanOutError with a human-readable
+// message. Partial failures (some slices error) are tolerated — we
+// surface whatever the successful slices returned.
+async function runNearbyFanOut(opts: {
+  apiKey: string;
+  lat: number;
+  lng: number;
+  radius: number;
+  cuisineType: string | null;
+  formattedAddress: string;
+  req: Request;
+  cacheKey: string;
+}): Promise<NearbyEntry> {
+  const { apiKey, lat, lng, radius, cuisineType, formattedAddress, req, cacheKey: key } = opts;
+
+  // Fan-out across type slices. Google caps each searchNearby at 20
+  // results with no pagination, so the only way to get more is N
+  // parallel calls with disjoint includedTypes (see NEARBY_TYPE_SETS).
+  // For cuisine-specific searches, the second call broadens to
+  // `restaurant` and is post-filtered to the requested cuisine in the
+  // dedupe step — this catches additional cuisine matches Google
+  // didn't rank in the top 20 of the direct call.
+  // Promise.allSettled instead of Promise.all so a single failing
+  // slice doesn't sink the whole search.
+  const typeSets: string[][] = cuisineType
+    ? [[cuisineType], ['restaurant']]
+    : NEARBY_TYPE_SETS;
+  const nearbyResponses = await Promise.allSettled(
+    typeSets.map((includedTypes) =>
+      fetch('https://places.googleapis.com/v1/places:searchNearby', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': FIELD_MASK,
+        },
+        body: JSON.stringify({
+          includedTypes,
+          excludedPrimaryTypes: EXCLUDED_PRIMARY_TYPES,
+          maxResultCount: 20,
+          locationRestriction: {
+            circle: {
+              center: { latitude: lat, longitude: lng },
+              radius,
+            },
+          },
+        }),
+      }).then(async (r) => ({ ok: r.ok, data: await r.json() as any })),
+    ),
+  );
+
+  // Collect successful payloads; log + skip rejected slices. Each
+  // slice is independently recorded in api_usage so a 2-slice success
+  // + 1-slice failure shows up as 2 successful + 1 errored.
+  const slicePayloads: Array<{ places: any[] }> = [];
+  for (let i = 0; i < nearbyResponses.length; i++) {
+    const res_i = nearbyResponses[i];
+    if (res_i.status === 'rejected') {
+      console.warn(`[places] Nearby slice ${i} fetch failed:`, res_i.reason);
+      trackGoogleCall(req, 'nearby', { status: 'error' });
+      continue;
+    }
+    const { ok, data } = res_i.value;
+    if (!ok || data.error) {
+      console.warn(`[places] Nearby slice ${i} returned error:`, JSON.stringify(data.error ?? ok));
+      trackGoogleCall(req, 'nearby', { status: 'error' });
+      continue;
+    }
+    trackGoogleCall(req, 'nearby');
+    slicePayloads.push({ places: Array.isArray(data.places) ? data.places : [] });
+  }
+
+  // All slices errored — typically an auth/permission issue. Throw a
+  // structured error the handler maps to a 502.
+  if (slicePayloads.length === 0) {
+    const firstError = nearbyResponses
+      .map((r) => r.status === 'fulfilled' ? r.value.data?.error : null)
+      .find(Boolean);
+    const errStatus: string = firstError?.status ?? '5xx';
+    const msg = (errStatus === 'PERMISSION_DENIED' || errStatus === 'REQUEST_DENIED')
+      ? 'Places API (New) denied the request — ensure "Places API (New)" is enabled in Google Cloud Console and your API key is not restricted from it.'
+      : `Places API error: ${firstError?.message ?? errStatus}`;
+    throw new NearbyFanOutError(msg, 502);
+  }
+
+  // Dedupe across slices by googlePlaceId. A place tagged BOTH
+  // `restaurant` AND `cafe` would otherwise appear twice — first slice
+  // wins (later wins would have identical content anyway).
+  //
+  // For cuisine-specific searches, slice index 1 is the broadening
+  // `restaurant` call. Post-filter those results to only keep places
+  // whose primaryType or types[] actually matches the requested
+  // cuisine — otherwise we'd contaminate cuisine-filtered output with
+  // non-matching restaurants from the broader call.
+  const byId = new Map<string, any>();
+  for (let i = 0; i < slicePayloads.length; i++) {
+    const slice = slicePayloads[i];
+    const isCuisineBroaden = cuisineType !== null && i === 1;
+    for (const p of slice.places) {
+      if (typeof p?.id !== 'string') continue;
+      if (byId.has(p.id)) continue;
+      if (isCuisineBroaden) {
+        const types = Array.isArray(p.types) ? p.types : [];
+        if (p.primaryType !== cuisineType && !types.includes(cuisineType)) continue;
+      }
+      byId.set(p.id, p);
+    }
+  }
+  const mergedPlaces = Array.from(byId.values());
+
+  // Defense-in-depth filter: `excludedPrimaryTypes` is a hint to
+  // Google, not a guarantee. Re-check primaryType on response and
+  // drop any straggler.
+  const excludedPrimarySet = new Set(EXCLUDED_PRIMARY_TYPES);
+
+  const restaurants = mergedPlaces
+    .filter((p: any) => p.businessStatus !== 'CLOSED_PERMANENTLY')
+    .filter((p: any) => !(typeof p?.primaryType === 'string' && excludedPrimarySet.has(p.primaryType)))
+    .map((p: any) => {
+      const pLat: number | undefined = p.location?.latitude;
+      const pLng: number | undefined = p.location?.longitude;
+      return {
+        googlePlaceId: p.id as string,
+        name: (p.displayName?.text ?? '') as string,
+        googleRating: (p.rating as number | undefined) ?? null,
+        ratingCount: typeof p.userRatingCount === 'number' ? p.userRatingCount : null,
+        priceLevel: PRICE_LEVEL_MAP[p.priceLevel] ?? null,
+        address: (p.formattedAddress as string | undefined) ?? null,
+        cuisineType: (p.primaryTypeDisplayName?.text as string | undefined) ?? null,
+        takeout: p.takeout === true,
+        delivery: p.delivery === true,
+        // Always null now — currentOpeningHours was dropped from the
+        // field mask. The frontend computes its own openNow fresh
+        // against the user's clock from regularOpeningHours periods,
+        // so the cached snapshot was redundant and just bulked up the
+        // response payload.
+        openNow: null,
+        distanceKm: (pLat != null && pLng != null) ? haversineKm(lat, lng, pLat, pLng) : null,
+        lat: pLat ?? null,
+        lng: pLng ?? null,
+        photos: extractPhotos(p),
+        regularOpeningHours: extractRegularOpeningHours(p),
+        phone:   (p.internationalPhoneNumber as string | undefined) ?? null,
+        website: (p.websiteUri as string | undefined) ?? null,
+      };
+    })
+    .sort((a: any, b: any) => {
+      if (a.distanceKm == null && b.distanceKm == null) return 0;
+      if (a.distanceKm == null) return 1;
+      if (b.distanceKm == null) return -1;
+      return a.distanceKm - b.distanceKm;
+    });
+
+  const entry: NearbyEntry = {
+    restaurants,
+    rawPlaces: mergedPlaces,
+    resolvedAddress: formattedAddress,
+    resolvedLat: lat,
+    resolvedLng: lng,
+  };
+  await nearbySet(key, entry);
+  return entry;
+}
 
 // GET /api/places/nearby?address=<>&radiusMeters=<>&cuisineType=<>
 router.get('/nearby', async (req: Request, res: Response) => {
@@ -807,19 +1183,47 @@ router.get('/nearby', async (req: Request, res: Response) => {
     trackGoogleCall(req, 'geocode');
   }
 
-  // ── 2. Check cache before hitting the Places API ──────────────
+  // ── 2. Check cache (with stale-while-revalidate) ─────────────
+  // Read serves stale entries immediately and triggers a background
+  // refresh, instead of forcing the unlucky first user past the
+  // fresh-window boundary to wait for a full fan-out. Background
+  // refreshes are coalesced via `inFlightNearby` — concurrent stale
+  // reads see the in-flight promise and skip starting their own.
+  //
+  // Note: rawPlaces is kept in the cache (debugging) but not sent to
+  // the client — shipping the full Google Places response would
+  // bloat the payload by ~200-400 KB per search.
   const key = cacheKey(lat, lng, radius, cuisineType);
   const cached = await nearbyGet(key);
   if (cached) {
-    // Cache hit covers the entire nearby fan-out (1-3 slices
-    // depending on cuisineType). Record one cacheHit entry — the
-    // dashboard interprets "1 nearby cache hit" as "we saved an
-    // entire fan-out's worth of upstream calls."
     trackGoogleCall(req, 'nearby', { cacheHit: true });
-    // rawPlaces is intentionally kept in the cache (useful for debugging
-    // and potential future audit) but NOT sent to the client — the
-    // frontend doesn't read it, and shipping the full Google Places
-    // response bloats the payload by ~200-400 KB per nearby search.
+    const isStale = !cached.freshUntilMs || Date.now() > cached.freshUntilMs;
+    if (isStale && !inFlightNearby.has(key)) {
+      // Fire-and-forget background refresh. The current request still
+      // serves the stale entry below — only future reads benefit from
+      // the refresh. The .finally clears the in-flight slot whether
+      // the refresh succeeds or fails.
+      const refresh = runNearbyFanOut({
+        apiKey, lat, lng, radius, cuisineType, formattedAddress, req, cacheKey: key,
+      })
+        .finally(() => inFlightNearby.delete(key));
+      inFlightNearby.set(key, refresh);
+      // Attach a logging-only error handler. Two reasons:
+      //   1. The current request has already returned the stale data,
+      //      so a refresh failure isn't user-visible — but we still
+      //      want to know about it in logs.
+      //   2. Without this handler, the rejected promise would surface
+      //      as an unhandledRejection (no one awaits it unless a
+      //      concurrent cache-miss reader joins via the map). On
+      //      Node 15+ that defaults to crashing the process.
+      // Cache-miss readers that DO await this promise via inFlightNearby
+      // still see the rejection independently — attaching this handler
+      // doesn't suppress others.
+      refresh.catch((err: unknown) => {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger.warn({ err: errMsg, key }, '[places] SWR background refresh failed');
+      });
+    }
     res.json({
       restaurants: cached.restaurants,
       configured: true,
@@ -830,180 +1234,36 @@ router.get('/nearby', async (req: Request, res: Response) => {
     return;
   }
 
-  // ── 3. Nearby Search (New) — fan out across type slices ───────
-  // Google caps each searchNearby at 20 results AND doesn't support
-  // pagination, so the only way to get more is N parallel calls with
-  // disjoint includedTypes (see NEARBY_TYPE_SETS for the slicing
-  // rationale). When a specific cuisine is requested, the fan-out
-  // collapses to a single targeted call — broadening to other food
-  // types would defeat the point of the cuisine filter.
-  // Promise.allSettled instead of Promise.all so a single failing
-  // slice doesn't sink the whole search — we degrade gracefully and
-  // surface whatever the other slices returned.
-  const typeSets: string[][] = cuisineType
-    ? [[cuisineType]]
-    : NEARBY_TYPE_SETS;
-  const nearbyResponses = await Promise.allSettled(
-    typeSets.map((includedTypes) =>
-      fetch('https://places.googleapis.com/v1/places:searchNearby', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': apiKey,
-          'X-Goog-FieldMask': FIELD_MASK,
-        },
-        body: JSON.stringify({
-          includedTypes,
-          // Drops stadiums / shopping malls / hotels / etc. that have
-          // 'restaurant' in their types[] array because they happen to
-          // host food vendors. See EXCLUDED_PRIMARY_TYPES for the full
-          // rationale.
-          excludedPrimaryTypes: EXCLUDED_PRIMARY_TYPES,
-          maxResultCount: 20,
-          locationRestriction: {
-            circle: {
-              center: { latitude: lat, longitude: lng },
-              radius,
-            },
-          },
-        }),
-      }).then(async (r) => ({ ok: r.ok, data: await r.json() as any })),
-    ),
-  );
-
-  // Collect successful payloads; log + skip rejected slices. Most
-  // common rejection cause is a transient Google 5xx — we don't fail
-  // the whole search on one bad slice. Each slice is independently
-  // recorded in api_usage so a 2-slice success + 1-slice failure
-  // shows up as 2 successful + 1 errored nearby call (errors don't
-  // accrue cost in the counter).
-  const slicePayloads: Array<{ places: any[] }> = [];
-  for (let i = 0; i < nearbyResponses.length; i++) {
-    const res_i = nearbyResponses[i];
-    if (res_i.status === 'rejected') {
-      console.warn(`[places] Nearby slice ${i} fetch failed:`, res_i.reason);
-      trackGoogleCall(req, 'nearby', { status: 'error' });
-      continue;
-    }
-    const { ok, data } = res_i.value;
-    if (!ok || data.error) {
-      console.warn(`[places] Nearby slice ${i} returned error:`, JSON.stringify(data.error ?? ok));
-      trackGoogleCall(req, 'nearby', { status: 'error' });
-      continue;
-    }
-    trackGoogleCall(req, 'nearby');
-    slicePayloads.push({ places: Array.isArray(data.places) ? data.places : [] });
-  }
-
-  // If EVERY slice failed (auth issue, key disabled, etc.), surface
-  // the first error we saw — same UX as the old single-call failure.
-  if (slicePayloads.length === 0) {
-    const firstError = nearbyResponses
-      .map((r) => r.status === 'fulfilled' ? r.value.data?.error : null)
-      .find(Boolean);
-    const errStatus: string = firstError?.status ?? '5xx';
-    const msg = (errStatus === 'PERMISSION_DENIED' || errStatus === 'REQUEST_DENIED')
-      ? 'Places API (New) denied the request — ensure "Places API (New)" is enabled in Google Cloud Console and your API key is not restricted from it.'
-      : `Places API error: ${firstError?.message ?? errStatus}`;
-    res.status(502).json({ error: msg });
-    return;
-  }
-
-  // Dedupe across slices by googlePlaceId. A place tagged BOTH
-  // `restaurant` AND `cafe` would otherwise appear twice — the
-  // first slice to return it wins (later wins would have identical
-  // content anyway).
-  const byId = new Map<string, any>();
-  for (const slice of slicePayloads) {
-    for (const p of slice.places) {
-      if (typeof p?.id === 'string' && !byId.has(p.id)) byId.set(p.id, p);
-    }
-  }
-  const mergedPlaces = Array.from(byId.values());
-
-  // Defense-in-depth filter: `excludedPrimaryTypes` is a hint to
-  // Google, not a guarantee. The hint catches the vast majority of
-  // venues that happen to tag with `restaurant` in their secondary
-  // types, but occasionally a result still slips through — e.g. a
-  // live-music venue whose primaryType is `live_music_venue` arrived
-  // in nearby results despite the exclusion list. We re-check the
-  // primaryType on the response side and drop any straggler, so a
-  // mis-honored hint can't reach the user. Using a Set for O(1)
-  // lookups vs the array's O(n).
-  const excludedPrimarySet = new Set(EXCLUDED_PRIMARY_TYPES);
-
-  // ── 4. Transform to app shape ─────────────────────────────────
-  const restaurants = mergedPlaces
-    .filter((p: any) => p.businessStatus !== 'CLOSED_PERMANENTLY')
-    .filter((p: any) => !(typeof p?.primaryType === 'string' && excludedPrimarySet.has(p.primaryType)))
-    .map((p: any) => {
-      const pLat: number | undefined = p.location?.latitude;
-      const pLng: number | undefined = p.location?.longitude;
-      return {
-        googlePlaceId: p.id as string,
-        name: (p.displayName?.text ?? '') as string,
-        googleRating: (p.rating as number | undefined) ?? null,
-        // Surfaced so the UI can show "4.5 (800 ratings)" — the average
-        // alone hides how reliable it is. null when Google omits.
-        ratingCount: typeof p.userRatingCount === 'number' ? p.userRatingCount : null,
-        priceLevel: PRICE_LEVEL_MAP[p.priceLevel] ?? null,
-        address: (p.formattedAddress as string | undefined) ?? null,
-        // primaryType gives the best single cuisine/category label (e.g. "sushi_restaurant")
-        // primaryTypeDisplayName is the human-readable version (e.g. "Sushi Restaurant")
-        cuisineType: (p.primaryTypeDisplayName?.text as string | undefined) ?? null,
-        takeout: p.takeout === true,
-        delivery: p.delivery === true,
-        openNow: (p.currentOpeningHours?.openNow as boolean | undefined) ?? null,
-        distanceKm: (pLat != null && pLng != null) ? haversineKm(lat, lng, pLat, pLng) : null,
-        // Surfaced so the frontend can pin each result on a map. null when
-        // Google omits location for some reason — caller should skip the
-        // marker rather than render at (0,0).
-        lat: pLat ?? null,
-        lng: pLng ?? null,
-        // Photo references — frontend builds the URL via our
-        // /api/places/photo proxy (keeps the Google API key server-side).
-        // `name` is the value to pass through to /v1/{name}/media.
-        photos: extractPhotos(p),
-        // Structured weekly schedule (periods + weekdayDescriptions).
-        // Frontend computes fresh open-now / closing-soon status against
-        // the user's clock instead of trusting the snapshot openNow flag.
-        regularOpeningHours: extractRegularOpeningHours(p),
-        // Phone (E.164 format) + website. Surfaced at search time so
-        // the detail modal doesn't have to wait for refresh-places.
-        phone:   (p.internationalPhoneNumber as string | undefined) ?? null,
-        website: (p.websiteUri as string | undefined) ?? null,
-      };
+  // ── 3. Cache miss — coalesce or start a new fan-out ──────────
+  // If another request is already running the fan-out for this key
+  // (started a few ms before us), await its promise instead of
+  // issuing a parallel duplicate. Counts as a cacheHit in
+  // api_usage since we saved a fan-out's worth of upstream calls.
+  let inflight = inFlightNearby.get(key);
+  if (inflight) {
+    trackGoogleCall(req, 'nearby', { cacheHit: true });
+  } else {
+    inflight = runNearbyFanOut({
+      apiKey, lat, lng, radius, cuisineType, formattedAddress, req, cacheKey: key,
     })
-    // Sort closest-first so the merged result is sensibly ordered for
-    // the user — the slices each have their own Google-ranked order
-    // but interleaving them by distance is more useful than
-    // concatenating them. null distances (Google omitted location)
-    // float to the bottom rather than blowing up the comparator.
-    .sort((a: any, b: any) => {
-      if (a.distanceKm == null && b.distanceKm == null) return 0;
-      if (a.distanceKm == null) return 1;
-      if (b.distanceKm == null) return -1;
-      return a.distanceKm - b.distanceKm;
+      .finally(() => inFlightNearby.delete(key));
+    inFlightNearby.set(key, inflight);
+  }
+
+  try {
+    const result = await inflight;
+    res.json({
+      restaurants: result.restaurants,
+      configured: true,
+      resolvedAddress: result.resolvedAddress,
+      resolvedLat: result.resolvedLat,
+      resolvedLng: result.resolvedLng,
     });
-
-  // ── 5. Store in cache and respond ─────────────────────────────
-  const rawPlaces: unknown[] = mergedPlaces;
-  await nearbySet(key, {
-    restaurants,
-    rawPlaces,
-    resolvedAddress: formattedAddress,
-    resolvedLat: lat,
-    resolvedLng: lng,
-  });
-
-  // See cache-hit branch above — rawPlaces is cached server-side only.
-  res.json({
-    restaurants,
-    configured: true,
-    resolvedAddress: formattedAddress,
-    resolvedLat: lat,
-    resolvedLng: lng,
-  });
+  } catch (err: unknown) {
+    const status = err instanceof NearbyFanOutError ? err.status : 502;
+    const message = err instanceof Error ? err.message : 'Nearby search failed';
+    res.status(status).json({ error: message });
+  }
 });
 
 export default router;
