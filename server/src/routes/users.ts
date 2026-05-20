@@ -10,6 +10,7 @@ import { sendEmail, verifyEmailTemplate } from '../lib/email';
 import { logger } from '../lib/logger';
 import { trackGoogleCall } from '../lib/apiUsage';
 import redis from '../lib/redis';
+import { logTaskFailure } from '../lib/asyncSafety';
 import {
   LIST_COLOR_PALETTE,
   LIST_WITH_ENTRIES_SELECT,
@@ -584,8 +585,11 @@ router.delete('/me', async (req: Request, res: Response) => {
   // the new pool. Failures are logged but don't block the response; the
   // cache will catch up on the next review write/delete for that restaurant.
   for (const r of reviewed) {
-    recomputeCommunityRating(r.restaurantId)
-      .catch((err) => console.warn('[communityRating] recompute on account delete failed:', err));
+    logTaskFailure(
+      recomputeCommunityRating(r.restaurantId),
+      'recomputeCommunityRating:onAccountDelete',
+      { restaurantId: r.restaurantId },
+    );
   }
 
   // Match the cookie set by auth.ts so the session is actually cleared

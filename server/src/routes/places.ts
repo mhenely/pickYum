@@ -30,12 +30,18 @@ const router = Router();
 // enough that a misbehaving page-refresh loop could rack up real spend
 // before tripping. If a legit user hits this on a normal session, ease
 // it back up; the limiter is a safety net, not a usage gate.
+//
+// Skipped in tests because jest runs many requests from the same
+// pseudo-IP back-to-back, which would trip the cap before relevant
+// assertions ran. Production limiting is the integration concern of
+// the deployed service.
 const placesLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many search requests, please slow down' },
+  skip: () => process.env.NODE_ENV === 'test',
 });
 
 const RADIUS_CAP_METERS = 50_000;
@@ -551,6 +557,7 @@ const photoLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many photo requests, please slow down' },
+  skip: () => process.env.NODE_ENV === 'test',
 });
 
 // REGISTER FIRST so router-wide auth + placesLimiter (applied below)
@@ -1265,5 +1272,31 @@ router.get('/nearby', async (req: Request, res: Response) => {
     res.status(status).json({ error: message });
   }
 });
+
+// Test-only escape hatch — clears every in-memory cache + in-flight
+// map so a test that populates one (e.g. via a cache-hit scenario)
+// doesn't leak state into the next test. Production code never calls
+// this; the maps just naturally age out via TTL.
+export function _resetInMemCachesForTests(): void {
+  inMemNearby.clear();
+  inMemText.clear();
+  inMemGeocode.clear();
+  inMemPhotoUrl.clear();
+  inMemMirrorFlags.clear();
+  inFlightMirrors.clear();
+  inFlightNearby.clear();
+}
+
+// Test-only escape hatch — pre-populates the nearby cache with a
+// custom freshUntilMs and expiresAt so tests can exercise SWR
+// stale-then-refresh behavior without waiting NEARBY_FRESH_S
+// (15 min) for entries to age out naturally.
+export function _setNearbyCacheEntryForTests(
+  key: string,
+  entry: NearbyEntry,
+  expiresAtMs: number,
+): void {
+  inMemNearby.set(key, { ...entry, expiresAt: expiresAtMs });
+}
 
 export default router;
