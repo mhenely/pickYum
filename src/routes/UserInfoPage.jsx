@@ -8,7 +8,8 @@ import {
   updateAddress,
   removeAddress,
 } from "../redux/slices/userInfoSlice";
-import { logoutUser } from "../redux/slices/authSlice";
+import { logoutUser, patchAuthUser } from "../redux/slices/authSlice";
+import { fileToDownscaledAvatarDataUrl } from "../utils/downscaleAvatar";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import getMostRecentDate from "../utils/getMostRecentDate";
@@ -67,6 +68,89 @@ const UserInfoPage = () => {
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameSuccess, setUsernameSuccess] = useState(false);
 
+  // Avatar — source of truth lives in auth.user (populated from /api/auth/me
+  // on session restore). Local state just covers the in-flight upload + the
+  // last error message.
+  const avatarUrl = useSelector((state) => state.auth.user?.avatarUrl ?? null);
+  const [avatarSaving, setAvatarSaving] = useState(false);
+  const [avatarError,  setAvatarError]  = useState('');
+
+  const handleAvatarChange = async (e) => {
+    const file = e.target.files?.[0];
+    // Reset the input value so picking the same file twice still triggers
+    // change (browsers suppress duplicate selections otherwise).
+    e.target.value = '';
+    if (!file) return;
+    setAvatarError('');
+    setAvatarSaving(true);
+    try {
+      const dataUrl = await fileToDownscaledAvatarDataUrl(file);
+      const { user } = await api.users.setAvatar(dataUrl);
+      dispatch(patchAuthUser({ avatarUrl: user.avatarUrl }));
+    } catch (err) {
+      setAvatarError(err?.message ?? 'Could not save avatar.');
+    } finally {
+      setAvatarSaving(false);
+    }
+  };
+
+  const handleAvatarRemove = async () => {
+    setAvatarError('');
+    setAvatarSaving(true);
+    try {
+      const { user } = await api.users.setAvatar(null);
+      dispatch(patchAuthUser({ avatarUrl: user.avatarUrl }));
+    } catch (err) {
+      setAvatarError(err?.message ?? 'Could not remove avatar.');
+    } finally {
+      setAvatarSaving(false);
+    }
+  };
+
+  // Dietary tags — Redux is the source of truth; local state covers
+  // mid-edit (typing a new tag) and the save spinner.
+  const dietaryTags = userInfo.dietaryTags ?? [];
+  const [newTag, setNewTag] = useState('');
+  const [tagsSaving, setTagsSaving] = useState(false);
+  const [tagsError,  setTagsError]  = useState('');
+  const RECOMMENDED_TAGS = [
+    'vegetarian', 'vegan', 'gluten-free', 'halal', 'kosher',
+    'dairy-free', 'nut-allergy', 'shellfish-allergy', 'pescatarian',
+  ];
+
+  const persistDietaryTags = async (nextTags) => {
+    setTagsError('');
+    setTagsSaving(true);
+    try {
+      const { user } = await api.users.setDietaryTags(nextTags);
+      // Fold the server's normalized list (lowercased, deduped, ordered)
+      // back into Redux — single source of truth for downstream displays.
+      dispatch(setUserData({ ...userInfo, dietaryTags: user.dietaryTags }));
+    } catch (err) {
+      setTagsError(err.message ?? 'Could not save tags.');
+    } finally {
+      setTagsSaving(false);
+    }
+  };
+
+  const handleAddTag = async (raw) => {
+    const cleaned = raw.trim().toLowerCase();
+    if (!cleaned || dietaryTags.includes(cleaned)) {
+      setNewTag('');
+      return;
+    }
+    if (dietaryTags.length >= 10) {
+      setTagsError('Maximum 10 dietary tags');
+      return;
+    }
+    await persistDietaryTags([...dietaryTags, cleaned]);
+    setNewTag('');
+  };
+
+  const handleRemoveTag = (t) => {
+    persistDietaryTags(dietaryTags.filter((x) => x !== t));
+  };
+
   // Address book — replaces the single defaultAddress field. UI state
   // covers the "add new" inline form, the per-row inline-edit form, and
   // a small toast-style success indicator. Persistent address list lives
@@ -92,6 +176,18 @@ const UserInfoPage = () => {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deleteError, setDeleteError] = useState('');
   const [deleteLoading, setDeleteLoading] = useState(false);
+  // Data-export state (used both from the delete dialog and a standalone
+  // button in the danger zone). Separate from the deletion flow so a user
+  // can pull their data without triggering the delete confirm modal.
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const handleExportData = async () => {
+    setExporting(true);
+    setExportError('');
+    try { await api.users.exportData(); }
+    catch (err) { setExportError(err?.message ?? 'Could not export data.'); }
+    finally { setExporting(false); }
+  };
   // Opt-in retraction of reviews. Off by default — the default delete-account
   // behavior anonymizes (userId → null) so the community keeps the rating
   // data. Users who want their public contributions fully removed can flip
@@ -242,6 +338,51 @@ const UserInfoPage = () => {
                 Update your username. Leave blank to keep the current value.
               </p>
 
+              {/* Avatar editor — picks a file, downscales client-side, and
+                  posts the resulting data URL to /api/users/me/avatar. The
+                  preview reads from auth.user so it updates in lockstep
+                  with the navbar avatar after a save. */}
+              <div className="mt-6 flex items-center gap-4">
+                <div className="h-16 w-16 rounded-full overflow-hidden bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center shadow-brand-sm shrink-0">
+                  {avatarUrl ? (
+                    <img src={avatarUrl} alt="Your avatar" className="h-full w-full object-cover" />
+                  ) : (
+                    <svg className="h-10 w-10 text-white" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
+                    </svg>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    {/* The label-wrapped input pattern lets us style the
+                        affordance like a real button while keeping the
+                        native file picker behavior + a11y. */}
+                    <label className="inline-flex items-center rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-400 cursor-pointer disabled:opacity-40">
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/gif,image/webp"
+                        onChange={handleAvatarChange}
+                        disabled={avatarSaving}
+                        className="sr-only"
+                      />
+                      {avatarSaving ? 'Saving…' : avatarUrl ? 'Change' : 'Upload'}
+                    </label>
+                    {avatarUrl && (
+                      <button
+                        type="button"
+                        onClick={handleAvatarRemove}
+                        disabled={avatarSaving}
+                        className="text-sm font-medium text-gray-500 hover:text-red-500 disabled:opacity-40"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-gray-400">PNG, JPEG, GIF, or WebP. Auto-resized to 256×256.</p>
+                  {avatarError && <p className="mt-1 text-xs text-red-500">{avatarError}</p>}
+                </div>
+              </div>
+
               <div className="mt-6">
                 <label htmlFor="username" className="block text-sm font-medium leading-6 text-gray-900 mb-1">
                   Username
@@ -281,6 +422,84 @@ const UserInfoPage = () => {
               </button>
             </div>
           </form>
+
+          {/* Dietary tags — surfaced in group + trip member rows so meal
+              planners can see restrictions at a glance. Free-form, but the
+              recommended-set chips below cover the common cases. */}
+          <div className="border-b border-gray-900/10 pb-8">
+            <h2 className="text-base font-semibold leading-7 text-gray-900">Dietary tags</h2>
+            <p className="mt-1 text-sm leading-6 text-gray-600">
+              Shown next to your name in groups and trips. Max 10 tags.
+            </p>
+
+            {dietaryTags.length > 0 && (
+              <ul className="mt-4 flex flex-wrap gap-2">
+                {dietaryTags.map((t) => (
+                  <li key={t} className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-100 px-2.5 py-1 text-xs text-emerald-700">
+                    {t}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(t)}
+                      disabled={tagsSaving}
+                      aria-label={`Remove ${t}`}
+                      className="text-emerald-500 hover:text-red-500 disabled:opacity-40"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {/* Recommended-set quick-adds. Filtered to those the user
+                hasn't already added so the user never sees a chip that
+                no-ops on click. */}
+            {RECOMMENDED_TAGS.filter((t) => !dietaryTags.includes(t)).length > 0 && (
+              <div className="mt-4">
+                <p className="text-xs font-medium text-gray-500 mb-1.5">Quick-add</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {RECOMMENDED_TAGS.filter((t) => !dietaryTags.includes(t)).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => handleAddTag(t)}
+                      disabled={tagsSaving || dietaryTags.length >= 10}
+                      className="rounded-full border border-gray-300 px-2.5 py-1 text-xs text-gray-700 hover:border-orange-400 hover:bg-orange-50 disabled:opacity-40"
+                    >
+                      + {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => { e.preventDefault(); handleAddTag(newTag); }}
+              className="mt-4 flex items-center gap-2"
+            >
+              <input
+                type="text"
+                value={newTag}
+                onChange={(e) => { setNewTag(e.target.value); setTagsError(''); }}
+                placeholder="Custom tag (e.g. low-fodmap)"
+                maxLength={40}
+                disabled={tagsSaving || dietaryTags.length >= 10}
+                className="flex-1 min-w-0 rounded-md border-0 ring-1 ring-inset ring-gray-300 focus:ring-2 focus:ring-orange-500 px-3 py-1.5 text-sm placeholder:text-gray-400 disabled:opacity-40"
+              />
+              <button
+                type="submit"
+                disabled={!newTag.trim() || tagsSaving || dietaryTags.length >= 10}
+                className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-400 disabled:opacity-40"
+              >
+                {tagsSaving ? 'Saving…' : 'Add'}
+              </button>
+            </form>
+
+            {tagsError && <p className="mt-2 text-xs text-red-500">{tagsError}</p>}
+            {dietaryTags.length >= 10 && !tagsError && (
+              <p className="mt-2 text-xs text-gray-400">You've reached the 10-tag limit.</p>
+            )}
+          </div>
 
           {/* Address book — replaces the older single "Default search
               address" field. Users can save multiple labeled locations
@@ -573,17 +792,27 @@ const UserInfoPage = () => {
         <div className="mt-12 border-t border-red-100 pt-8">
           <h2 className="text-base font-semibold text-red-600 mb-1">Danger Zone</h2>
           <p className="text-sm text-gray-500 mb-4">Permanently delete your account and all associated data. This cannot be undone.</p>
-          <button
-            onClick={() => {
-              setShowDeleteModal(true);
-              setDeleteConfirmText('');
-              setDeleteError('');
-              setRetractReviews(false); // Default state every time the modal opens
-            }}
-            className="rounded-md border border-red-300 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 transition-colors"
-          >
-            Delete account
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={handleExportData}
+              disabled={exporting}
+              className="rounded-md border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40 transition-colors"
+            >
+              {exporting ? 'Preparing…' : 'Download my data'}
+            </button>
+            <button
+              onClick={() => {
+                setShowDeleteModal(true);
+                setDeleteConfirmText('');
+                setDeleteError('');
+                setRetractReviews(false); // Default state every time the modal opens
+              }}
+              className="rounded-md border border-red-300 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 transition-colors"
+            >
+              Delete account
+            </button>
+          </div>
+          {exportError && <p className="mt-2 text-xs text-red-500">{exportError}</p>}
         </div>
       )}
 
@@ -624,7 +853,23 @@ const UserInfoPage = () => {
                 <strong>Also remove my reviews.</strong> The ratings I left will be deleted entirely and no longer counted in community ratings.
               </span>
             </label>
+            {/* In-context download nudge — same handler as the danger-zone
+                button, just placed where users will see it right before
+                clicking Delete. The button is text-style so it doesn't
+                compete with the Delete CTA's visual weight. */}
+            <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600 flex items-center justify-between gap-2">
+              <span>Want a copy of your data first?</span>
+              <button
+                type="button"
+                onClick={handleExportData}
+                disabled={exporting}
+                className="font-semibold text-orange-600 hover:text-orange-700 disabled:opacity-40"
+              >
+                {exporting ? 'Preparing…' : 'Download'}
+              </button>
+            </div>
             {deleteError && <p className="text-xs text-red-500">{deleteError}</p>}
+            {exportError && <p className="text-xs text-red-500">{exportError}</p>}
             <div className="flex gap-2">
               <button
                 onClick={() => setShowDeleteModal(false)}

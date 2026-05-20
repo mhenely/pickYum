@@ -49,7 +49,16 @@ export const logoutUser = createAsyncThunk('auth/logout', async () => {
 const authSlice = createSlice({
   name: 'auth',
   initialState,
-  reducers: {},
+  reducers: {
+    // Merge-update for the auth'd user. Used by profile actions that change
+    // a single field (avatar upload, email verification flip, etc.) and
+    // need the navbar / Redux consumers to see the new value without a
+    // full /me round-trip. No-op if the user is signed out.
+    patchAuthUser: (state, action: { payload: Partial<AuthUser> }) => {
+      if (!state.user) return;
+      state.user = { ...state.user, ...action.payload };
+    },
+  },
   extraReducers: (builder) => {
     builder
       // checkAuth
@@ -112,4 +121,5 @@ const authSlice = createSlice({
   },
 });
 
+export const { patchAuthUser } = authSlice.actions;
 export default authSlice.reducer;

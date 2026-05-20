@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
+import { notifyUser } from '../lib/userNotifications';
 
 const router = Router();
 router.use(requireAuth);
@@ -211,6 +212,7 @@ router.post('/friend-request/:userId', async (req: Request, res: Response) => {
         where: { id: existing.id },
         data: { status: 'PENDING' },
       });
+      notifyUser(targetId, 'friend-request');
       res.json({ request: updated });
       return;
     }
@@ -219,6 +221,7 @@ router.post('/friend-request/:userId', async (req: Request, res: Response) => {
   const request = await prisma.friendRequest.create({
     data: { senderId: req.userId, receiverId: targetId },
   });
+  notifyUser(targetId, 'friend-request');
   res.status(201).json({ request });
 });
 

@@ -17,6 +17,7 @@ import { api } from '../lib/api';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import BallotDetailModal from '../components/BallotDetailModal';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
+import DietaryTagChips from '../components/DietaryTagChips';
 
 const STATUS_BADGE = {
   OPEN:   { label: 'Open',             cls: 'bg-green-100 text-green-700' },
@@ -1755,15 +1756,19 @@ const GroupDetailPage = () => {
           </h2>
           <div className="rounded-xl border border-gray-200 bg-white overflow-hidden divide-y divide-gray-100">
             <div className="flex items-center justify-between px-4 py-3">
-              <div>
+              <div className="min-w-0 flex items-center gap-2 flex-wrap">
                 <span className="text-sm font-medium text-gray-900">{group.host?.username}</span>
-                <span className="ml-2 text-xs text-gray-400">host</span>
+                <span className="text-xs text-gray-400">host</span>
+                <DietaryTagChips tags={group.host?.dietaryTags} />
               </div>
             </div>
             {(group.members ?? []).map((m) => (
               <div key={m.userId} className="flex items-center justify-between px-4 py-3">
-                <span className="text-sm text-gray-800">{m.user?.username}</span>
-                <div className="flex gap-2">
+                <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                  <span className="text-sm text-gray-800">{m.user?.username}</span>
+                  <DietaryTagChips tags={m.user?.dietaryTags} />
+                </div>
+                <div className="flex gap-2 shrink-0">
                   {isHost && (
                     <button onClick={() => handleKick(m.userId, m.user?.username)}
                       className="text-xs text-gray-400 hover:text-red-500 transition-colors">

@@ -3,6 +3,8 @@ import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { requireAuth, getOptionalAuthUserId } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
+import { downloadAndStoreAll, type StoredPhoto } from '../lib/photoStorage';
+import { logger } from '../lib/logger';
 
 const router = Router();
 router.use(writeLimiter);
@@ -106,18 +108,74 @@ function clipUrl(v: unknown, max: number): string | undefined {
 // schema for legacy data but is never written by new requests.
 const MAX_PHOTOS_PER_RESTAURANT  = 10;
 
-function sanitizePhotos(raw: unknown): Prisma.InputJsonValue | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const out = raw
+// Type-safe variant: returns the cleaned array (or null) without coercing to
+// Prisma.InputJsonValue. Used for the materialize-to-storage path where we
+// need to iterate the validated photos to download them. The original
+// sanitizePhotos wrapper still exists below for callers that just want to
+// store the value directly.
+//
+// Length cap bumped from 256 → 512 because Google's Places API (New) photo
+// references occasionally exceed 256 chars in the wild (typical refs are
+// ~250, but rare ones run to 300+). Truncated refs are invalid by definition
+// — the prior cap was silently dropping the tail and breaking the photo.
+interface IncomingPhotoRef {
+  name: string;
+  widthPx: number | null;
+  heightPx: number | null;
+}
+function sanitizeIncomingPhotos(raw: unknown): IncomingPhotoRef[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
     .slice(0, MAX_PHOTOS_PER_RESTAURANT)
     .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object')
     .map((p) => ({
-      name:     typeof p.name     === 'string'  ? p.name.slice(0, 256) : null,
+      name:     typeof p.name     === 'string'  ? p.name.slice(0, 512) : '',
       widthPx:  typeof p.widthPx  === 'number'  ? p.widthPx  : null,
       heightPx: typeof p.heightPx === 'number'  ? p.heightPx : null,
     }))
-    .filter((p) => !!p.name);
+    .filter((p) => p.name.length > 0);
+}
+
+function sanitizePhotos(raw: unknown): Prisma.InputJsonValue | undefined {
+  const out = sanitizeIncomingPhotos(raw);
   return out.length > 0 ? (out as unknown as Prisma.InputJsonValue) : undefined;
+}
+
+// Materialize-to-storage helper: takes the raw `photos` body field (Google
+// refs from a Places search), validates shape, downloads each photo from
+// Google's signed CDN, uploads bytes to Supabase Storage, and returns the
+// public URLs in the same DB-ready shape. The returned array's `name` field
+// is now a Supabase public URL — frontend cards point `<img src>` at it
+// directly with no proxy involvement.
+//
+// Returns undefined when:
+//   - GOOGLE_PLACES_API_KEY isn't set (storage disabled in this env)
+//   - the body has no photos (custom user-typed entry)
+//   - every photo failed to upload (Supabase Storage misconfigured? log!)
+//
+// Returning undefined leaves the row's photos column NULL — the card just
+// renders no photo region, the rest of the materialize completes normally.
+// Subsequent searches for the same place will retry via the existing-row
+// backfill branch.
+async function materializePhotosToStorage(
+  rawPhotos: unknown,
+  restaurantId: number,
+): Promise<StoredPhoto[] | undefined> {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) return undefined;
+  const cleaned = sanitizeIncomingPhotos(rawPhotos);
+  if (cleaned.length === 0) return undefined;
+  try {
+    const stored = await downloadAndStoreAll({
+      restaurantId,
+      googlePhotos: cleaned,
+      apiKey,
+    });
+    return stored.length > 0 ? stored : undefined;
+  } catch (err) {
+    logger.warn({ err, restaurantId }, 'materializePhotosToStorage threw');
+    return undefined;
+  }
 }
 
 // Re-validate the structured opening hours the frontend echoes back
@@ -193,14 +251,47 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   const googlePlaceId = clipString(body.googlePlaceId, 200);
 
   // Find first — if the row already exists AND is visible to the caller,
-  // return it untouched. Google-sourced rows (googlePlaceId set) are always
-  // public, so the visibility check is a no-op there. For custom entries
-  // (typed names with no googlePlaceId), the row is visible only if it's
-  // public or the caller is its creator — preventing a private name typed
-  // by user A from being silently joined by user B.
+  // return it (possibly with a narrow photo backfill — see below). Google-
+  // sourced rows (googlePlaceId set) are always public, so the visibility
+  // check is a no-op there. For custom entries (typed names with no
+  // googlePlaceId), the row is visible only if it's public or the caller
+  // is its creator — preventing a private name typed by user A from being
+  // silently joined by user B.
   if (googlePlaceId) {
     const existing = await prisma.restaurant.findUnique({ where: { googlePlaceId } });
-    if (existing) { res.status(200).json({ restaurant: existing }); return; }
+    if (existing) {
+      // Narrow backfill: when the existing row has no photos and the client
+      // just supplied some from a fresh Places result, download the photos
+      // to Supabase Storage and patch the row. Covers two real failure modes:
+      //   1. Legacy rows created before photos-at-materialize-time landed.
+      //   2. Rows whose Google photo refs have since rotated and now fail
+      //      the /media endpoint (the "stale ref" bug — Google's docs claim
+      //      refs are persistent but empirically they aren't).
+      // Other Google-fresh fields (rating count, regularOpeningHours)
+      // intentionally stay in the periodic-refresh domain — this branch
+      // exists only to unblock photo rendering on cards, not to become a
+      // general "merge whatever the client says" update path.
+      const existingHasPhotos = Array.isArray(existing.photos)
+        && (existing.photos as unknown[]).length > 0;
+      if (!existingHasPhotos) {
+        const stored = await materializePhotosToStorage(body.photos, existing.id);
+        if (stored !== undefined) {
+          const patched = await prisma.restaurant.update({
+            where: { id: existing.id },
+            data: {
+              photos: stored as unknown as Prisma.InputJsonValue,
+              // Stamp the refresh timestamp so the periodic refresh sweep
+              // doesn't immediately re-pick this row as stale.
+              googleDataUpdatedAt: new Date(),
+            },
+          });
+          res.status(200).json({ restaurant: patched });
+          return;
+        }
+      }
+      res.status(200).json({ restaurant: existing });
+      return;
+    }
   } else {
     const existing = await prisma.restaurant.findFirst({
       where: {
@@ -224,7 +315,6 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   // anything else as null rather than 500'ing on Prisma's NaN rejection.
   const lat = (typeof body.lat === 'number' && Number.isFinite(body.lat) && body.lat >= -90  && body.lat <= 90)  ? body.lat : null;
   const lng = (typeof body.lng === 'number' && Number.isFinite(body.lng) && body.lng >= -180 && body.lng <= 180) ? body.lng : null;
-  const photos = sanitizePhotos(body.photos);
   const regularOpeningHours = sanitizeRegularOpeningHours(body.regularOpeningHours);
 
   // Privacy rule: a Google Place is shared data (the place exists in the real
@@ -233,6 +323,12 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   // option or favorite (groups.ts auto-publishes at that point).
   const isPrivate = !googlePlaceId;
 
+  // Create the row WITHOUT photos first — the photo upload to Supabase
+  // Storage needs the row's id for its deterministic storage path
+  // (<restaurantId>/<photoIndex>.jpg). Two-write cost is fine here: a
+  // materialize is user-initiated and not on a hot path. If the photo
+  // upload fails or returns nothing, the row stays photo-less and the
+  // existing-row backfill branch above will retry on the next search.
   const restaurant = await prisma.restaurant.create({
     data: {
       googlePlaceId: googlePlaceId ?? null,
@@ -250,18 +346,33 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       ratingCount,
       lat,
       lng,
-      // Spread-only-when-defined so Prisma sees explicit nulls vs undefined
-      // correctly: undefined → column unset (NULL), JSON value → stored.
-      ...(photos !== undefined && { photos }),
       ...(regularOpeningHours !== undefined && { regularOpeningHours }),
-      // Stamp the refresh timestamp when we save Google data so the
-      // periodic refresh sweep can pick a sensible "stale" cutoff.
-      ...((photos !== undefined || ratingCount !== null || regularOpeningHours !== undefined)
-        && { googleDataUpdatedAt: new Date() }),
+      // googleDataUpdatedAt is set in the post-photo update below if we
+      // successfully stored at least one photo; otherwise it stays null so
+      // the next refresh sweep picks this row up.
       createdBy: req.userId,
       private:   isPrivate,
     },
   });
+
+  // Photo storage step. Downloads each photo from Google's /media endpoint
+  // and uploads bytes to Supabase Storage. If everything works, we update
+  // the row with the storage URLs + a fresh googleDataUpdatedAt stamp.
+  // If it fails (no API key, Supabase misconfigured, all photos failed),
+  // we return the row as-is — the rest of the data is still useful.
+  const storedPhotos = await materializePhotosToStorage(body.photos, restaurant.id);
+  if (storedPhotos !== undefined) {
+    const updated = await prisma.restaurant.update({
+      where: { id: restaurant.id },
+      data: {
+        photos: storedPhotos as unknown as Prisma.InputJsonValue,
+        googleDataUpdatedAt: new Date(),
+      },
+    });
+    res.status(201).json({ restaurant: updated });
+    return;
+  }
+
   res.status(201).json({ restaurant });
 });
 

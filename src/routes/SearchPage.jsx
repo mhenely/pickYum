@@ -547,9 +547,28 @@ export default function SearchPage() {
   //   3. Otherwise, start a new POST and register it in the in-flight Map
   //      until it resolves (then clean up so a future refetch can re-run).
   const ensurePlaceMaterialized = async (place) => {
+    // Match only on googlePlaceId. The previous `|| r.name === place.name`
+    // fallback shadowed real Google Places with same-named custom rows
+    // (e.g. a user-typed "Pho 99" with no googlePlaceId would intercept
+    // every subsequent Places "Pho 99" materialize) — photos for the
+    // real Place would never appear on cards because the custom row
+    // can't be photo-refreshed (no upstream to query). Strict id-match
+    // keeps custom rows and Google rows in their own lanes.
     const existingEntry = Object.entries(customRestaurants)
-      .find(([, r]) => r.googlePlaceId === place.googlePlaceId || r.name === place.name);
-    if (existingEntry) return existingEntry[0];
+      .find(([, r]) => r.googlePlaceId === place.googlePlaceId);
+    if (existingEntry) {
+      const [existingId, existingRow] = existingEntry;
+      const cachedHasPhotos    = Array.isArray(existingRow.photos) && existingRow.photos.length > 0;
+      const incomingHasPhotos  = Array.isArray(place.photos)        && place.photos.length        > 0;
+      // Short-circuit ONLY when materializing wouldn't gain anything:
+      //   - the cached row already has photos (nothing to improve), or
+      //   - the incoming place has none to contribute (nothing to add).
+      // Otherwise fall through to the POST path — the server's existing-
+      // row branch will detect the missing-photos state and patch the row
+      // before returning it. Without this, a row that was favorited / opted
+      // in a prior session with photos:[] stays photo-less forever.
+      if (cachedHasPhotos || !incomingHasPhotos) return existingId;
+    }
 
     const inFlight = inFlightMaterializations.current.get(place.googlePlaceId);
     if (inFlight) return inFlight;
@@ -617,9 +636,16 @@ export default function SearchPage() {
           lng: place.lng ?? null,
           // Mirror photo data into the Redux store too so cards pull
           // from the same shape regardless of where they're rendered.
-          // Empty array (not null) when the place had none — keeps the
-          // shape stable for consumers that do `photos.length` etc.
-          photos: place.photos ?? [],
+          // Source the photos from the server's response, not from
+          // `place.photos`: the server downloads each photo from
+          // Google's signed CDN at materialize time and uploads to
+          // Supabase Storage, so `restaurant.photos[*].name` is now a
+          // public Supabase URL (not a Google ref). Using the server
+          // shape here means saved cards point `<img>` at the CDN
+          // directly with no proxy + no per-view Google API cost.
+          // Empty array fallback when storage upload failed or the
+          // place had no photos to begin with.
+          photos: Array.isArray(restaurant.photos) ? restaurant.photos : [],
           // Structured hours mirrored so the detail modal can render
           // the weekly table + open-now badge immediately without
           // re-fetching from the server.

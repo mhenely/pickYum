@@ -17,6 +17,9 @@ vi.mock('../../lib/api', () => ({
       }),
       getData: vi.fn(),
       addReview: vi.fn(),
+      updateReview: vi.fn().mockResolvedValue({
+        review: { id: 123, restaurantId: 5, rating: '5', content: 'edited', createdAt: '2024-05-01' },
+      }),
       refreshPlaces: vi.fn().mockResolvedValue({ updated: [] }),
     },
   },
@@ -27,6 +30,7 @@ import authReducer from '../../redux/slices/authSlice';
 import userInfoReducer, {
   loadUserData,
   persistAddReview,
+  persistEditReview,
 } from '../../redux/slices/userInfoSlice';
 
 function buildStore(authStatus: 'authenticated' | 'unauthenticated' = 'authenticated') {
@@ -197,5 +201,102 @@ describe('persistAddReview thunk', () => {
     const reviews = store.getState().userInfo.user.reviews['5'];
     expect(reviews).toHaveLength(2);
     expect(reviews.map((r: { id: number }) => r.id)).toEqual([1, 2]); // distinguishable
+  });
+});
+
+describe('persistEditReview thunk', () => {
+  // Helper that pre-seeds a single review for restaurant 5 so each test
+  // starts from a "user already wrote one" state.
+  function buildStoreWithReview(opts: { authenticated: boolean; reviewId: number | string }) {
+    const store = buildStore(opts.authenticated ? 'authenticated' : 'unauthenticated');
+    store.dispatch({
+      type: 'userInfo/setUserData',
+      payload: {
+        id: 1, email: 'a@b.c', username: 'alice',
+        favorites: [], options: [], accepted: [], archived: [],
+        reviews: {
+          '5': [{ id: opts.reviewId, content: 'original', rating: 3, date: '2024-05-01' }],
+        },
+        flipCount: 0,
+      },
+    });
+    return store;
+  }
+
+  it('AUTHENTICATED: PATCHes the server and mirrors the new content+rating in Redux', async () => {
+    const store = buildStoreWithReview({ authenticated: true, reviewId: 123 });
+
+    await store.dispatch(persistEditReview({
+      restaurantId: '5', reviewId: 123, content: 'edited', rating: 5,
+    }) as never);
+
+    // Server received only the editable fields — not the full review row.
+    // Anything else would let a client overwrite createdAt / userId via a
+    // PATCH meant only for content + rating revisions.
+    expect(api.users.updateReview).toHaveBeenCalledWith(123, { content: 'edited', rating: 5 });
+
+    const stored = store.getState().userInfo.user.reviews['5'];
+    expect(stored).toHaveLength(1);
+    // The date field is preserved — edits don't shift the original
+    // timestamp (matches the server's PATCH-keeps-createdAt behavior).
+    expect(stored[0]).toEqual({ id: 123, content: 'edited', rating: 5, date: '2024-05-01' });
+  });
+
+  it('GUEST: edits in-place without calling the server', async () => {
+    // Guest reviews carry string "local-…" ids. Round-tripping to the
+    // server would 404 (no row exists) and burn quota, so the thunk
+    // short-circuits when the review id is non-numeric.
+    const store = buildStoreWithReview({ authenticated: false, reviewId: 'local-abc' });
+
+    await store.dispatch(persistEditReview({
+      restaurantId: '5', reviewId: 'local-abc', content: 'guest edit', rating: 4,
+    }) as never);
+
+    expect(api.users.updateReview).not.toHaveBeenCalled();
+    const stored = store.getState().userInfo.user.reviews['5'][0];
+    expect(stored.content).toBe('guest edit');
+    expect(stored.rating).toBe(4);
+  });
+
+  it('AUTHENTICATED with a still-local id: stays slice-only (handles pre-reconciliation edits)', async () => {
+    // Race: user adds a review (guest mode), authenticates, then edits
+    // before the server-issued id has reconciled into Redux. The local-
+    // id row is still all the slice knows about. The thunk should treat
+    // it the same as the guest path — patching the server would 404.
+    const store = buildStoreWithReview({ authenticated: true, reviewId: 'local-xyz' });
+
+    await store.dispatch(persistEditReview({
+      restaurantId: '5', reviewId: 'local-xyz', content: 'edit', rating: 4,
+    }) as never);
+
+    expect(api.users.updateReview).not.toHaveBeenCalled();
+    expect(store.getState().userInfo.user.reviews['5'][0].content).toBe('edit');
+  });
+
+  it('only mutates the matching review when multiple exist for the same restaurant', async () => {
+    const store = buildStore('authenticated');
+    store.dispatch({
+      type: 'userInfo/setUserData',
+      payload: {
+        id: 1, email: 'a@b.c', username: 'alice',
+        favorites: [], options: [], accepted: [], archived: [],
+        reviews: {
+          '5': [
+            { id: 100, content: 'first',  rating: 3, date: '2024-05-01' },
+            { id: 101, content: 'second', rating: 4, date: '2024-05-02' },
+          ],
+        },
+        flipCount: 0,
+      },
+    });
+
+    await store.dispatch(persistEditReview({
+      restaurantId: '5', reviewId: 101, content: 'second edited', rating: 5,
+    }) as never);
+
+    const stored = store.getState().userInfo.user.reviews['5'];
+    expect(stored).toHaveLength(2);
+    expect(stored[0]).toMatchObject({ id: 100, content: 'first',         rating: 3 });
+    expect(stored[1]).toMatchObject({ id: 101, content: 'second edited', rating: 5 });
   });
 });

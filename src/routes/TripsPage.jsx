@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import { SkeletonList } from '../components/Skeleton';
 
 // Trips list — every trip the user hosts OR is a member of, plus an
 // inline form to create a new one. Mirrors the SocialsPage / Groups
@@ -202,7 +203,7 @@ export default function TripsPage() {
         </form>
       )}
 
-      {loading && <p className="text-center text-sm text-gray-400 py-20">Loading your trips…</p>}
+      {loading && <div className="py-6"><SkeletonList count={3} /></div>}
       {error   && <p className="text-center text-sm text-red-500 py-20">{error}</p>}
 
       {!loading && !error && (

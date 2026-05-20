@@ -76,6 +76,10 @@ export interface UserState {
   username: string;
   addresses: Address[];
   flipCount: number;
+  // Free-form dietary tag list surfaced in group/trip member rows.
+  // Defaults to [] for guests + new accounts. Edited via /api/users/me/
+  // dietary-tags; the PATCH response is folded back here.
+  dietaryTags: string[];
   // Favorites / options / archived are stringy IDs to tolerate both
   // server ints AND the legacy `local-…` guest IDs in the same array.
   favorites: Array<string | number>;
@@ -142,6 +146,7 @@ const emptyUser = (): UserState => ({
   // one entry has isDefault=true (enforced server-side).
   addresses:  savedGuest?.addresses  ?? [],
   flipCount:  savedGuest?.flipCount  ?? 0,
+  dietaryTags: savedGuest?.dietaryTags ?? [],
   favorites:  savedGuest?.favorites  ?? [],
   options:    savedGuest?.options    ?? [],
   accepted:   (savedGuest?.accepted as AcceptedEntry[] | undefined)   ?? [],
@@ -278,7 +283,7 @@ export const userInfoSlice = createSlice({
     // callers that update only profile fields (e.g. a username change)
     // don't accidentally clear the address book.
     setUserData: (state, action: PayloadAction<Partial<UserState> & { id: number | null; email: string; username: string }>) => {
-      const { id, email, username, addresses, flipCount, favorites, options, accepted, archived, reviews } = action.payload;
+      const { id, email, username, addresses, flipCount, dietaryTags, favorites, options, accepted, archived, reviews } = action.payload;
       state.user = {
         ...state.user,
         id,
@@ -286,6 +291,7 @@ export const userInfoSlice = createSlice({
         username,
         addresses: addresses ?? state.user.addresses ?? [],
         flipCount: flipCount ?? 0,
+        dietaryTags: dietaryTags ?? state.user.dietaryTags ?? [],
         favorites: favorites ?? [],
         options: options ?? [],
         accepted: accepted ?? [],
@@ -364,6 +370,26 @@ export const userInfoSlice = createSlice({
       } else {
         state.user.reviews[key] = [newReview];
       }
+    },
+
+    // In-place edit of a single review's content + rating. Preserves the
+    // existing `date` field so the original timestamp doesn't shift when the
+    // user fixes a typo — matches the server's behavior (PATCH preserves
+    // createdAt). Fields default to the existing values when omitted.
+    editUserReview: (state, action: PayloadAction<{
+      restaurantId: string | number;
+      id: number | string;
+      content?: string;
+      rating?: number;
+    }>) => {
+      const { restaurantId, id, content, rating } = action.payload;
+      const reviews = state.user.reviews[String(restaurantId)];
+      if (!reviews) return;
+      state.user.reviews[String(restaurantId)] = reviews.map((r) =>
+        r.id === id
+          ? { ...r, content: content ?? r.content, rating: rating ?? r.rating }
+          : r,
+      );
     },
 
     removeUserReview: (state, action: PayloadAction<{ restaurantId: string | number; id: number | string }>) => {
@@ -637,6 +663,7 @@ export const userInfoSlice = createSlice({
         id: null, email: '', username: '', flipCount: 0,
         favorites: [], options: [], accepted: [], archived: [], reviews: {}, notes: {},
         addresses: [],
+        dietaryTags: [],
       };
       state.customRestaurants = {};
       state.favoriteLists = emptyFavoriteLists();
@@ -649,6 +676,7 @@ export const {
   setUserData,
   updateUserInfo,
   addUserReview,
+  editUserReview,
   removeUserReview,
   updateUserFavorites,
   addUserAcceptance,
@@ -777,6 +805,7 @@ export const loadUserData = createAsyncThunk<void, LoadUserDataArg>(
       username: user.username,
       addresses: (addresses as Address[] | undefined) ?? [],
       flipCount: user.flipCount ?? 0,
+      dietaryTags: (user as { dietaryTags?: string[] }).dietaryTags ?? [],
       favorites: favoriteIds.map(String),
       options:   optionIds.map(String),
       archived:  archivedIds.map(String),
@@ -893,6 +922,31 @@ export const persistAddReview = createAsyncThunk<void, PersistAddReviewArg>(
       content,
     });
     dispatch(addUserReview({ restaurantId, userId, id: review.id, content, rating, date }));
+  }
+);
+
+// Edits an existing review's content + rating. Guest reviews (local-* ids)
+// are updated in Redux only; authenticated users round-trip through the
+// server's PATCH /me/reviews/:id, then mirror the canonical response back
+// into the slice. Mirrors persistAddReview's auth-vs-guest branch.
+export interface PersistEditReviewArg {
+  restaurantId: string | number;
+  reviewId: number | string;
+  content: string;
+  rating: number;
+}
+
+export const persistEditReview = createAsyncThunk<void, PersistEditReviewArg>(
+  'userInfo/persistEditReview',
+  async ({ restaurantId, reviewId, content, rating }, { dispatch, getState }) => {
+    const isAuthenticated = (getState() as { auth?: { status: string } }).auth?.status === 'authenticated';
+    if (!isAuthenticated || typeof reviewId !== 'number') {
+      // Guest path OR a local-id row that hasn't reconciled yet — slice-only.
+      dispatch(editUserReview({ restaurantId, id: reviewId, content, rating }));
+      return;
+    }
+    await api.users.updateReview(reviewId, { content, rating });
+    dispatch(editUserReview({ restaurantId, id: reviewId, content, rating }));
   }
 );
 

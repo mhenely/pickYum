@@ -1,13 +1,35 @@
 import { defineConfig, type UserConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { visualizer } from 'rollup-plugin-visualizer'
 
 // Vite's UserConfig doesn't know about Vitest's `test` block. Augmenting with
 // vitest's module-augmentation has been flaky across versions, so we type the
 // config locally and cast.
 type ViteUserConfigWithTest = UserConfig & { test?: Record<string, unknown> };
 
+// Bundle analyzer is opt-in via ANALYZE=1 so normal builds stay fast and
+// CI doesn't generate a stray dist/stats.html. Run `npm run build:analyze`
+// to produce an interactive treemap of bundle sizes at dist/stats.html —
+// useful for catching accidental new heavy dependencies before they ship.
+const isAnalyzing = process.env.ANALYZE === '1';
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    ...(isAnalyzing
+      ? [visualizer({
+          filename: 'dist/stats.html',
+          template: 'treemap',
+          // Show gzip + brotli sizes alongside raw — gzip is what actually
+          // ships over the wire so it's the size that matters for users.
+          gzipSize: true,
+          brotliSize: true,
+          // `open: true` would pop the browser; suppress so CI / headless
+          // runs don't hang waiting for a tab to close.
+          open: false,
+        })]
+      : []),
+  ],
   // Sentry exposes `__SENTRY_TRACING__` and `__SENTRY_DEBUG__` as build-time
   // flags. When defined to `false`, Sentry's own tree-shaking drops the
   // tracing-only code paths (helper functions, span machinery, transport

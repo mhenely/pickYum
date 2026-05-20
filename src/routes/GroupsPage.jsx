@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { groupsApi } from '../lib/groupsApi';
+import { SkeletonList } from '../components/Skeleton';
+import SectionEmpty from '../components/SectionEmpty';
 
 const STATUS_BADGE = {
   OPEN:   { label: 'Open',   cls: 'bg-green-100 text-green-700' },
@@ -154,7 +156,7 @@ const GroupsPage = () => {
       </div>
 
       {loading && (
-        <p className="text-center text-sm text-gray-400 py-12">Loading…</p>
+        <div className="py-4"><SkeletonList count={3} /></div>
       )}
       {error && (
         <p className="text-center text-sm text-red-500 py-12">{error}</p>
@@ -226,11 +228,11 @@ const GroupsPage = () => {
           )}
 
           {groups.length === 0 && pendingInvites.length === 0 && (
-            <div className="text-center py-16 text-gray-400">
-              <p className="text-4xl mb-3">👥</p>
-              <p className="font-medium text-gray-600">No groups yet</p>
-              <p className="text-sm mt-1">Create one and invite friends to vote together.</p>
-            </div>
+            <SectionEmpty
+              icon="👥"
+              title="No groups yet"
+              subtitle="Create one and invite friends to vote together."
+            />
           )}
         </div>
       )}

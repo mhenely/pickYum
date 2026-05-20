@@ -2,10 +2,18 @@
 
 PickYum's deploy story is split:
 
-- **Frontend** → AWS Amplify Hosting. Amplify watches the repo directly and rebuilds on every push to a tracked branch. GitHub Actions plays no role in frontend deploys — Amplify is its own CI/CD pipeline.
-- **Backend** → AWS Amazon ECR (image registry) + AWS App Runner (compute). GitHub Actions (`.github/workflows/deploy.yml`) builds the Docker image, pushes to ECR, and triggers App Runner.
+- **Frontend** → AWS Amplify Hosting at `pick-yum.com`. Amplify watches the repo directly and rebuilds on every push to a tracked branch. GitHub Actions plays no role in frontend deploys — Amplify is its own CI/CD pipeline.
+- **Backend** → AWS Amazon ECR (image registry) + AWS ECS Express Mode (compute) at `api.pick-yum.com`. GitHub Actions (`.github/workflows/deploy.yml`) builds the Docker image, pushes to ECR, and triggers the service update.
+- **DNS** → Cloudflare (free tier). Holds the records that point `pick-yum.com` → Amplify and `api.pick-yum.com` → ECS, plus Resend's SPF/DKIM records and Cloudflare Email Routing for `contact@pick-yum.com`.
 
 CI (tests + typecheck) runs in GitHub Actions on every push and PR — both Amplify and the backend deploy wait for CI to pass via branch protection.
+
+> **Migration note (May 2026):** This guide originally targeted AWS App Runner.
+> App Runner closed to new customers in late 2025; new deployments use **ECS
+> Express Mode**, AWS's simplified ECS Fargate path. Part 2 below still
+> references App Runner where details haven't been ported yet — those
+> sections are flagged with a `[ECS Express: TODO]` marker and will be
+> updated as the new pipeline is finalized.
 
 ---
 
@@ -25,9 +33,10 @@ In the Amplify Console for this app → **Hosting → Environment variables** �
 
 | Variable | Value | Notes |
 |---|---|---|
-| `VITE_API_BASE_URL` | `https://api.pickyum.com` (or your backend URL) | The Express server. **Must** match the CORS `CLIENT_URL` on the backend. |
+| `VITE_API_BASE_URL` | `https://api.pick-yum.com` | The Express server. **Must** match the CORS `CLIENT_URL` on the backend. |
 | `VITE_SUPABASE_URL` | from Supabase project settings | For OAuth flows. |
 | `VITE_SUPABASE_ANON_KEY` | from Supabase project settings | Safe to expose — it's a public anon key. |
+| `VITE_GOOGLE_MAPS_API_KEY` | from Google Cloud Console | Drives the Search-page map. Restrict to Maps JS API + HTTP referrer `pick-yum.com`. |
 | `VITE_SENTRY_DSN` | from Sentry web project | Optional. Leave blank to disable client error reporting. |
 | `VITE_SENTRY_RELEASE` | `$AWS_COMMIT_ID` | Optional. Ties Sentry events to the deployed commit. |
 
@@ -50,7 +59,7 @@ This serves `index.html` for any request that isn't an asset, letting React Rout
 
 Amplify supports per-branch deploys out of the box:
 
-- **`main`** → production environment (`pickyum.com` / Amplify-provided URL).
+- **`main`** → production environment (`pick-yum.com` / Amplify-provided URL).
 - **Feature branches matching `feature/*`** → PR previews with unique URLs. Enable via "Hosting → Build settings → Build settings" → toggle "Auto build" + "Auto deploy" for branches matching `feature/*`.
 - **Pull request previews** (cross-fork) → enable "Branch auto-detection → Pull request previews". Each PR gets its own ephemeral deployment.
 
@@ -74,7 +83,67 @@ For pushes directly to main (rare on a protected branch), Amplify will still bui
 
 ---
 
-## Part 2 — Backend on AWS (ECR + App Runner)
+## Part 2 — Backend on AWS (ECR + ECS Express Mode)
+
+> **[ECS Express: TODO]** This section still documents the App Runner path
+> as a reference for how the pieces fit together (ECR repo, OIDC role, env
+> vars, deploy workflow). The ECR + GitHub Actions OIDC steps below carry
+> over to ECS Express unchanged. The "create the App Runner service" step
+> (2.1c) needs replacement with the ECS Express equivalent — TBD.
+
+### 2.0 Required environment variables (read before configuring the service)
+
+These must be set on the backend service before first boot. Server startup
+[validates them](server/src/lib/validateEnv.ts) and will `process.exit(1)`
+in production if any required-in-prod var is missing — better to fail at
+boot than to serve a broken app.
+
+**Always required:**
+
+| Variable | Notes |
+|---|---|
+| `JWT_SECRET` | 48+ random bytes. Generate with `openssl rand -base64 48`. Different per environment. |
+| `DATABASE_URL` | Supabase pooler URL (port 6543, `?pgbouncer=true`). |
+| `DIRECT_URL` | Supabase direct URL (port 5432). Used only by `prisma migrate deploy`. |
+
+**Required in production:**
+
+| Variable | Value | Why required-in-prod |
+|---|---|---|
+| `NODE_ENV` | `production` | Triggers prod-mode logging + security + this validation set. |
+| `CLIENT_URL` | `https://pick-yum.com` | CORS allowlist + outbound email link base. |
+| `API_URL` | `https://api.pick-yum.com` | OAuth callback URL construction. Silent breakage if missing — Google/Facebook would callback to localhost. |
+| `GOOGLE_PLACES_API_KEY` | from Google Cloud Console | Core feature (nearby search). Restrict the key to Places API + your backend IP if possible. |
+
+**Strongly recommended (degrade gracefully if missing, but you want them):**
+
+| Variable | Value | Without it |
+|---|---|---|
+| `REDIS_URL` | from Upstash / ElastiCache | Sessions stored in process memory, lost on restart. Multi-instance broken. |
+| `RESEND_API_KEY` | from Resend dashboard | Verify-email + password-reset emails silently no-op. |
+| `EMAIL_FROM` | `PickYum <noreply@pick-yum.com>` | Defaults to Resend sandbox address, which most providers flag as spam. |
+| `SENTRY_DSN` | from Sentry backend project | No error reporting. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Settings → API → service_role | Restaurant photo storage disabled — cards render no photos after materialize. **Server-only; never expose to the client.** |
+| `SUPABASE_STORAGE_BUCKET` | `restaurant-photos` (default) | Bucket name override if you've named it differently in the Supabase dashboard. |
+
+**Optional:**
+
+| Variable | Notes |
+|---|---|
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Enables `/api/auth/supabase` for Supabase OAuth flow. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Direct Google OAuth via Passport. Skip if using Supabase OAuth. |
+| `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET` | Direct Facebook OAuth. |
+| `SENTRY_RELEASE` | Tags errors with the build commit. Wire via `git rev-parse HEAD` in CI. |
+| `LOG_LEVEL` | Override log verbosity. Defaults to `info` in prod. |
+| `SESSION_TTL_HOURS` | Group voting session lifetime. Defaults to `4`. |
+| `BULK_REFRESH_LIMIT_MAX` | Cap on `/me/refresh-places` calls per 15-min window. Default 10 (≈$13/hr worst case). Bump in dev when refilling many stale rows. |
+| `PER_ROW_REFRESH_LIMIT_MAX` | Cap on `/me/refresh-restaurant/:id` calls per 15-min window. Default 60. Photo-backfill JIT refreshes use this; raise if users routinely have >60 saved rows with stale Google data. |
+
+**⛔ Never set in production:**
+
+| Variable | Why |
+|---|---|
+| `E2E_TEST_HOOKS` | Exposes `/api/__test/*` routes — security hole if enabled in prod. |
 
 ### 2.1 One-time AWS setup
 
@@ -163,23 +232,26 @@ GitHub Actions uses OIDC to assume a role temporarily — no long-lived AWS keys
 
 5. **Note the role ARN** — you'll set it as a GitHub secret.
 
-#### 2.1c — Create the App Runner service
+#### 2.1c — Create the backend service
 
-In the AWS Console, App Runner → "Create service":
-- **Source**: Container registry → Amazon ECR
-- **Provider**: Browse → select `pickyum-server` → choose tag `latest`
-- **Deployment trigger**: Manual (we trigger via the workflow)
-- **ECR access role**: Let App Runner create one
+> **[ECS Express: TODO]** Replace this subsection with the ECS Express
+> Mode steps once the new pipeline is locked in. The placeholder below
+> documents what was previously done with App Runner.
+
+The service that pulls images from ECR and runs the container. Settings:
+
+- **Source**: Amazon ECR → repository `pickyum-server` → tag `latest`
+- **Deployment trigger**: Manual (we trigger via the workflow, not on every push to the registry)
 - **Service config**:
   - Name: `pickyum-server-staging` (and a separate `pickyum-server-production` for prod)
-  - vCPU: `0.25` / Memory: `0.5 GB` for staging; bump for prod
-  - Port: `3000`
-  - Environment variables: paste in everything from `server/.env.example` (real values per environment — different `DATABASE_URL`, `JWT_SECRET`, `RESEND_API_KEY`, etc. for staging vs prod)
-  - Health check path: `/api/health`
-  - Auto-scaling: defaults (1 min instance, scales out under load)
-- **Networking**: VPC connector if you want Redis/RDS in a private VPC; public access otherwise.
+  - vCPU/memory: `0.25 vCPU / 0.5 GB` for staging; bump for prod once you have load numbers
+  - Port: `3000` (the Dockerfile listens on `PORT || 3000`)
+  - **Environment variables**: see section 2.0 above for the complete list
+  - **Health check path**: `/api/health/ready` (not `/api/health` — the readiness endpoint also checks DB + Redis, so a degraded instance gets pulled from rotation)
+  - Auto-scaling: defaults are fine to start
+- **Networking**: VPC connector if Redis/RDS is in a private VPC; public otherwise
 
-Note the **Service ARN** App Runner displays after creation — you'll need it for the GitHub secret.
+Note the **Service ARN / identifier** — you'll need it for the GitHub secret in section 2.2.
 
 ### 2.2 GitHub secrets and variables
 
@@ -200,8 +272,8 @@ Repo → Settings → Secrets and variables → Actions.
 |---|---|
 | `AWS_REGION` | e.g. `us-east-1` |
 | `APP_RUNNER_ENABLED` | `true` |
-| `STAGING_BACKEND_URL` | e.g. `https://api-staging.pickyum.com` |
-| `PRODUCTION_BACKEND_URL` | e.g. `https://api.pickyum.com` |
+| `STAGING_BACKEND_URL` | e.g. `https://api-staging.pick-yum.com` |
+| `PRODUCTION_BACKEND_URL` | e.g. `https://api.pick-yum.com` |
 
 ### 2.3 Production approval gate
 
@@ -216,7 +288,7 @@ The `deploy-production` job in `deploy.yml` references this environment — GitH
 1. Push something to main → CI runs.
 2. After CI passes, the deploy workflow auto-runs: builds image, pushes to ECR, calls `aws apprunner start-deployment` on staging.
 3. Watch the App Runner service in the AWS Console — it pulls the new image and rolls over in ~3–5 minutes.
-4. Hit `https://api-staging.pickyum.com/api/health/ready` — should return `{"status":"ready","checks":...}`.
+4. Hit `https://api-staging.pick-yum.com/api/health/ready` — should return `{"status":"ready","checks":...}`.
 5. To promote to production: Actions tab → "Backend Deploy" → "Run workflow" → choose `main`. The workflow pauses at the production job for your approval click.
 
 ---
@@ -233,6 +305,17 @@ The `deploy-production` job in `deploy.yml` references this environment — GitH
 - Amplify Console → Hosting → Build history shows build/deploy logs for the frontend.
 - App Runner Console → Service → Logs streams the Pino JSON logs from the backend (CloudWatch Logs under the hood).
 - For aggregation, point CloudWatch Logs to a destination of your choice (Datadog, Logtail, etc.) via subscription filters.
+
+### Bundle size
+
+Frontend bundle visualizer is opt-in:
+
+```bash
+npm run build:analyze
+open dist/stats.html
+```
+
+Generates an interactive treemap (gzip + brotli sizes) of every chunk. Worth running before adding a heavy dependency, or after a big refactor, to catch unintended growth. Normal `npm run build` skips the analyzer step.
 
 ### Rollbacks
 

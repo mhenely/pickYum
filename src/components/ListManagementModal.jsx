@@ -46,17 +46,26 @@ export default function ListManagementModal({ open, onClose }) {
   async function handleReorder(idx, direction) {
     const swapWith = idx + direction;
     if (swapWith < 0 || swapWith >= lists.length) return;
+    // Snapshot the original order so we can roll back atomically if the
+    // server rejects the reorder. Cheaper + more responsive than a full
+    // /me/all refetch — the UI snaps back in one render rather than
+    // sitting in a stale state until the next dispatch completes.
+    const previousOrder = lists.map((l) => l.id);
     const next = [...lists];
     [next[idx], next[swapWith]] = [next[swapWith], next[idx]];
     const order = next.map((l) => l.id);
-    // Optimistic — apply locally first so the row visually moves
-    // before the server round-trip completes. On failure we re-fetch
-    // /me/all in a follow-up (TODO).
+    // Optimistic — apply locally first so the row visually moves before
+    // the server round-trip completes.
     dispatch(setFavoriteListsOrder(order));
+    setError(null);
     try {
       await api.users.reorderFavoriteLists(order);
     } catch (err) {
-      setError(err?.message ?? 'Reorder failed — refresh to see the canonical order');
+      // Roll back to the pre-reorder order so the visible state matches
+      // the server's last-known-good ordering. Surface a brief error so
+      // the user knows their action didn't stick.
+      dispatch(setFavoriteListsOrder(previousOrder));
+      setError(err?.message ?? 'Reorder failed — your previous order has been restored');
     }
   }
 

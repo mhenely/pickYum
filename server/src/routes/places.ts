@@ -3,6 +3,7 @@ import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/auth';
 import redis from '../lib/redis';
 import { trackGoogleCall } from '../lib/apiUsage';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -451,11 +452,24 @@ router.get('/photo', photoCorpHeader, photoLimiter, async (req: Request, res: Re
         return;
       }
     }
-    // Non-redirect response or missing Location — treat as upstream failure.
+    // Non-redirect (no 3xx Location) — Google returned an actual status
+    // body. Read the body for diagnostics. Most common case in practice:
+    // 400 INVALID_ARGUMENT with the message "The photo resource in the
+    // request is invalid. Please retrieve it from Places API endpoints."
+    // This happens for stored refs that Google has rotated/removed since
+    // we cached them — Google's docs claim refs are persistent but they
+    // empirically aren't. Client recovers via `useRestaurantPhotoBackfill`
+    // firing a per-restaurant Place Details refresh when the <img> errors;
+    // server side just needs to surface enough info to debug.
+    const upstreamBody = await upstream.text().catch(() => '');
+    logger.warn(
+      { upstreamStatus: upstream.status, upstreamBody: upstreamBody.slice(0, 400), name },
+      'photo proxy: upstream returned non-3xx',
+    );
     trackGoogleCall(req, 'photo', { status: 'error' });
     res.status(502).json({ error: 'Photo unavailable' });
   } catch (err) {
-    console.warn('[places] photo proxy failed:', err);
+    logger.warn({ err, name }, '[places] photo proxy threw');
     trackGoogleCall(req, 'photo', { status: 'error' });
     res.status(502).json({ error: 'Photo unavailable' });
   }

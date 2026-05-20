@@ -3,7 +3,9 @@ import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
-import { createSession, getSession, generateSessionId, withSessionLock, RestaurantSnapshot } from '../sessions';
+import { getSession, withSessionLock } from '../sessions';
+import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
+import { notifyUser } from '../lib/userNotifications';
 
 const router = Router();
 router.use(requireAuth);
@@ -151,53 +153,17 @@ async function enrichVoterMeta(results: Array<{ voterMeta: unknown } | null | un
 // in Redis only after the claim wins is what prevents the orphan-session
 // leak: a session created in Redis before a failed DB claim used to live
 // for the full TTL (~4h) and be joinable by anyone who knew the id.
-async function launchVoting(groupId: number, eventId: number) {
-  const event = await prisma.groupEvent.findUnique({
-    where: { id: eventId },
-    include: {
-      group: { include: { host: { select: { id: true, username: true } } } },
-      options: { include: { restaurant: true } },
-    },
+// Wrapper around the shared lib/eventLifecycle.launchVoting helper. Looks
+// up the group's host (the unified helper takes hostId rather than fetching
+// it from the event's parent, since trips and groups discover the host
+// differently). Local function name kept for readability at call sites.
+async function launchGroupVotingForId(groupId: number, eventId: number) {
+  const group = await prisma.group.findUnique({
+    where: { id: groupId },
+    select: { hostId: true },
   });
-  // event.group is nullable on the type because GroupEvent.groupId is now
-  // optional (trip events live in the same table). Narrowing through groupId
-  // alone doesn't propagate to the relation, so we check both. In practice
-  // event.group is non-null whenever groupId equals our group's id.
-  if (!event || event.groupId !== groupId || !event.group || event.status !== 'OPEN') return null;
-  if (event.options.length < 2) return null;
-
-  // 1. Pre-allocate an id. 2. Claim it in the DB atomically — if status
-  // isn't still OPEN, we lost the race; bail. 3. Only on win, materialize
-  // the session in Redis with the same id.
-  const sessionId = generateSessionId();
-  const updated = await prisma.groupEvent.updateMany({
-    where: { id: eventId, status: 'OPEN' },
-    data:  { status: 'VOTING', sessionId },
-  });
-  if (updated.count === 0) return null;
-
-  const candidates = event.options.map((o) => String(o.restaurantId));
-  const restaurants: Record<string, RestaurantSnapshot> = {};
-  for (const opt of event.options) {
-    const r = opt.restaurant;
-    restaurants[String(r.id)] = { name: r.name, type: r.cuisineType ?? 'Restaurant', price: r.priceLevel ?? 1 };
-  }
-
-  const session = await createSession(
-    event.group.host.id,
-    event.group.host.username,
-    candidates,
-    restaurants,
-    groupId,
-    eventId,
-    event.scheduledFor?.toISOString() ?? null,
-    event.voteMethod === 'RANKED' ? 'ranked' : 'simple',
-    event.group.host.username, // hostUsername = same as hostName for group sessions
-    0,                          // tripId — not a trip session
-    sessionId,                  // preallocatedId so the Redis blob matches the DB column
-  );
-
-  return session;
+  if (!group) return null;
+  return launchVoting('group', groupId, eventId, group.hostId);
 }
 
 // ── List & create groups ──────────────────────────────────────
@@ -255,7 +221,7 @@ router.get('/', async (req: Request, res: Response) => {
       include: {
         group: {
           include: {
-            host: { select: { id: true, username: true, avatarUrl: true } },
+            host: { select: { id: true, username: true, avatarUrl: true, dietaryTags: true } },
             ...listGroupShape,
           },
         },
@@ -306,7 +272,7 @@ router.post('/', async (req: Request, res: Response) => {
   const group = await prisma.group.create({
     data: { name: trimmed, hostId: req.userId },
     include: {
-      host: { select: { id: true, username: true, avatarUrl: true } },
+      host: { select: { id: true, username: true, avatarUrl: true, dietaryTags: true } },
       members: true,
       events: true,
       invites: true,
@@ -339,15 +305,15 @@ router.get('/:id', async (req: Request, res: Response) => {
       select: { id: true },
     });
     if (overdue.length > 0) {
-      await Promise.all(overdue.map((ev) => launchVoting(groupId, ev.id)));
+      await Promise.all(overdue.map((ev) => launchGroupVotingForId(groupId, ev.id)));
     }
   }
 
   const group = await prisma.group.findUnique({
     where: { id: groupId },
     include: {
-      host:    { select: { id: true, username: true, avatarUrl: true } },
-      members: { include: { user: { select: { id: true, username: true, avatarUrl: true } } }, orderBy: { joinedAt: 'asc' } },
+      host:    { select: { id: true, username: true, avatarUrl: true, dietaryTags: true } },
+      members: { include: { user: { select: { id: true, username: true, avatarUrl: true, dietaryTags: true } } }, orderBy: { joinedAt: 'asc' } },
       invites: {
         include: {
           invited:   { select: { id: true, username: true, avatarUrl: true } },
@@ -491,6 +457,7 @@ router.post('/:id/invite', async (req: Request, res: Response) => {
     update: { status: 'PENDING' },
     include: { invited: { select: { id: true, username: true, avatarUrl: true } } },
   });
+  notifyUser(targetId, 'group-invite');
   res.status(201).json({ invite });
 });
 
@@ -536,6 +503,14 @@ router.delete('/:id/members/:userId', async (req: Request, res: Response) => {
   if (targetId === group.hostId) { res.status(400).json({ error: 'Host cannot be removed — disband the group instead' }); return; }
 
   await prisma.groupMember.deleteMany({ where: { groupId, userId: targetId } });
+
+  // Revoke voter tokens on any currently-VOTING group events the removed
+  // member is holding open. Shared with the equivalent trip flow via
+  // lib/eventLifecycle. Closes a longstanding drift: trips revoked tokens
+  // on member removal, groups didn't — a removed member's ballot kept
+  // working until the session TTL'd (~4h).
+  await revokeVoterTokensForUserOnParent('group', groupId, targetId);
+
   res.json({ message: isSelf ? 'Left group' : 'Member removed' });
 });
 
@@ -757,7 +732,7 @@ router.post('/:id/events/:eventId/start-voting', async (req: Request, res: Respo
   if (!event || event.groupId !== groupId) { res.status(404).json({ error: 'Event not found' }); return; }
   if (event.status !== 'OPEN') { res.status(400).json({ error: 'Voting has already started for this event' }); return; }
 
-  const session = await launchVoting(groupId, eventId);
+  const session = await launchGroupVotingForId(groupId, eventId);
   if (!session) { res.status(400).json({ error: 'Need at least 2 restaurants to start voting' }); return; }
 
   res.json({ sessionId: session.id });

@@ -9,6 +9,8 @@ import { useFlag } from '../hooks/useFlag';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import useCurrentUser from '../hooks/useCurrentUser';
 import { buildAcceptedStats, formatLastChosen } from '../utils/acceptedStats';
+import { SkeletonList } from '../components/Skeleton';
+import SectionEmpty from '../components/SectionEmpty';
 
 // ── Confirmation modal ────────────────────────────────────────
 
@@ -81,6 +83,12 @@ const UserHistoryPage = () => {
   const dispatch = useDispatch();
   const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
   const allRestaurants = customRestaurants;
+  // While the initial /me/all fetch is in flight, distinguish "empty
+  // history" from "still loading" — without this we'd flash the empty
+  // copy ("No restaurants in your history yet…") for a beat before the
+  // real data arrives. isDataLoaded flips true once loadUserData's
+  // thunk resolves.
+  const isDataLoaded = useSelector((state) => state.userInfo.isDataLoaded);
   // Flag-gated kill switch — see server/src/lib/flags.ts. Default true,
   // flipped to false via FLAG_INSIGHTS_OPT_OUT_VISIBLE=false if the
   // toggle ever exposes a bug we need to suppress without a redeploy
@@ -232,12 +240,27 @@ const UserHistoryPage = () => {
       </div>
 
       {/* ── Active history ────────────────────────────────────── */}
-      {displayIds.length === 0 && (
-        <p className="text-gray-500 text-sm mb-6">
-          {favoritesOnly
-            ? 'No favorited restaurants in your history yet.'
-            : 'No restaurants in your history yet. Accept one from the coin flip to get started.'}
-        </p>
+      {/* While loadUserData is still in flight, show a skeleton grid
+          instead of flashing the "empty history" copy for a beat. Once
+          isDataLoaded flips true we render either the empty state or the
+          real card grid below. */}
+      {!isDataLoaded && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
+          <SkeletonList count={6} />
+        </div>
+      )}
+      {isDataLoaded && displayIds.length === 0 && (
+        <div className="mb-6">
+          <SectionEmpty
+            icon={favoritesOnly ? '❤️' : '🍽'}
+            title={favoritesOnly
+              ? 'No favorited restaurants in your history yet'
+              : 'No restaurants in your history yet'}
+            subtitle={favoritesOnly
+              ? 'Toggle Favorites off to see everything you\'ve picked.'
+              : 'Accept one from the coin flip to get started.'}
+          />
+        </div>
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

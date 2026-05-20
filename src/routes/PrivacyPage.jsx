@@ -3,13 +3,7 @@ import { Link } from 'react-router-dom';
 const PrivacyPage = () => (
   <div className="max-w-3xl mx-auto px-4 py-8 prose prose-sm prose-orange">
     <h1 className="text-2xl font-bold text-gray-900 mb-2">Privacy Policy</h1>
-    <p className="text-xs text-gray-400 mb-6">Last updated: 2026-05-07</p>
-
-    <p className="text-sm text-gray-700 leading-relaxed">
-      This is a generic, good-faith starting point — replace it with a tailored policy reviewed
-      by a lawyer before public launch in your jurisdiction. PickYum is a personal project at
-      the time of writing.
-    </p>
+    <p className="text-xs text-gray-400 mb-6">Last updated: 2026-05-19</p>
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">What we collect</h2>
     <ul className="text-sm text-gray-700 space-y-1.5 list-disc pl-5">
@@ -38,7 +32,7 @@ const PrivacyPage = () => (
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Your rights</h2>
     <ul className="text-sm text-gray-700 space-y-1.5 list-disc pl-5">
-      <li><strong>Access / export</strong>: contact us and we'll send you a copy of your data.</li>
+      <li><strong>Access / export</strong>: download a JSON copy of your data from the Danger Zone on your profile page, or contact us if you need a different format.</li>
       <li><strong>Deletion</strong>: delete your account from your profile page. Your account, favorites, options, history, and group memberships are permanently removed. Your reviews are kept by default but anonymized — they appear as <em>[deleted user]</em> on each restaurant's page so the community keeps the rating data. The delete-account dialog has an optional "also remove my reviews" checkbox if you want those gone too. Group <em>events</em> you participated in remain (with your username) so other participants' history stays consistent.</li>
       <li><strong>Correction</strong>: edit your profile from the settings page.</li>
       <li><strong>EU/UK residents (GDPR)</strong>: you have the right to portability, erasure, and to object. Email us to exercise them.</li>
@@ -52,7 +46,7 @@ const PrivacyPage = () => (
     <p className="text-sm text-gray-700">If we materially change this policy, we'll notify active accounts by email and update the "Last updated" date above.</p>
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Contact</h2>
-    <p className="text-sm text-gray-700">Questions, deletion requests, or anything else: <em>[your contact email]</em>.</p>
+    <p className="text-sm text-gray-700">Questions, deletion requests, or anything else: <a href="mailto:contact@pick-yum.com" className="text-orange-600 hover:underline">contact@pick-yum.com</a>.</p>
 
     <div className="mt-10 pt-6 border-t border-gray-200">
       <Link to="/" className="text-sm text-orange-600 hover:underline">← Back to PickYum</Link>

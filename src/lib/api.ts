@@ -127,6 +127,13 @@ export interface AuthUser {
   username: string;
   flipCount?: number;
   avatarUrl?: string | null;
+  // Dietary restrictions/preferences surfaced on group/trip member rows.
+  // Lowercased, deduped, ≤10 entries. Empty array for users who haven't
+  // set any (the column default).
+  dietaryTags?: string[];
+  // True once the user has clicked the link in their verification email.
+  // The navbar shows a "verify your email" banner when this is false.
+  emailVerified?: boolean;
 }
 
 // Address book entry — replaces the older single defaultAddress string on
@@ -200,12 +207,26 @@ export interface ApiRestaurant {
   googleReviews?: PlacesReview[] | null;
 }
 
-// Build the URL for a Google Places photo via our server-side proxy. Keeps
-// the Google API key out of client JS — the proxy 302-redirects to a
-// signed Google CDN URL. `maxWidthPx` is clamped server-side to
-// [100, 1600]; pick the smallest size you can render (mobile thumb ~400,
-// modal hero ~1200).
+// Build the URL for a restaurant photo. Two cases the function handles:
+//
+//   1. Saved/materialized photos: `photo.name` is already a public Supabase
+//      Storage URL (added at materialize time — see
+//      server/src/lib/photoStorage.ts). The browser hits the CDN directly,
+//      no proxy involved, no per-view Google API call.
+//
+//   2. Live search results: `photo.name` is a Google Places reference like
+//      `places/X/photos/Y`. We route through the proxy at /api/places/photo
+//      because the API key stays server-side and the proxy 302-redirects
+//      to Google's signed CDN URL. `maxWidthPx` is clamped server-side to
+//      [100, 1600]; pick the smallest you can render (card thumb ~400,
+//      modal hero ~1200).
+//
+// The "is this a stored URL?" check is `startsWith('http')` rather than a
+// stricter URL regex — Supabase URLs all start with https://, and Google
+// refs always start with `places/`, so the distinction is cleanly
+// disjoint. If we ever store a non-http scheme, this check has to evolve.
 export function placePhotoUrl(photo: PlacesPhoto, maxWidthPx = 400): string {
+  if (photo.name.startsWith('http')) return photo.name;
   const base = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
   const params = new URLSearchParams({ name: photo.name, maxWidthPx: String(maxWidthPx) });
   return `${base}/api/places/photo?${params.toString()}`;
@@ -457,6 +478,22 @@ export const api = {
     // longer accepts a defaultAddress field.
     updateProfile: (body: { email?: string; username?: string; password?: string; currentPassword?: string }) =>
       request<{ user: AuthUser }>('/api/users/me', { method: 'PATCH', body: JSON.stringify(body) }),
+    // Replaces the caller's dietary tag list. Server normalizes (trim,
+    // lowercase, dedupe) and caps at 10 entries × 40 chars each.
+    setDietaryTags: (tags: string[]) =>
+      request<{ user: { id: number; dietaryTags: string[] } }>('/api/users/me/dietary-tags', {
+        method: 'PATCH',
+        body: JSON.stringify({ tags }),
+      }),
+    // Sets the caller's avatar from a base64 data URL (image/png|jpeg|gif|
+    // webp), or clears it when `dataUrl` is null. Server validates type +
+    // magic bytes and caps decoded size at 100KB — callers should downscale
+    // client-side before posting (helper in src/utils/downscaleAvatar.ts).
+    setAvatar: (dataUrl: string | null) =>
+      request<{ user: { id: number; avatarUrl: string | null } }>('/api/users/me/avatar', {
+        method: 'PATCH',
+        body: JSON.stringify({ dataUrl }),
+      }),
 
     // ── Address book ─────────────────────────────────────────────
     // Used by UserInfoPage (full CRUD) and SearchPage (read for the
@@ -471,6 +508,37 @@ export const api = {
       request<{ address: SavedAddress }>(`/api/users/me/addresses/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
     deleteAddress: (id: number) =>
       request<{ message: string }>(`/api/users/me/addresses/${id}`, { method: 'DELETE' }),
+    // Triggers a browser download of the user's data export. Fetches the
+    // JSON blob with credentials (cookie auth — direct-href download
+    // wouldn't carry the cookie reliably in cross-origin dev setups),
+    // then creates an object URL and clicks a hidden anchor to save.
+    // Throws on non-2xx so the caller can surface an error.
+    exportData: async () => {
+      const res = await fetch(`${BASE}/api/users/me/export`, { credentials: 'include' });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      // Use the server's filename if provided via Content-Disposition,
+      // otherwise fall back to a date-stamped default.
+      const disposition = res.headers.get('Content-Disposition') ?? '';
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const filename = match?.[1] ?? `pickyum-export-${new Date().toISOString().split('T')[0]}.json`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Object URLs leak the underlying blob until the page unloads
+      // unless explicitly revoked. Wait one tick so the download
+      // initiates (Safari is sensitive to revoking too early), then
+      // free the memory.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+
     // Account deletion. By default the user's reviews are anonymized
     // (userId → null) so they stay in each restaurant's community pool. Pass
     // `retractReviews: true` to additionally delete the review rows entirely
@@ -635,6 +703,10 @@ export const api = {
       request<{ reviews: ApiReview[] }>('/api/users/me/reviews'),
     addReview: (body: { restaurantId: number; rating: number; content?: string }) =>
       request<{ review: ApiReview }>('/api/users/me/reviews', { method: 'POST', body: JSON.stringify(body) }),
+    // Partial-update: either or both of rating + content. Pass content: ''
+    // (or null) to clear the body. Preserves the original createdAt.
+    updateReview: (id: number, body: { rating?: number; content?: string | null }) =>
+      request<{ review: ApiReview }>(`/api/users/me/reviews/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
     deleteReview: (id: number) =>
       request('/api/users/me/reviews/' + id, { method: 'DELETE' }),
     refreshPlaces: () =>
@@ -771,6 +843,11 @@ export const api = {
       request<{ trip?: ApiTrip; message?: string }>(`/api/trips/${id}/invites/${inviteId}/respond`, { method: 'POST', body: JSON.stringify({ action }) }),
     listMyInvites: () =>
       request<{ invites: ApiTripIncomingInvite[] }>('/api/trips/me/invites'),
+    // Active meals the user has been explicitly invited to via a subset
+    // `participantUserIds`. Excludes meals the user created and meals
+    // already DONE. Polled by the navbar bell alongside trip invites.
+    listMyParticipantMeals: () =>
+      request<{ meals: ApiTripParticipantMeal[] }>('/api/trips/me/participant-meals'),
     removeMember: (id: number, userId: number) =>
       request<{ trip?: ApiTrip; message?: string }>(`/api/trips/${id}/members/${userId}`, { method: 'DELETE' }),
     addAnchor: (id: number, body: { label: string; address: string; isPrimary?: boolean }) =>
@@ -818,6 +895,10 @@ export const api = {
       request<{ message: string }>(`/api/trips/${id}/events/${eventId}/accept-result`, { method: 'POST' }),
     getEvent: (id: number, eventId: number) =>
       request<{ event: ApiTripMealEvent }>(`/api/trips/${id}/events/${eventId}`),
+    // Trip-scoped insights rollup over completed meal events. Mirrors
+    // groupsApi.getInsights with one extra field (mealSlotCounts).
+    getInsights: (id: number) =>
+      request<ApiTripInsights>(`/api/trips/${id}/insights`),
   },
 };
 
@@ -825,7 +906,7 @@ export const api = {
 export interface ApiTripMember {
   userId: number;
   joinedAt: string;
-  user: { id: number; username: string; avatarUrl: string | null };
+  user: { id: number; username: string; avatarUrl: string | null; dietaryTags?: string[] };
 }
 
 export interface ApiTripAnchor {
@@ -845,6 +926,23 @@ export interface ApiTripInvite {
   createdAt: string;
   invited:   { id: number; username: string; avatarUrl: string | null };
   invitedBy: { id: number; username: string; avatarUrl: string | null };
+}
+
+// Row returned by /me/participant-meals — one entry per active meal the
+// user is explicitly invited to. Denormalized with the trip header + the
+// creator so the bell can render "Alice planned Saturday brunch for you"
+// without a follow-up fetch.
+export interface ApiTripParticipantMeal {
+  id: number;
+  tripId: number;
+  name: string;
+  status: 'OPEN' | 'VOTING';
+  mealSlot: TripMealSlot | null;
+  scheduledFor: string | null;
+  createdAt: string;
+  sessionId: string | null;
+  trip: { id: number; name: string; destination: string };
+  createdBy: { id: number; username: string; avatarUrl: string | null } | null;
 }
 
 // Shape returned by /me/invites — pendings only, denormalized with the
@@ -898,6 +996,33 @@ export interface ApiTripMealResult {
   irvRounds: unknown;
   restaurantPool: unknown;
   createdAt: string;
+}
+
+// Aggregate rollup over a trip's completed meal events. Same shape family as
+// the group insights blob, with one trip-specific addition (mealSlotCounts).
+export interface ApiTripInsights {
+  totalEvents: number;
+  distinctWinners: number;
+  methodCounts: Record<string, number>;
+  voteMethodCounts: Record<string, number>;
+  mealSlotCounts: Record<string, number>;
+  memberAppearances: Record<string, number>;
+  memberWinAccuracy: Record<string, { picks: number; wins: number; rate: number }>;
+  memberCuisines: Record<string, Array<{ cuisine: string; count: number }>>;
+  topConsidered: Array<{ restaurantId: string; name: string; considered: number; wins: number; winRate: number }>;
+  oftenSkipped:  Array<{ restaurantId: string; name: string; considered: number; wins: number; winRate: number }>;
+  topWinners:    Array<{ restaurantId: string; name: string; considered: number; wins: number; winRate: number }>;
+  recent: Array<{
+    eventId: number | null;
+    eventName: string | null;
+    winnerName: string;
+    method: string;
+    voteMethod: string | null;
+    mealSlot: TripMealSlot | null;
+    participants: string[];
+    acceptedAt: string;
+    scheduledFor: string | null;
+  }>;
 }
 
 export interface ApiTripMealEvent {

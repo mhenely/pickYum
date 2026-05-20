@@ -4,10 +4,10 @@ import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
 import {
-  createSession, getSession, generateSessionId, withSessionLock,
-  saveSession, notifyClients,
-  type RestaurantSnapshot,
+  getSession, withSessionLock,
 } from '../sessions';
+import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
+import { notifyUser } from '../lib/userNotifications';
 
 const router = Router();
 router.use(requireAuth);
@@ -66,72 +66,11 @@ async function checkTripAuth(tripId: number, userId: number): Promise<TripAuth> 
   };
 }
 
-// Creates a voting session for a trip meal event and atomically flips the
-// event from OPEN → VOTING. Mirrors the pattern in groups.ts's launchVoting.
-// Returns the new session or null if the event isn't startable (wrong status,
-// too few options, racing concurrent caller). Used by:
-//   - POST /:id/events/:eventId/start-voting (host manual start)
-//   - GET  /:id (lazy auto-start for events past their votingStartsAt)
-//
-// Race-safety: same pattern as groups.ts. Pre-allocate the session id and
-// claim it via an `updateMany` guarded on status='OPEN' BEFORE creating the
-// Redis blob. The previous order (create-then-claim) leaked an orphan
-// votable session for the full TTL whenever the on-read auto-launch sweeper
-// and the manual /start-voting raced.
+// Wrapper around the shared lib/eventLifecycle.launchVoting helper, kept
+// for call-site readability. Delegates to the polymorphic implementation
+// that also powers groups. See that module for the race-safety contract.
 async function launchTripVoting(tripId: number, eventId: number, hostId: number) {
-  const event = await prisma.groupEvent.findUnique({
-    where: { id: eventId },
-    include: { options: { include: { restaurant: true } } },
-  });
-  if (!event || event.tripId !== tripId || event.status !== 'OPEN') return null;
-  if (event.options.length < 2) return null;
-
-  // Host username is needed for voterMeta + the session's hostName field.
-  // If the host's row has somehow vanished we bail out — the auto-start
-  // call site will silently skip; the manual start route will 500 (which
-  // is the appropriate signal for "host got deleted between request and
-  // dispatch", a should-never-happen case).
-  const hostUser = await prisma.user.findUnique({
-    where: { id: hostId },
-    select: { username: true },
-  });
-  if (!hostUser) return null;
-
-  // Claim the session id atomically before creating it in storage. Lose
-  // the race → bail; nothing in Redis to leak.
-  const sessionId = generateSessionId();
-  const updated = await prisma.groupEvent.updateMany({
-    where: { id: eventId, status: 'OPEN' },
-    data:  { status: 'VOTING', sessionId },
-  });
-  if (updated.count === 0) return null;
-
-  const candidates = event.options.map((o) => String(o.restaurantId));
-  const restaurants: Record<string, RestaurantSnapshot> = {};
-  for (const opt of event.options) {
-    const r = opt.restaurant;
-    restaurants[String(r.id)] = {
-      name:  r.name,
-      type:  r.cuisineType ?? 'Restaurant',
-      price: r.priceLevel ?? 1,
-    };
-  }
-
-  const session = await createSession(
-    hostId,
-    hostUser.username,
-    candidates,
-    restaurants,
-    0,                                              // groupId — none for trip
-    eventId,
-    event.scheduledFor?.toISOString() ?? null,
-    event.voteMethod === 'RANKED' ? 'ranked' : 'simple',
-    hostUser.username,
-    tripId,
-    sessionId,                                      // preallocated to match DB claim
-  );
-
-  return session;
+  return launchVoting('trip', tripId, eventId, hostId);
 }
 
 // Slim include for `GET /api/trips` — the list endpoint. The Trips landing
@@ -170,7 +109,7 @@ const tripInclude = {
     select: {
       userId: true,
       joinedAt: true,
-      user: { select: { id: true, username: true, avatarUrl: true } },
+      user: { select: { id: true, username: true, avatarUrl: true, dietaryTags: true } },
     },
     orderBy: { joinedAt: 'asc' as const },
   },
@@ -452,6 +391,7 @@ router.post('/:id/invites', async (req: Request, res: Response) => {
     create: { tripId, invitedId: targetUser.id, invitedById: req.userId, status: 'PENDING' },
     update: { status: 'PENDING', invitedById: req.userId },
   });
+  notifyUser(targetUser.id, 'trip-invite');
 
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: tripInclude });
   res.status(201).json({ trip, invite });
@@ -524,6 +464,9 @@ router.post('/:id/invites/import-from-group', async (req: Request, res: Response
       data:  { status: 'PENDING', invitedById: req.userId },
     });
     invited = limited.length;
+    // Notify every freshly-invited user. Fire-and-forget per user — the
+    // notification path is best-effort and never blocks the request.
+    for (const id of limited) notifyUser(id, 'trip-invite');
   }
 
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: tripInclude });
@@ -605,6 +548,53 @@ router.get('/me/invites', async (req: Request, res: Response) => {
   res.json({ invites });
 });
 
+// GET /api/trips/me/participant-meals — active meals the current user has
+// been explicitly invited to (i.e. the meal's `participantUserIds` is a
+// non-empty subset that includes them). Surfaces in the navbar bell so the
+// host's "Saturday brunch — Alice, Bob only" lands as a notification, not
+// just a row buried on the trip detail page.
+//
+// Filtering rules:
+//   - status != DONE (the badge naturally clears once the meal is decided)
+//   - user is in participantUserIds (the subset feature is the whole point)
+//   - user is NOT the creator (no self-pings)
+//   - user IS a member of the trip (defensive — the FK lets a stale
+//     participantUserIds row outlive removal; the trip member-removal
+//     handler does clean up, but belt-and-braces)
+router.get('/me/participant-meals', async (req: Request, res: Response) => {
+  const meals = await prisma.groupEvent.findMany({
+    where: {
+      tripId:             { not: null },
+      status:             { not: 'DONE' },
+      participantUserIds: { has: req.userId },
+      // Exclude meals the requester created themselves.
+      NOT: { createdById: req.userId },
+      // Trip must still exist (the FK cascades on delete, so this is mostly
+      // a no-op) AND the user must still be a member. The membership filter
+      // is the load-bearing one — it gates leftover participantUserIds rows
+      // for ex-members.
+      trip: {
+        archivedAt: null,
+        members: { some: { userId: req.userId } },
+      },
+    },
+    select: {
+      id: true,
+      tripId: true,
+      name: true,
+      status: true,
+      mealSlot: true,
+      scheduledFor: true,
+      createdAt: true,
+      sessionId: true,
+      trip: { select: { id: true, name: true, destination: true } },
+      createdBy: { select: { id: true, username: true, avatarUrl: true } },
+    },
+    orderBy: [{ scheduledFor: 'asc' }, { createdAt: 'desc' }],
+  });
+  res.json({ meals });
+});
+
 // DELETE /api/trips/:id/members/:userId — host removes a member, or a
 // member removes themselves (leave). Host can't remove themselves; they
 // must archive the trip or (future) transfer host first.
@@ -629,41 +619,10 @@ router.delete('/:id/members/:userId', async (req: Request, res: Response) => {
 
   await prisma.tripMember.deleteMany({ where: { tripId, userId: targetId } });
 
-  // Revoke any active voter tokens the removed user holds on this trip's
-  // currently-voting meals. Without this, the removed member retains a
-  // working ballot — the trip-membership check at /join runs only on join,
-  // not on /vote, so their already-issued voterToken keeps working until
-  // the session TTLs (~4h). We can't reliably map auth user → display name
-  // without the session's voterMeta, so we open each active session under
-  // its lock and drop any voter entries whose userId matches.
-  const activeEvents = await prisma.groupEvent.findMany({
-    where:  { tripId, status: 'VOTING', sessionId: { not: null } },
-    select: { sessionId: true },
-  });
-  for (const ev of activeEvents) {
-    if (!ev.sessionId) continue;
-    // Fire-and-forget per session — failure here shouldn't block the member
-    // removal response. The session TTL is the worst-case fallback.
-    withSessionLock(ev.sessionId, async () => {
-      const sess = await getSession(ev.sessionId!);
-      if (!sess) return;
-      const namesToDrop: string[] = [];
-      for (const [name, meta] of Object.entries(sess.voterMeta ?? {})) {
-        if (!meta) continue;
-        if (meta.userId === targetId) namesToDrop.push(name);
-      }
-      if (namesToDrop.length === 0) return;
-      for (const name of namesToDrop) {
-        delete sess.voters[name];
-        delete sess.rankings[name];
-        delete sess.voterMeta[name];
-        if (sess.voterTokens) delete sess.voterTokens[name];
-        sess.submitted = sess.submitted.filter((n) => n !== name);
-      }
-      await saveSession(sess);
-      notifyClients(sess.id, sess);
-    }).catch(() => { /* non-fatal; logs already captured upstream */ });
-  }
+  // Revoke voter tokens on any currently-VOTING meal sessions the removed
+  // member is holding open. Shared with the equivalent group flow via
+  // lib/eventLifecycle so the two contexts can't drift again.
+  await revokeVoterTokensForUserOnParent('trip', tripId, targetId);
 
   // For a member leaving, return 204 (no body); for a host removing
   // someone, return the updated trip so the host's UI can re-render.
@@ -917,6 +876,14 @@ router.post('/:id/events', async (req: Request, res: Response) => {
     },
     include: mealEventInclude,
   });
+  // Real-time ping for every explicitly-invited participant (excluding
+  // the creator themselves — they obviously know about their own meal).
+  // The navbar bell will refetch /api/trips/me/participant-meals to surface
+  // the row. Subset-meals only: an "everyone" meal (empty participants)
+  // is visible on the trip page and doesn't need a directed nudge.
+  for (const id of participants) {
+    if (id !== req.userId) notifyUser(id, 'meal-participant');
+  }
   res.status(201).json({ event });
 });
 
@@ -998,6 +965,18 @@ router.patch('/:id/events/:eventId', async (req: Request, res: Response) => {
     data,
     include: mealEventInclude,
   });
+
+  // Notify any participants newly added by this edit. We don't re-ping
+  // people who were already on the list before the PATCH (their badge
+  // either already cleared or is still visible from the original create).
+  if (Array.isArray(participantUserIds)) {
+    const before = new Set(existing.participantUserIds);
+    const newlyAdded = (event.participantUserIds ?? []).filter(
+      (id) => !before.has(id) && id !== req.userId,
+    );
+    for (const id of newlyAdded) notifyUser(id, 'meal-participant');
+  }
+
   res.json({ event });
 });
 
@@ -1405,6 +1384,184 @@ router.get('/:id/events/:eventId', async (req: Request, res: Response) => {
     res.status(404).json({ error: 'Event not found' }); return;
   }
   res.json({ event });
+});
+
+// ── Trip insights ─────────────────────────────────────────────
+// Mirrors the group insights endpoint (see groups.ts) — rolls up
+// GroupEventResult rows scoped to this trip. Adds a meal-slot breakdown
+// (breakfast/lunch/dinner/snack count) that's trip-specific and meaningless
+// for groups. Returns the zeroed shape for a trip with no completed meals
+// so the frontend can render an empty state uniformly.
+
+// GET /api/trips/:id/insights
+router.get('/:id/insights', async (req: Request, res: Response) => {
+  const tripId = parseId(req.params.id);
+  if (!tripId) { res.status(400).json({ error: 'Invalid id' }); return; }
+
+  const { trip: tripMeta, isMember } = await checkTripAuth(tripId, req.userId);
+  if (!tripMeta) { res.status(404).json({ error: 'Trip not found' }); return; }
+  if (!isMember) { res.status(403).json({ error: 'Not a member of this trip' }); return; }
+
+  const results = await prisma.groupEventResult.findMany({
+    where: { event: { tripId, status: 'DONE' } },
+    include: {
+      event: { select: { id: true, name: true, voteMethod: true, scheduledFor: true, mealSlot: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  type RestStat = { name: string; considered: number; wins: number };
+  const stats = new Map<string, RestStat>();
+  const methodCounts: Record<string, number> = {};
+  const voteMethodCounts: Record<string, number> = {};
+  const mealSlotCounts: Record<string, number> = {};
+  const memberAppearances: Record<string, number> = {};
+  const memberWinAccuracy: Record<string, { picks: number; wins: number }> = {};
+
+  for (const r of results) {
+    methodCounts[r.method] = (methodCounts[r.method] ?? 0) + 1;
+    if (r.method === 'vote' && r.voteMethod) {
+      voteMethodCounts[r.voteMethod] = (voteMethodCounts[r.voteMethod] ?? 0) + 1;
+    }
+    if (r.event?.mealSlot) {
+      mealSlotCounts[r.event.mealSlot] = (mealSlotCounts[r.event.mealSlot] ?? 0) + 1;
+    }
+
+    for (const name of r.participants) {
+      memberAppearances[name] = (memberAppearances[name] ?? 0) + 1;
+    }
+
+    const pool = Array.isArray(r.restaurantPool) ? r.restaurantPool : [];
+    for (const item of pool as Array<{ id?: unknown; name?: unknown }>) {
+      const id = item?.id != null ? String(item.id) : null;
+      const name = typeof item?.name === 'string' ? item.name : null;
+      if (!id || !name) continue;
+      const entry = stats.get(id) ?? { name, considered: 0, wins: 0 };
+      entry.considered += 1;
+      if (name === r.winnerName) entry.wins += 1;
+      stats.set(id, entry);
+    }
+
+    if (r.method === 'vote' && r.ballots && typeof r.ballots === 'object') {
+      const winningRestaurantId = (pool as Array<{ id?: unknown; name?: unknown }>)
+        .find((p) => p?.name === r.winnerName)?.id;
+      if (winningRestaurantId != null) {
+        const winnerIdStr = String(winningRestaurantId);
+
+        if (r.voteMethod === 'simple') {
+          const ballots = r.ballots as Record<string, Record<string, boolean>>;
+          for (const [voter, ballot] of Object.entries(ballots)) {
+            if (!ballot || typeof ballot !== 'object') continue;
+            const approved = Object.entries(ballot)
+              .filter(([, v]) => v === true)
+              .map(([id]) => id);
+            if (approved.length === 0) continue;
+            if (!memberWinAccuracy[voter]) memberWinAccuracy[voter] = { picks: 0, wins: 0 };
+            memberWinAccuracy[voter].picks += 1;
+            if (approved.includes(winnerIdStr)) {
+              memberWinAccuracy[voter].wins += 1;
+            }
+          }
+        } else if (r.voteMethod === 'ranked') {
+          const ballots = r.ballots as Record<string, unknown>;
+          for (const [voter, ballot] of Object.entries(ballots)) {
+            if (!Array.isArray(ballot) || ballot.length === 0) continue;
+            if (!memberWinAccuracy[voter]) memberWinAccuracy[voter] = { picks: 0, wins: 0 };
+            memberWinAccuracy[voter].picks += 1;
+            if (String(ballot[0]) === winnerIdStr) {
+              memberWinAccuracy[voter].wins += 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Cuisine fingerprint per member — same shape as groups.ts. `?? []` guard
+  // mirrors the groups version (defensive against jest auto-mocks).
+  const optionRows = (await prisma.groupEventOption.findMany({
+    where: { event: { tripId } },
+    select: {
+      addedBy:    { select: { username: true } },
+      restaurant: { select: { cuisineType: true } },
+    },
+  })) ?? [];
+
+  const memberCuisineMap = new Map<string, Map<string, number>>();
+  const memberTotalAdds  = new Map<string, number>();
+  for (const opt of optionRows) {
+    const username = opt.addedBy?.username;
+    if (!username) continue;
+    const cuisine = opt.restaurant?.cuisineType ?? 'Other';
+    memberTotalAdds.set(username, (memberTotalAdds.get(username) ?? 0) + 1);
+    if (!memberCuisineMap.has(username)) memberCuisineMap.set(username, new Map());
+    const m = memberCuisineMap.get(username)!;
+    m.set(cuisine, (m.get(cuisine) ?? 0) + 1);
+  }
+
+  const MIN_ADDS_FOR_FINGERPRINT = 3;
+  const memberCuisines: Record<string, Array<{ cuisine: string; count: number }>> = {};
+  for (const [member, cuisineMap] of memberCuisineMap) {
+    if ((memberTotalAdds.get(member) ?? 0) < MIN_ADDS_FOR_FINGERPRINT) continue;
+    memberCuisines[member] = [...cuisineMap.entries()]
+      .map(([cuisine, count]) => ({ cuisine, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3);
+  }
+
+  const allRestaurants = [...stats.entries()].map(([id, v]) => ({
+    restaurantId: id,
+    name: v.name,
+    considered: v.considered,
+    wins: v.wins,
+    winRate: v.considered > 0 ? v.wins / v.considered : 0,
+  }));
+
+  const topConsidered = [...allRestaurants]
+    .sort((a, b) => b.considered - a.considered)
+    .slice(0, 5);
+
+  const oftenSkipped = [...allRestaurants]
+    .filter((r) => r.considered >= 2 && r.wins === 0)
+    .sort((a, b) => b.considered - a.considered)
+    .slice(0, 5);
+
+  const topWinners = [...allRestaurants]
+    .filter((r) => r.wins > 0)
+    .sort((a, b) => b.wins - a.wins || b.winRate - a.winRate)
+    .slice(0, 5);
+
+  const recent = results.slice(0, 8).map((r) => ({
+    eventId: r.event?.id ?? null,
+    eventName: r.event?.name ?? null,
+    winnerName: r.winnerName,
+    method: r.method,
+    voteMethod: r.voteMethod,
+    mealSlot: r.event?.mealSlot ?? null,
+    participants: r.participants,
+    acceptedAt: r.createdAt,
+    scheduledFor: r.event?.scheduledFor ?? null,
+  }));
+
+  res.json({
+    totalEvents: results.length,
+    distinctWinners: new Set(results.map((r) => r.winnerName)).size,
+    methodCounts,
+    voteMethodCounts,
+    mealSlotCounts,
+    memberAppearances,
+    memberWinAccuracy: Object.fromEntries(
+      Object.entries(memberWinAccuracy).map(([k, v]) => [
+        k,
+        { ...v, rate: v.picks > 0 ? v.wins / v.picks : 0 },
+      ]),
+    ),
+    memberCuisines,
+    topConsidered,
+    oftenSkipped,
+    topWinners,
+    recent,
+  });
 });
 
 export default router;

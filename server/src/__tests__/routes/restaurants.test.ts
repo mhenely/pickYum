@@ -7,8 +7,21 @@ import { DeepMockProxy } from 'jest-mock-extended';
 
 jest.mock('../../lib/prisma');
 
+// photoStorage talks to Supabase Storage + Google's signed CDN. Mocking
+// here lets each test declare what `downloadAndStoreAll` returns without
+// any real network I/O. The materialize handler treats `undefined` as
+// "couldn't store" → skips the photos update step; an empty array does
+// the same (filtered out before the update). A populated array triggers
+// the post-create update with storage URLs.
+jest.mock('../../lib/photoStorage', () => ({
+  downloadAndStoreAll: jest.fn().mockResolvedValue([]),
+}));
+
 import prisma from '../../lib/prisma';
 import restaurantsRouter from '../../routes/restaurants';
+import { downloadAndStoreAll } from '../../lib/photoStorage';
+
+const mockDownloadAndStoreAll = downloadAndStoreAll as jest.Mock;
 
 const mockPrisma = prisma as unknown as DeepMockProxy<PrismaClient>;
 const SECRET = process.env.JWT_SECRET!;
@@ -103,6 +116,114 @@ describe('POST /api/restaurants', () => {
     expect(res.body.restaurant.name).toBe('Burger Joint');
   });
 
+  it('PERSISTS photos as Supabase Storage URLs when the client supplies Google refs', async () => {
+    // Regression guard for the photo-storage migration. The materialize path
+    // now does TWO writes for a new row with photos:
+    //   1. prisma.restaurant.create — without photos (we don't have storage
+    //      URLs yet; the upload needs the row's id for its deterministic
+    //      storage path).
+    //   2. prisma.restaurant.update — patches the photos column with the
+    //      Supabase Storage URLs returned by downloadAndStoreAll.
+    //
+    // If this ever fails, either the create is being called with the raw
+    // Google refs again (re-introducing the stale-ref bug) or the second
+    // update isn't firing (cards stay photo-less even after a successful
+    // upload).
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+
+    const realPlacesPhotos = [
+      { name: 'places/ChIJN1t_tDeuEmsRUsoyG83frY4/photos/AaA', widthPx: 4032, heightPx: 3024 },
+      { name: 'places/ChIJN1t_tDeuEmsRUsoyG83frY4/photos/BbB', widthPx: 4032, heightPx: 3024 },
+    ];
+    const storedPhotos = [
+      { name: 'https://test.supabase.co/storage/v1/object/public/restaurant-photos/42/0.jpg', widthPx: 4032, heightPx: 3024 },
+      { name: 'https://test.supabase.co/storage/v1/object/public/restaurant-photos/42/1.jpg', widthPx: 4032, heightPx: 3024 },
+    ];
+
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.restaurant.findFirst as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.restaurant.create as jest.Mock).mockImplementation(async ({ data }) => ({
+      ...fakeRestaurant, ...data, id: 42, photos: null,
+    }));
+    (mockPrisma.restaurant.update as jest.Mock).mockImplementation(async ({ data }) => ({
+      ...fakeRestaurant, id: 42, ...data,
+    }));
+    mockDownloadAndStoreAll.mockResolvedValueOnce(storedPhotos);
+
+    const res = await request(buildApp())
+      .post('/api/restaurants')
+      .set('Cookie', authCookie())
+      .send({
+        name: 'Pho 99',
+        googlePlaceId: 'ChIJN1t_tDeuEmsRUsoyG83frY4',
+        photos: realPlacesPhotos,
+      });
+
+    expect(res.status).toBe(201);
+
+    // Photo storage was invoked with the sanitized incoming refs +
+    // the freshly-created row's id (deterministic storage path).
+    expect(mockDownloadAndStoreAll).toHaveBeenCalledWith(expect.objectContaining({
+      restaurantId: 42,
+      googlePhotos: expect.arrayContaining([
+        expect.objectContaining({ name: 'places/ChIJN1t_tDeuEmsRUsoyG83frY4/photos/AaA' }),
+      ]),
+      apiKey: 'test-key',
+    }));
+
+    // The post-create update patched the row with Supabase URLs (NOT
+    // Google refs). If this ever asserts the wrong field, the stale-ref
+    // bug is back.
+    expect(mockPrisma.restaurant.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 42 },
+      data: expect.objectContaining({
+        photos: expect.arrayContaining([
+          expect.objectContaining({
+            name: expect.stringContaining('supabase.co/storage/v1/object/public'),
+          }),
+        ]),
+        googleDataUpdatedAt: expect.any(Date),
+      }),
+    }));
+
+    // The response echoes the stored URLs back so the client's slice
+    // mirror is correct on first paint.
+    expect(res.body.restaurant.photos).toHaveLength(2);
+    expect(res.body.restaurant.photos[0].name).toMatch(/^https:\/\/.*\/storage\/v1\/object\/public\//);
+  });
+
+  it('skips the photo-update step when storage returns undefined (graceful no-op)', async () => {
+    // When downloadAndStoreAll returns undefined (no API key, all uploads
+    // failed, etc.) the materialize must still succeed — the row just
+    // stays photo-less. The next search for the same place hits the
+    // existing-row backfill branch and retries the storage upload.
+    process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+
+    (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.restaurant.findFirst as jest.Mock).mockResolvedValue(null);
+    (mockPrisma.restaurant.create as jest.Mock).mockImplementation(async ({ data }) => ({
+      ...fakeRestaurant, ...data, id: 99, photos: null,
+    }));
+    mockDownloadAndStoreAll.mockResolvedValueOnce([]); // all uploads failed
+
+    const res = await request(buildApp())
+      .post('/api/restaurants')
+      .set('Cookie', authCookie())
+      .send({
+        name: 'Some Place',
+        googlePlaceId: 'ChIJxxx',
+        photos: [{ name: 'places/ChIJxxx/photos/AaA', widthPx: 100, heightPx: 100 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockDownloadAndStoreAll).toHaveBeenCalled();
+    // Critical: no update was issued (avoids a wasted DB round-trip for
+    // a no-op patch).
+    expect(mockPrisma.restaurant.update).not.toHaveBeenCalled();
+    // Row still returned, just photo-less.
+    expect(res.body.restaurant.photos).toBeFalsy();
+  });
+
   it('returns the existing restaurant (200, no create) when name already exists (case-insensitive)', async () => {
     // The route is now strict find-or-create: existing rows are returned untouched
     // (no field overwrite). 200 vs 201 lets callers distinguish "found" from
@@ -116,6 +237,123 @@ describe('POST /api/restaurants', () => {
 
     expect(res.status).toBe(200);
     expect(mockPrisma.restaurant.create).not.toHaveBeenCalled();
+  });
+
+  describe('photo backfill on existing googlePlaceId match', () => {
+    // Real Places photos shape — `name` is the Google ref that gets
+    // downloaded to Supabase Storage. widthPx/heightPx ride through as-is.
+    const incomingPhotos = [
+      { name: 'places/ChIJxxx/photos/AaA', widthPx: 4032, heightPx: 3024 },
+      { name: 'places/ChIJxxx/photos/BbB', widthPx: 4032, heightPx: 3024 },
+    ];
+    const storedPhotos = [
+      { name: 'https://test.supabase.co/storage/v1/object/public/restaurant-photos/1/0.jpg', widthPx: 4032, heightPx: 3024 },
+      { name: 'https://test.supabase.co/storage/v1/object/public/restaurant-photos/1/1.jpg', widthPx: 4032, heightPx: 3024 },
+    ];
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      process.env.GOOGLE_PLACES_API_KEY = 'test-key';
+      // Default the mock back to empty so each test opts into a payload.
+      mockDownloadAndStoreAll.mockResolvedValue([]);
+    });
+
+    it('PATCHES photos with Supabase URLs when existing row has none + request supplies refs', async () => {
+      // The legacy/stale-refs row that's been sitting in someone's favorites.
+      (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+        ...fakeRestaurant, googlePlaceId: 'place-xyz', photos: null,
+      });
+      (mockPrisma.restaurant.update as jest.Mock).mockImplementation(async ({ data }) => ({
+        ...fakeRestaurant, googlePlaceId: 'place-xyz', ...data,
+      }));
+      mockDownloadAndStoreAll.mockResolvedValueOnce(storedPhotos);
+
+      const res = await request(buildApp())
+        .post('/api/restaurants')
+        .set('Cookie', authCookie())
+        .send({ name: 'Burger Joint', googlePlaceId: 'place-xyz', photos: incomingPhotos });
+
+      expect(res.status).toBe(200);
+      // The download/upload was called with the existing row's id (so the
+      // storage path is <existing.id>/<idx>.jpg, not a freshly-minted id).
+      expect(mockDownloadAndStoreAll).toHaveBeenCalledWith(expect.objectContaining({
+        restaurantId: fakeRestaurant.id,
+        apiKey: 'test-key',
+      }));
+      // The DB update lands the storage URLs, not the Google refs. Critical
+      // — saving the refs would re-introduce the stale-ref bug.
+      expect(mockPrisma.restaurant.update).toHaveBeenCalledWith({
+        where: { id: fakeRestaurant.id },
+        data: expect.objectContaining({
+          photos: expect.arrayContaining([
+            expect.objectContaining({
+              name: expect.stringContaining('supabase.co/storage/v1/object/public'),
+            }),
+          ]),
+          googleDataUpdatedAt: expect.any(Date),
+        }),
+      });
+      expect(mockPrisma.restaurant.create).not.toHaveBeenCalled();
+      expect(res.body.restaurant.photos).toHaveLength(2);
+    });
+
+    it('does NOT patch when the existing row already has photos (avoids clobbering)', async () => {
+      // Idempotency: subsequent searches for the same place shouldn't burn
+      // Google API budget re-downloading photos we already have stored.
+      const cachedPhotos = [{ name: 'https://test.supabase.co/storage/.../cached.jpg', widthPx: 1, heightPx: 1 }];
+      (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+        ...fakeRestaurant, googlePlaceId: 'place-xyz', photos: cachedPhotos,
+      });
+
+      const res = await request(buildApp())
+        .post('/api/restaurants')
+        .set('Cookie', authCookie())
+        .send({ name: 'Burger Joint', googlePlaceId: 'place-xyz', photos: incomingPhotos });
+
+      expect(res.status).toBe(200);
+      // No re-download (saves cost); no DB write (idempotent).
+      expect(mockDownloadAndStoreAll).not.toHaveBeenCalled();
+      expect(mockPrisma.restaurant.update).not.toHaveBeenCalled();
+      expect(mockPrisma.restaurant.create).not.toHaveBeenCalled();
+      expect(res.body.restaurant.photos).toEqual(cachedPhotos);
+    });
+
+    it('does NOT patch when the request omits photos (existing-row passthrough)', async () => {
+      // A materialize call without photos in the body (e.g. legacy client)
+      // should not even attempt a storage download — `materializePhotosToStorage`
+      // returns undefined for empty input, the update step short-circuits.
+      (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+        ...fakeRestaurant, googlePlaceId: 'place-xyz', photos: null,
+      });
+
+      const res = await request(buildApp())
+        .post('/api/restaurants')
+        .set('Cookie', authCookie())
+        .send({ name: 'Burger Joint', googlePlaceId: 'place-xyz' });
+
+      expect(res.status).toBe(200);
+      expect(mockDownloadAndStoreAll).not.toHaveBeenCalled();
+      expect(mockPrisma.restaurant.update).not.toHaveBeenCalled();
+    });
+
+    it('does NOT patch when storage returns empty (download/upload failed)', async () => {
+      // If every photo failed to upload, the existing row stays photo-less.
+      // Next search for this place will retry; meanwhile we don't issue a
+      // pointless DB write.
+      (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+        ...fakeRestaurant, googlePlaceId: 'place-xyz', photos: null,
+      });
+      mockDownloadAndStoreAll.mockResolvedValueOnce([]);
+
+      const res = await request(buildApp())
+        .post('/api/restaurants')
+        .set('Cookie', authCookie())
+        .send({ name: 'Burger Joint', googlePlaceId: 'place-xyz', photos: incomingPhotos });
+
+      expect(res.status).toBe(200);
+      expect(mockDownloadAndStoreAll).toHaveBeenCalled();
+      expect(mockPrisma.restaurant.update).not.toHaveBeenCalled();
+    });
   });
 });
 

@@ -483,6 +483,564 @@ describe('POST /api/users/me/reviews — community rating side effect', () => {
   });
 });
 
+describe('PATCH /api/users/me/dietary-tags', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.user.update as jest.Mock).mockImplementation(async (args) => ({
+      id: 1,
+      dietaryTags: args.data.dietaryTags?.set ?? [],
+    }));
+  });
+
+  it('persists a clean list and echoes back what the server stored', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: ['vegan', 'gluten-free'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.dietaryTags).toEqual(['vegan', 'gluten-free']);
+    expect(mockPrisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 1 },
+      data:  { dietaryTags: { set: ['vegan', 'gluten-free'] } },
+    }));
+  });
+
+  it('normalizes input: trims, lowercases, and dedupes', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: ['  VEGAN  ', 'vegan', 'Vegan', 'gluten-free'] });
+
+    expect(res.status).toBe(200);
+    const call = (mockPrisma.user.update as jest.Mock).mock.calls[0][0];
+    expect(call.data.dietaryTags.set).toEqual(['vegan', 'gluten-free']);
+  });
+
+  it('drops empty / whitespace-only entries silently', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: ['halal', '', '   ', 'kosher'] });
+
+    expect(res.status).toBe(200);
+    const call = (mockPrisma.user.update as jest.Mock).mock.calls[0][0];
+    expect(call.data.dietaryTags.set).toEqual(['halal', 'kosher']);
+  });
+
+  it('drops non-string entries instead of failing the whole request', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      // 42, null, true → filtered out; only 'vegan' survives.
+      .send({ tags: [42, null, true, 'vegan'] });
+
+    expect(res.status).toBe(200);
+    const call = (mockPrisma.user.update as jest.Mock).mock.calls[0][0];
+    expect(call.data.dietaryTags.set).toEqual(['vegan']);
+  });
+
+  it('drops tags longer than 40 characters', async () => {
+    const tooLong = 'a'.repeat(41);
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: ['vegan', tooLong] });
+
+    expect(res.status).toBe(200);
+    const call = (mockPrisma.user.update as jest.Mock).mock.calls[0][0];
+    expect(call.data.dietaryTags.set).toEqual(['vegan']);
+  });
+
+  it('rejects payloads over the 10-tag cap before touching the DB', async () => {
+    const elevenTags = Array.from({ length: 11 }, (_, i) => `tag-${i}`);
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: elevenTags });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/maximum of 10/i);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('accepts an empty array to clear all tags', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: [] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.user.dietaryTags).toEqual([]);
+  });
+
+  it('rejects 400 when `tags` is not an array', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .set('Cookie', authCookie())
+      .send({ tags: 'vegan' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 without an auth cookie', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/dietary-tags')
+      .send({ tags: ['vegan'] });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('GET /api/users/me/export', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // The /me/export route makes ~13 parallel prisma queries. Every one
+    // is hit via Promise.all, so leaving any unmocked surfaces as
+    // "TypeError: fn is not a function" and fails the whole route. Stub
+    // each to an empty list / minimal happy-path shape; individual tests
+    // override the bits they care about.
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
+      id: 1, email: 'alice@example.com', username: 'alice',
+      dietaryTags: ['vegan'], avatarUrl: null, emailVerified: true,
+      flipCount: 7, createdAt: new Date('2026-01-01'),
+    });
+    (mockPrisma.userFavorite.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userOption.findMany   as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.userArchive.findMany  as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.review.findMany       as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.savedAddress.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.favoriteList.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.group.findMany        as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.groupMember.findMany  as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.trip.findMany         as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.tripMember.findMany   as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.recommendation.findMany as jest.Mock).mockResolvedValue([]);
+  });
+
+  it('returns a downloadable JSON attachment with a date-stamped filename', async () => {
+    const res = await request(buildApp())
+      .get('/api/users/me/export')
+      .set('Cookie', authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    // Content-Disposition is the load-bearing piece: without it, browsers
+    // render the JSON inline instead of saving to disk.
+    expect(res.headers['content-disposition']).toMatch(/^attachment; filename="pickyum-export-\d{4}-\d{2}-\d{2}\.json"$/);
+    // schemaVersion lets clients (or future migration scripts) detect the
+    // export format. Bumping it is the contract for any breaking change.
+    expect(res.body.schemaVersion).toBe(1);
+    expect(typeof res.body.exportedAt).toBe('string');
+  });
+
+  it('includes the user profile + all known collections (empty by default)', async () => {
+    const res = await request(buildApp())
+      .get('/api/users/me/export')
+      .set('Cookie', authCookie());
+
+    expect(res.body.profile).toMatchObject({
+      id: 1, email: 'alice@example.com', username: 'alice',
+      dietaryTags: ['vegan'], emailVerified: true,
+    });
+    // Top-level keys are the GDPR-relevant categories — if any go missing
+    // a future "missing fields" complaint will land here first.
+    for (const key of [
+      'favorites', 'options', 'accepted', 'archived', 'reviews',
+      'savedAddresses', 'favoriteLists',
+    ]) {
+      expect(res.body[key]).toEqual([]);
+    }
+    expect(res.body.groups).toEqual({ hosted: [], member: [] });
+    expect(res.body.trips).toEqual({ hosted: [], member: [] });
+    expect(res.body.recommendations).toEqual({ outgoing: [], incoming: [] });
+  });
+
+  it('separates hosted groups from member groups in the output', async () => {
+    (mockPrisma.group.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 5, name: 'Lunch crew', archivedAt: null, createdAt: new Date(),
+        members: [{ user: { username: 'bob' } }, { user: { username: 'carol' } }],
+        events:  [],
+      },
+    ]);
+    (mockPrisma.groupMember.findMany as jest.Mock).mockResolvedValue([
+      {
+        joinedAt: new Date(),
+        group: {
+          id: 9, name: 'Pizza Friday', archivedAt: null,
+          host: { username: 'dan' },
+          events: [],
+        },
+      },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/export')
+      .set('Cookie', authCookie());
+
+    expect(res.body.groups.hosted).toHaveLength(1);
+    expect(res.body.groups.hosted[0]).toMatchObject({
+      id: 5, name: 'Lunch crew',
+      members: ['bob', 'carol'],
+    });
+    expect(res.body.groups.member).toHaveLength(1);
+    expect(res.body.groups.member[0]).toMatchObject({
+      id: 9, name: 'Pizza Friday', host: 'dan',
+    });
+  });
+
+  it('separates hosted trips from member trips and includes anchors', async () => {
+    (mockPrisma.trip.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 5, name: 'Italy 2026', destination: 'Rome',
+        startDate: null, endDate: null, archivedAt: null,
+        members: [{ user: { username: 'bob' } }],
+        anchors: [{ label: 'Hotel', address: 'Rome' }],
+        events:  [],
+      },
+    ]);
+    (mockPrisma.tripMember.findMany as jest.Mock).mockResolvedValue([
+      {
+        joinedAt: new Date(),
+        trip: {
+          id: 9, name: 'NYC weekend', destination: 'New York',
+          host: { username: 'dan' }, events: [],
+        },
+      },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/export')
+      .set('Cookie', authCookie());
+
+    expect(res.body.trips.hosted).toHaveLength(1);
+    expect(res.body.trips.hosted[0]).toMatchObject({
+      id: 5, name: 'Italy 2026', destination: 'Rome',
+      members: ['bob'],
+      anchors: [{ label: 'Hotel', address: 'Rome' }],
+    });
+    expect(res.body.trips.member).toHaveLength(1);
+    expect(res.body.trips.member[0]).toMatchObject({
+      id: 9, host: 'dan',
+    });
+  });
+
+  it('returns 401 when no auth cookie is present', async () => {
+    const res = await request(buildApp()).get('/api/users/me/export');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 404 when the user row vanishes between auth and export', async () => {
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue(null);
+    const res = await request(buildApp())
+      .get('/api/users/me/export')
+      .set('Cookie', authCookie());
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('PATCH /api/users/me/avatar', () => {
+  // Mirror the production body-parser layering: the path-scoped 200KB
+  // parser runs BEFORE the 32KB global so avatar payloads aren't truncated
+  // by the global cap. The default buildApp uses the 100KB express.json
+  // default which would also pass valid avatars, but we recreate the prod
+  // ordering here so a regression in app.ts (someone "tidies up" the
+  // path-scoped parser) is caught by the test suite, not in prod.
+  function buildAvatarApp() {
+    const app = express();
+    app.use('/api/users/me/avatar', express.json({ limit: '200kb' }));
+    app.use(express.json({ limit: '32kb' }));
+    app.use(cookieParser());
+    app.use('/api/users', usersRouter);
+    return app;
+  }
+
+  // Smallest valid-looking PNG: 8 magic bytes + 4 zero bytes of trailing
+  // junk. The endpoint's isRecognizedImage() only checks the prefix, so
+  // anything past byte 12 is irrelevant. base64-encoded for transport.
+  const PNG_MAGIC  = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]);
+  const JPEG_MAGIC = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const GIF_MAGIC  = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0, 0, 0, 0, 0, 0]);
+  const WEBP_MAGIC = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x10, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+  const dataUrl = (mime: string, buf: Buffer) => `data:${mime};base64,${buf.toString('base64')}`;
+
+  beforeEach(() => {
+    (mockPrisma.user.update as jest.Mock).mockResolvedValue({
+      id: 1, avatarUrl: 'data:image/png;base64,iVBORw0KGgo=',
+    });
+  });
+
+  it('accepts a valid PNG data URL and stores it on the user row', async () => {
+    const url = dataUrl('image/png', PNG_MAGIC);
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .set('Cookie', authCookie())
+      .send({ dataUrl: url });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 1 },
+      data:  { avatarUrl: url },
+    }));
+  });
+
+  it('accepts JPEG, GIF, and WebP magic bytes', async () => {
+    for (const [mime, buf] of [
+      ['image/jpeg', JPEG_MAGIC],
+      ['image/gif',  GIF_MAGIC],
+      ['image/webp', WEBP_MAGIC],
+    ] as const) {
+      const res = await request(buildAvatarApp())
+        .patch('/api/users/me/avatar')
+        .set('Cookie', authCookie())
+        .send({ dataUrl: dataUrl(mime, buf) });
+      expect(res.status).toBe(200);
+    }
+  });
+
+  it('clears avatarUrl when dataUrl is null', async () => {
+    (mockPrisma.user.update as jest.Mock).mockResolvedValue({ id: 1, avatarUrl: null });
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .set('Cookie', authCookie())
+      .send({ dataUrl: null });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { avatarUrl: null },
+    }));
+  });
+
+  it('rejects non-string dataUrl with 400', async () => {
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .set('Cookie', authCookie())
+      .send({ dataUrl: 42 });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-image MIME types (defense against javascript: URLs etc.)', async () => {
+    for (const bad of [
+      'javascript:alert(1)',
+      'data:text/html;base64,SGVsbG8=',
+      'data:application/pdf;base64,JVBERi0xLg==',
+      'http://example.com/a.png',
+      'not-a-url',
+    ]) {
+      const res = await request(buildAvatarApp())
+        .patch('/api/users/me/avatar')
+        .set('Cookie', authCookie())
+        .send({ dataUrl: bad });
+      expect(res.status).toBe(400);
+    }
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payload with valid MIME header but bytes that fail magic-byte sniff', async () => {
+    // Claims PNG but the bytes are clearly not PNG. Defends against an
+    // attacker stashing an arbitrary payload behind a permissive header.
+    const fakePng = Buffer.from('this is not really a PNG just some text bytes');
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .set('Cookie', authCookie())
+      .send({ dataUrl: dataUrl('image/png', fakePng) });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/signature/i);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects payloads over the 100KB decoded cap', async () => {
+    // 101KB of arbitrary bytes — slightly over the cap. Magic bytes are
+    // valid PNG so we know we're testing the size gate, not the format
+    // gate.
+    const oversized = Buffer.concat([PNG_MAGIC.slice(0, 8), Buffer.alloc(101 * 1024)]);
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .set('Cookie', authCookie())
+      .send({ dataUrl: dataUrl('image/png', oversized) });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/exceeds/i);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty data payload', async () => {
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .set('Cookie', authCookie())
+      .send({ dataUrl: 'data:image/png;base64,' });
+
+    expect(res.status).toBe(400);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when the request has no auth cookie', async () => {
+    const res = await request(buildAvatarApp())
+      .patch('/api/users/me/avatar')
+      .send({ dataUrl: dataUrl('image/png', PNG_MAGIC) });
+
+    expect(res.status).toBe(401);
+  });
+
+  describe('per-user rate limit (avatarUpdateLimiter)', () => {
+    // The limiter has a `skip: NODE_ENV === 'test'` clause so the suite
+    // doesn't trip over normal test traffic. Flip NODE_ENV mid-test to
+    // exercise the actual limit, then restore. Each test gets its own
+    // fresh app instance so the in-process limiter store starts empty.
+    const originalNodeEnv = process.env.NODE_ENV;
+    beforeEach(() => { process.env.NODE_ENV = 'production'; });
+    afterEach(()  => { process.env.NODE_ENV = originalNodeEnv; });
+
+    function freshApp() {
+      // Re-import the rate-limits + users modules so the limiter middleware
+      // captures the new NODE_ENV at construction time. Without this,
+      // rate-limits was loaded during the suite's first import (NODE_ENV
+      // === 'test'), and even though we flip NODE_ENV, the limiter's
+      // closure already captured the test-mode skip.
+      let app!: express.Express;
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const router = require('../../routes/users').default;
+        app = express();
+        app.use('/api/users/me/avatar', express.json({ limit: '200kb' }));
+        app.use(express.json({ limit: '32kb' }));
+        app.use(cookieParser());
+        app.use('/api/users', router);
+      });
+      return app;
+    }
+
+    it('429s the 21st request from the same user within the 1-hour window', async () => {
+      const app = freshApp();
+      const url = dataUrl('image/png', PNG_MAGIC);
+
+      // 20 should succeed (the configured cap). The 21st must be rate-limited.
+      // Serial rather than parallel so the limiter's counter is deterministic.
+      for (let i = 0; i < 20; i++) {
+        const res = await request(app)
+          .patch('/api/users/me/avatar')
+          .set('Cookie', authCookie())
+          .send({ dataUrl: url });
+        expect(res.status).toBe(200);
+      }
+
+      const blocked = await request(app)
+        .patch('/api/users/me/avatar')
+        .set('Cookie', authCookie())
+        .send({ dataUrl: url });
+
+      expect(blocked.status).toBe(429);
+      expect(blocked.body.error).toMatch(/too many avatar updates/i);
+    });
+
+    it('isolates the limit per user — user A hitting the cap does not block user B', async () => {
+      const app = freshApp();
+      const url = dataUrl('image/png', PNG_MAGIC);
+
+      // Exhaust user 1's quota.
+      for (let i = 0; i < 20; i++) {
+        await request(app)
+          .patch('/api/users/me/avatar')
+          .set('Cookie', authCookie(1))
+          .send({ dataUrl: url });
+      }
+      const userBlocked = await request(app)
+        .patch('/api/users/me/avatar')
+        .set('Cookie', authCookie(1))
+        .send({ dataUrl: url });
+      expect(userBlocked.status).toBe(429);
+
+      // User 2's bucket is untouched — the limiter's keyGenerator returns
+      // the userId, so each account is isolated. If we ever regress to
+      // IP-keyed, this test fails because both users share supertest's
+      // loopback IP.
+      const userOk = await request(app)
+        .patch('/api/users/me/avatar')
+        .set('Cookie', authCookie(2))
+        .send({ dataUrl: url });
+      expect(userOk.status).toBe(200);
+    });
+  });
+});
+
+describe('PATCH /api/users/me/reviews/:reviewId', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('updates rating + content and recomputes when rating changed', async () => {
+    (mockPrisma.review.findFirst as jest.Mock).mockResolvedValue({ restaurantId: 7, rating: 3 });
+    (mockPrisma.review.update as jest.Mock).mockResolvedValue({
+      id: 42, restaurantId: 7, rating: 5, content: 'updated', userId: 1, createdAt: new Date(),
+    });
+    // Recompute side effect — minimal mocks to let the recompute pass without erroring.
+    (mockPrisma.review.groupBy as jest.Mock).mockResolvedValue([{ restaurantId: 7, _avg: { rating: 5 } }]);
+    (mockPrisma.review.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.restaurant.update as jest.Mock).mockResolvedValue({});
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/reviews/42')
+      .set('Cookie', authCookie())
+      .send({ rating: 5, content: 'updated' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.review).toMatchObject({ id: 42, rating: 5, content: 'updated' });
+    expect(mockPrisma.review.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 42 },
+      data: { rating: 5, content: 'updated' },
+    }));
+  });
+
+  it('skips recompute when only content changed', async () => {
+    (mockPrisma.review.findFirst as jest.Mock).mockResolvedValue({ restaurantId: 7, rating: 4 });
+    (mockPrisma.review.update as jest.Mock).mockResolvedValue({
+      id: 42, restaurantId: 7, rating: 4, content: 'fixed typo', userId: 1, createdAt: new Date(),
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/reviews/42')
+      .set('Cookie', authCookie())
+      .send({ content: 'fixed typo' });
+
+    expect(res.status).toBe(200);
+    // recomputeCommunityRating calls review.groupBy — if it ran, this would
+    // have been invoked. We never set the mock, so a call would throw "fn is
+    // not a function" and the test would fail. The fact that we get a clean
+    // 200 confirms the recompute branch was skipped.
+    expect(mockPrisma.review.groupBy).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the review does not belong to the caller', async () => {
+    (mockPrisma.review.findFirst as jest.Mock).mockResolvedValue(null);
+    const res = await request(buildApp())
+      .patch('/api/users/me/reviews/42')
+      .set('Cookie', authCookie())
+      .send({ rating: 4 });
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects out-of-range ratings', async () => {
+    (mockPrisma.review.findFirst as jest.Mock).mockResolvedValue({ restaurantId: 7, rating: 3 });
+    const res = await request(buildApp())
+      .patch('/api/users/me/reviews/42')
+      .set('Cookie', authCookie())
+      .send({ rating: 6 });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects empty body', async () => {
+    (mockPrisma.review.findFirst as jest.Mock).mockResolvedValue({ restaurantId: 7, rating: 3 });
+    const res = await request(buildApp())
+      .patch('/api/users/me/reviews/42')
+      .set('Cookie', authCookie())
+      .send({});
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /api/users/me/refresh-places', () => {
   const ORIGINAL_FETCH = global.fetch;
   const ORIGINAL_KEY = process.env.GOOGLE_PLACES_API_KEY;

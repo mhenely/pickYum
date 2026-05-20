@@ -3,6 +3,7 @@ import RatingDisplay from "./RatingDisplay";
 import { PRICE_LABELS } from "../utils/restaurantConstants";
 import { placePhotoUrl } from "../lib/api";
 import { normalizeUrl } from "../utils/normalizeUrl";
+import { useRestaurantPhotoBackfill } from "../hooks/useRestaurantPhotoBackfill";
 
 // Treat a field as "present" only when it's a non-empty string that
 // isn't our legacy "N/A" sentinel. The data path was cleaned up to
@@ -43,7 +44,7 @@ const prettyUrl = (url) => {
 // row), the wrapper renders nothing — the card just skips the photo
 // region. The wrapping `photoBoxClass` handles all the layout (height,
 // edge-to-edge via negative margins, rounded corners).
-function PhotoHero({ photos, maxWidthPx, photoBoxClass, restaurantName }) {
+function PhotoHero({ photos, maxWidthPx, photoBoxClass, restaurantName, onError }) {
   const first = photos.find((p) => p?.name);
   if (!first) return null;
   return (
@@ -53,8 +54,15 @@ function PhotoHero({ photos, maxWidthPx, photoBoxClass, restaurantName }) {
         alt={restaurantName}
         className="absolute inset-0 h-full w-full object-cover"
         // Hide on load failure so a 404 / expired photo ref doesn't
-        // leave a broken-image icon on the card.
-        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+        // leave a broken-image icon on the card. Also notify the parent
+        // so it can trigger a JIT refresh of the photo refs — Google
+        // sometimes invalidates refs (rotated/removed source photos),
+        // and the only way to recover is to re-fetch Place Details and
+        // get fresh refs. See hooks/useRestaurantPhotoBackfill.
+        onError={(e) => {
+          e.currentTarget.style.display = 'none';
+          onError?.();
+        }}
       />
     </div>
   );
@@ -233,6 +241,18 @@ const RestaurantCard = ({
   // and rendered nothing — breaking the Search-nearby cards if they tried
   // to hand placeId through `id` for stable hover handlers.
   const r = (id != null && restaurantMap) ? restaurantMap[id] : data;
+  // Photo backfill — see hooks/useRestaurantPhotoBackfill.ts. Fires
+  // a per-restaurant refresh under two conditions:
+  //   (1) the row has a googlePlaceId but no photos at mount time
+  //   (2) the photo <img> fails to load (Google INVALID_ARGUMENT on
+  //       a stale ref — handled via `onPhotoFailed` below)
+  // Both paths share the same per-session `attempted` Set so we never
+  // burn more than one refresh per restaurant per session. No-op for
+  // custom rows (no googlePlaceId) and the nearby-Places-card data
+  // path (no numeric id). Called before the early null-return so the
+  // hooks-rules order stays stable; the hook itself guards on
+  // `restaurant == null`.
+  const { onPhotoFailed } = useRestaurantPhotoBackfill(id, r);
   if (!r) return null;
 
   const s = SIZE[size] ?? SIZE.md;
@@ -332,7 +352,21 @@ const RestaurantCard = ({
       className={[
         // Mirror across all variants: rounded border, white bg, soft shadow,
         // orange glow on hover when interactive.
-        'relative flex flex-col h-full rounded-lg border bg-white shadow-sm transition-all duration-150',
+        //
+        // `min-w-0`: classic flex-truncate enabler. Without it, flex
+        // children default to `min-width: auto` (meaning "at least as
+        // wide as content"), and long unbroken strings like a 90-char
+        // restaurant website URL push the card wider than the
+        // parent's `flex: 0 0 ...` basis. With `min-w-0`, the flex
+        // item is allowed to be narrower than its content, and the
+        // `truncate` already on the website paragraph kicks in and
+        // ellipsizes. Parent-defined width is now load-bearing.
+        //
+        // NOT `overflow-hidden`: the H/T badges (Choose page) use
+        // `-top -left` to overhang outside the card on purpose.
+        // overflow-hidden would clip them. The card-internal text
+        // overflow gets handled by per-paragraph `truncate` instead.
+        'relative flex flex-col h-full min-w-0 rounded-lg border bg-white shadow-sm transition-all duration-150',
         s.card,
         cardAction ? 'cursor-pointer hover:border-orange-300 hover:shadow-md' : '',
         // isHighlighted is driven by external hover (Search-page map pin
@@ -359,6 +393,7 @@ const RestaurantCard = ({
           maxWidthPx={s.photoMaxWidthPx}
           photoBoxClass={s.photoBoxClass}
           restaurantName={r.name}
+          onError={onPhotoFailed}
         />
       )}
 

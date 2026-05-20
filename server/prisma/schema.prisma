@@ -50,7 +50,13 @@ model User {
   // distribute attempts across many IPs.
   failedLoginCount        Int       @default(0) @map("failed_login_count")
   failedLoginLockedUntil  DateTime? @map("failed_login_locked_until")
-  // User's preferred starting location for nearby restaurant searches.
+  // Free-form dietary tag list — surfaced in group/trip member rows so
+  // meal planners can avoid incompatible candidates. Recommended values
+  // are an allowlist in the frontend ("vegan", "halal", etc.) but the
+  // column accepts any string so users can self-categorize for edge
+  // cases (region-specific kosher levels, FODMAP, etc.). Validation
+  // (max 10 tags, ≤40 chars each) lives in the PATCH endpoint.
+  dietaryTags     String[]  @default([]) @map("dietary_tags")
   createdAt       DateTime  @default(now()) @map("created_at")
 
   favorites          UserFavorite[]

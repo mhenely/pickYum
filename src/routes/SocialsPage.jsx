@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { socialApi } from '../lib/socialApi';
 import { groupsApi } from '../lib/groupsApi';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
+import SectionEmpty from '../components/SectionEmpty';
 
 // ── Shared helpers ────────────────────────────────────────────
 
@@ -14,15 +15,9 @@ const StatCard = ({ label, value, sub }) => (
   </div>
 );
 
-function SectionEmpty({ icon, title, subtitle }) {
-  return (
-    <div className="text-center py-10 text-gray-400">
-      <p className="text-3xl mb-2">{icon}</p>
-      <p className="font-medium text-gray-600 text-sm">{title}</p>
-      {subtitle && <p className="text-xs mt-1">{subtitle}</p>}
-    </div>
-  );
-}
+// SectionEmpty was inlined here originally; it moved to a shared component
+// when other pages started reaching for the same empty-state shape (History,
+// Trips, Groups). The import at the top now satisfies callers below.
 
 // ── Groups tab ────────────────────────────────────────────────
 

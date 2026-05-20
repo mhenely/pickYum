@@ -12,6 +12,29 @@ jest.mock('bcryptjs', () => ({
   compare: jest.fn(),
 }));
 
+// emailTokens hides crypto + bcrypt + Prisma round-trips behind a tidy
+// pair of issue/consume functions. For the reset-password / verify-email
+// route tests we mock the boundary so each test can declare exactly what
+// consumeToken returns — the actual token mechanics get their own
+// dedicated test file. Without this, every reset/verify case would also
+// have to mock prisma.emailToken.findUnique, bcrypt.compare, and the
+// updateMany consume step.
+jest.mock('../../lib/emailTokens', () => ({
+  issueToken:   jest.fn(),
+  consumeToken: jest.fn(),
+}));
+
+// audit + email writes are fire-and-forget side effects on the auth-recovery
+// paths. Stub them so tests don't pull in the real audit-log write (which
+// would try to hit the (mocked) prisma) or attempt a Resend HTTP call.
+jest.mock('../../lib/audit', () => ({ audit: jest.fn() }));
+jest.mock('../../lib/email', () => ({
+  sendEmail:               jest.fn().mockResolvedValue(true),
+  verifyEmailTemplate:     () => ({ subject: 's', html: 'h', text: 't' }),
+  passwordResetTemplate:   () => ({ subject: 's', html: 'h', text: 't' }),
+  isEmailConfigured:       () => true,
+}));
+
 import prisma from '../../lib/prisma';
 import authRouter from '../../routes/auth';
 import bcrypt from 'bcryptjs';
@@ -298,5 +321,221 @@ describe('GET /api/auth/me', () => {
       .set('Cookie', `token=${token}`);
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// Account recovery
+// ──────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const tokensMock = require('../../lib/emailTokens') as {
+  issueToken:   jest.Mock;
+  consumeToken: jest.Mock;
+};
+
+describe('POST /api/auth/verify-email', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.user.update as jest.Mock).mockResolvedValue({ id: 1, emailVerified: true });
+  });
+
+  it('flips emailVerified=true when the token resolves', async () => {
+    tokensMock.consumeToken.mockResolvedValue(1);
+
+    const res = await request(buildApp())
+      .post('/api/auth/verify-email')
+      .send({ token: 'a'.repeat(43) });
+
+    expect(res.status).toBe(200);
+    expect(tokensMock.consumeToken).toHaveBeenCalledWith('a'.repeat(43), 'VERIFY_EMAIL');
+    expect(mockPrisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 1 },
+      data: expect.objectContaining({ emailVerified: true }),
+    }));
+  });
+
+  it('returns 400 with a generic message when the token is invalid/expired', async () => {
+    tokensMock.consumeToken.mockResolvedValue(null);
+
+    const res = await request(buildApp())
+      .post('/api/auth/verify-email')
+      .send({ token: 'expired-or-junk' });
+
+    expect(res.status).toBe(400);
+    // No leak about *why* the token failed — invalid / expired / consumed
+    // all hit the same response so attackers can't probe for state.
+    expect(res.body.error).toMatch(/invalid or expired/i);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when token is missing from the body', async () => {
+    const res = await request(buildApp())
+      .post('/api/auth/verify-email')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(tokensMock.consumeToken).not.toHaveBeenCalled();
+  });
+
+  it('does not flip emailVerified on a second submission of the same token', async () => {
+    // First call: resolves user id; second call: consumeToken returns null
+    // because the row's usedAt is set. Same endpoint behavior, just gated
+    // by the consume helper's idempotency.
+    tokensMock.consumeToken
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(null);
+
+    const a = await request(buildApp())
+      .post('/api/auth/verify-email')
+      .send({ token: 't'.repeat(43) });
+    const b = await request(buildApp())
+      .post('/api/auth/verify-email')
+      .send({ token: 't'.repeat(43) });
+
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(400);
+    // Only one user update — the second call short-circuits before reaching prisma.
+    expect(mockPrisma.user.update).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POST /api/auth/reset-password', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (mockPrisma.user.update as jest.Mock).mockResolvedValue({ id: 1 });
+    (mockBcrypt.hash as jest.Mock).mockResolvedValue('$2a$12$newhash');
+  });
+
+  it('hashes the new password, signs the user in, and audits the reset', async () => {
+    tokensMock.consumeToken.mockResolvedValue(1);
+
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'a'.repeat(43), password: 'newpassword123' });
+
+    expect(res.status).toBe(200);
+    // Password was bcrypted at cost 12 (matches register/login parity).
+    expect(mockBcrypt.hash).toHaveBeenCalledWith('newpassword123', 12);
+    // User row received the new hash AND the failed-login lockout was cleared
+    // (proving email control is at least as strong as proving the prior
+    // password, so the lockout's purpose is served).
+    expect(mockPrisma.user.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 1 },
+      data: expect.objectContaining({
+        passwordHash: '$2a$12$newhash',
+        failedLoginCount: 0,
+        failedLoginLockedUntil: null,
+      }),
+    }));
+    // Session cookie issued so the user lands signed-in after reset.
+    const cookies = res.headers['set-cookie'] as unknown as string[] | undefined;
+    expect(cookies?.some((c) => c.startsWith('token='))).toBe(true);
+  });
+
+  it('returns 400 when the token is invalid', async () => {
+    tokensMock.consumeToken.mockResolvedValue(null);
+
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'bad', password: 'newpassword123' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid or expired/i);
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a reused token on the second submission', async () => {
+    tokensMock.consumeToken
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(null);
+
+    const a = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'x'.repeat(43), password: 'newpassword123' });
+    const b = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'x'.repeat(43), password: 'differentpw456' });
+
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(400);
+    expect(mockPrisma.user.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a weak password before consuming the token', async () => {
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'a'.repeat(43), password: 'short' });
+
+    expect(res.status).toBe(400);
+    // Password validation must run BEFORE consumeToken — otherwise a weak
+    // password would burn the token and force the user to request another.
+    expect(tokensMock.consumeToken).not.toHaveBeenCalled();
+    expect(mockPrisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when token is missing', async () => {
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ password: 'newpassword123' });
+
+    expect(res.status).toBe(400);
+    expect(tokensMock.consumeToken).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/auth/forgot-password', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 200 + issues a token when the email matches an account with a password', async () => {
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({
+      id: 1, email: 'alice@example.com', passwordHash: '$2a$12$existing',
+    });
+    tokensMock.issueToken.mockResolvedValue('raw-token-xyz');
+
+    const res = await request(buildApp())
+      .post('/api/auth/forgot-password')
+      .send({ email: 'alice@example.com' });
+
+    expect(res.status).toBe(200);
+    expect(tokensMock.issueToken).toHaveBeenCalledWith(1, 'PASSWORD_RESET');
+  });
+
+  it('returns 200 but does NOT issue a token for an unknown email (no enumeration)', async () => {
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const res = await request(buildApp())
+      .post('/api/auth/forgot-password')
+      .send({ email: 'nope@example.com' });
+
+    // Response shape is identical whether the email exists or not — this is
+    // the load-bearing assertion. Account enumeration via response timing
+    // is a separate concern handled by the rate limiter.
+    expect(res.status).toBe(200);
+    expect(res.body.message).toMatch(/if that email is registered/i);
+    expect(tokensMock.issueToken).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 but skips token issue for OAuth-only accounts (no passwordHash)', async () => {
+    (mockPrisma.user.findFirst as jest.Mock).mockResolvedValue({
+      id: 1, email: 'alice@example.com', passwordHash: null,
+    });
+
+    const res = await request(buildApp())
+      .post('/api/auth/forgot-password')
+      .send({ email: 'alice@example.com' });
+
+    expect(res.status).toBe(200);
+    // OAuth-only users have no password to reset — issuing a token would
+    // land them on a reset page that does nothing useful. Skipping the
+    // issue (silently) maintains the no-enumeration contract.
+    expect(tokensMock.issueToken).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when email is missing', async () => {
+    const res = await request(buildApp())
+      .post('/api/auth/forgot-password')
+      .send({});
+    expect(res.status).toBe(400);
   });
 });

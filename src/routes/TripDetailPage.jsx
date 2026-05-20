@@ -1,9 +1,11 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { api } from '../lib/api';
 import { groupsApi } from '../lib/groupsApi';
 import ConfirmDialog from '../components/ConfirmDialog';
+import RestaurantDetailModal from '../components/RestaurantDetailModal';
+import DietaryTagChips from '../components/DietaryTagChips';
 
 // Trip detail — members + anchors management. Meal events live in
 // phase 2 (placeholder section below). The host gets edit affordances
@@ -120,12 +122,11 @@ function MembersSection({ trip, canHostAct, currentUserId, onRefresh }) {
           const isMemberHost = m.userId === trip.hostId;
           const isMe         = m.userId === currentUserId;
           return (
-            <li key={m.userId} className="flex items-center gap-2">
-              <span className="text-sm text-gray-800 truncate flex-1">
+            <li key={m.userId} className="flex items-start gap-2 flex-wrap">
+              <span className="text-sm text-gray-800 truncate min-w-0 flex-1">
                 {m.user.username}{isMemberHost && <span className="ml-1 text-xs text-orange-500">👑 host</span>}{isMe && <span className="ml-1 text-xs text-gray-400">(you)</span>}
+                <span className="ml-2"><DietaryTagChips tags={m.user.dietaryTags} /></span>
               </span>
-              {/* Show "Remove" if host (and not the host removing themselves)
-                  OR if the row is the current user removing themselves. */}
               {!trip.archivedAt && ((canHostAct && !isMemberHost) || (isMe && !isMemberHost)) && (
                 <button
                   onClick={() => handleRemove(m.userId)}
@@ -435,6 +436,156 @@ function formatTime(iso) {
   return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
+// Inline nearby-search result picker. Used by the meal "Add restaurant"
+// flow when the trip has a primary anchor with a geocodable address.
+// Results come from /api/places/nearby keyed by the anchor address; the
+// parent component owns the cache so switching between meals on the same
+// trip doesn't re-spend the Places quota.
+function NearbyOptionPicker({
+  anchor, radiusMeters, loading, error, results,
+  alreadyAddedPlaceIds, disabled, onPick,
+}) {
+  if (loading) {
+    return <p className="text-[11px] text-gray-400 italic">Searching near {anchor.label}…</p>;
+  }
+  if (error) {
+    return <p className="text-[11px] text-red-500">{error}</p>;
+  }
+
+  // Filter out places already on the meal so the user doesn't accidentally
+  // re-add a duplicate (the backend would reject via the unique constraint,
+  // but a quiet pre-filter is friendlier UX).
+  const visible = results.filter((p) => !p.googlePlaceId || !alreadyAddedPlaceIds.has(p.googlePlaceId));
+
+  if (visible.length === 0) {
+    return (
+      <p className="text-[11px] text-gray-400 italic">
+        No nearby results within {Math.round(radiusMeters / 100) / 10}km of {anchor.label}.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1 max-h-56 overflow-y-auto rounded-md border border-gray-200 bg-white">
+      {visible.map((p) => (
+        <button
+          key={p.googlePlaceId ?? p.name}
+          type="button"
+          onClick={() => onPick(p)}
+          disabled={disabled}
+          className="flex items-center justify-between gap-2 px-2 py-1.5 text-left text-xs hover:bg-orange-50 disabled:opacity-40 border-b border-gray-100 last:border-0"
+        >
+          <div className="min-w-0">
+            <p className="font-medium text-gray-800 truncate">{p.name}</p>
+            <p className="text-[10px] text-gray-500 truncate">
+              {p.cuisineType ?? 'Restaurant'}
+              {p.googleRating != null && <> · ⭐ {Number(p.googleRating).toFixed(1)}</>}
+              {p.priceLevel != null && <> · {'$'.repeat(p.priceLevel)}</>}
+            </p>
+          </div>
+          <span className="text-orange-600 font-semibold shrink-0">Add</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Per-event vote-method picker. Mirrors the group-side component in
+// GroupDetailPage.jsx — same race-safe optimistic update, same look. Only
+// editable while the event is OPEN; afterwards it falls back to a static
+// "Vote: <method>" badge in the event card so everyone sees what they walked
+// into. Host *or* event creator can change the method while OPEN (matching
+// the trip backend's auth rule in PATCH /vote-method).
+function VoteMethodPicker({ tripId, event, canEdit, onUpdated }) {
+  const [saving, setSaving]         = useState(false);
+  const [error, setError]           = useState('');
+  const [optimistic, setOptimistic] = useState(null);
+  const reqIdRef = useRef(0);
+
+  const propValue    = event.voteMethod ?? 'SIMPLE';
+  const displayValue = optimistic ?? propValue;
+  const isOpen       = event.status === 'OPEN';
+
+  useEffect(() => {
+    if (optimistic != null && propValue === optimistic) setOptimistic(null);
+  }, [propValue, optimistic]);
+
+  const handleChange = async (next) => {
+    if (next === displayValue) return;
+    setOptimistic(next);
+    setError('');
+    setSaving(true);
+    const myReqId = ++reqIdRef.current;
+    try {
+      await api.trips.setVoteMethod(tripId, event.id, next);
+      if (reqIdRef.current === myReqId) onUpdated();
+    } catch (err) {
+      if (reqIdRef.current === myReqId) {
+        setError(err.message ?? 'Could not update vote method.');
+        setOptimistic(null);
+      }
+    } finally {
+      if (reqIdRef.current === myReqId) setSaving(false);
+    }
+  };
+
+  const label = displayValue === 'RANKED' ? 'Ranked-choice' : 'Simple Majority';
+
+  if (!canEdit || !isOpen) {
+    return (
+      <p className="text-[11px] text-gray-500">
+        Vote method: <span className="font-medium text-gray-700">{label}</span>
+      </p>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-2.5">
+      <p className="text-[11px] font-semibold text-gray-600 mb-1">Voting method</p>
+      <div className="grid grid-cols-1 mb-2 text-[11px] text-gray-500 leading-snug">
+        <p
+          className={`col-start-1 row-start-1 transition-opacity ${
+            displayValue === 'RANKED' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+          aria-hidden={displayValue !== 'RANKED'}
+        >
+          Each voter ranks every restaurant. Lowest first-place is eliminated each round until one has a majority.
+        </p>
+        <p
+          className={`col-start-1 row-start-1 transition-opacity ${
+            displayValue === 'SIMPLE' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+          aria-hidden={displayValue !== 'SIMPLE'}
+        >
+          Each voter approves any number of restaurants. Highest total wins.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {[
+          { value: 'SIMPLE', label: 'Simple Majority' },
+          { value: 'RANKED', label: 'Ranked-choice' },
+        ].map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => handleChange(opt.value)}
+            className={[
+              'rounded-md px-2 py-1 text-[11px] font-semibold border transition-colors',
+              displayValue === opt.value
+                ? 'bg-orange-500 border-orange-500 text-white'
+                : 'bg-white border-gray-300 text-gray-600 hover:border-orange-400',
+            ].join(' ')}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      {saving && <p className="mt-1 text-[10px] text-gray-400">Saving…</p>}
+      {error  && <p className="mt-1 text-[10px] text-red-500">{error}</p>}
+    </div>
+  );
+}
+
 function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh }) {
   const navigate = useNavigate();
   // User's personal favorites + selections are the source for the per-meal
@@ -466,6 +617,15 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
   // Per-event UI state: which event has its add-option dropdown open, which
   // is busy with an action, etc. Keyed by event id so they don't collide.
   const [optionPickerForEvent, setOptionPickerForEvent] = useState(null);
+  // 'saved' shows user favorites/selections (legacy path); 'nearby' runs a
+  // Google Places nearby search centered on the trip's primary anchor. The
+  // nearby tab is hidden when there's no usable anchor.
+  const [pickerMode, setPickerMode] = useState('saved');
+  // Cached nearby results per anchor address — lets the user switch between
+  // events without re-fetching. Keyed by the anchor's `address` string.
+  const [nearbyResults, setNearbyResults] = useState({});
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [nearbyError,   setNearbyError]   = useState('');
   const [actioningEventId,     setActioningEventId]     = useState(null);
   // Schedule editor (Phase 3): which event is editing its votingStartsAt,
   // and the draft value while open. Closed → schedulePickerForEvent === null.
@@ -521,6 +681,67 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
     setActioningEventId(eventId);
     try {
       await api.trips.addEventOption(trip.id, eventId, Number(restaurantId));
+      setOptionPickerForEvent(null);
+      onRefresh();
+    } catch (err) {
+      setCreateError(err.message ?? 'Could not add option.');
+    } finally {
+      setActioningEventId(null);
+    }
+  };
+
+  // Trip's primary anchor (host marks one as `isPrimary` per trip). Drives
+  // the nearby search center for meal-option discovery. When null, the
+  // "Search nearby" affordance is hidden — the user can still pick from
+  // their saved restaurants as before.
+  const primaryAnchor = (trip.anchors ?? []).find((a) => a.isPrimary)
+    ?? (trip.anchors ?? [])[0]
+    ?? null;
+
+  // 1500m matches the SearchPage's default radius and is wide enough for an
+  // urban hotel/conference-anchor walk-shed. The anchor address goes through
+  // /api/places/nearby (server geocodes + dedupes).
+  const NEARBY_RADIUS_METERS = 1500;
+
+  const loadNearbyForAnchor = useCallback(async (anchor) => {
+    if (!anchor?.address) return;
+    if (nearbyResults[anchor.address]) return; // cached
+    setNearbyLoading(true);
+    setNearbyError('');
+    try {
+      const { restaurants } = await api.places.nearby(anchor.address, NEARBY_RADIUS_METERS, null);
+      setNearbyResults((prev) => ({ ...prev, [anchor.address]: restaurants ?? [] }));
+    } catch (err) {
+      setNearbyError(err.message ?? 'Could not search nearby.');
+    } finally {
+      setNearbyLoading(false);
+    }
+  }, [nearbyResults]);
+
+  // Materializes a Google Places result into a Restaurant row (or reuses the
+  // existing row keyed by googlePlaceId), then pins it as a meal option.
+  // Mirrors SearchPage's ensurePlaceMaterialized minus the Redux mirror — the
+  // trip refetch pulls the materialized restaurant inline on the next render.
+  const handleAddNearbyOption = async (eventId, place) => {
+    setActioningEventId(eventId);
+    try {
+      const { restaurant } = await api.restaurants.create({
+        name: place.name,
+        googlePlaceId: place.googlePlaceId,
+        cuisineType: place.cuisineType ?? undefined,
+        priceLevel: place.priceLevel ?? undefined,
+        googleRating: place.googleRating ?? undefined,
+        ratingCount: place.ratingCount ?? undefined,
+        photos: place.photos && place.photos.length ? place.photos : undefined,
+        regularOpeningHours: place.regularOpeningHours ?? undefined,
+        phone:   place.phone   ?? undefined,
+        website: place.website ?? undefined,
+        takeout: place.takeout,
+        delivery: place.delivery,
+        lat: place.lat ?? undefined,
+        lng: place.lng ?? undefined,
+      });
+      await api.trips.addEventOption(trip.id, eventId, restaurant.id);
       setOptionPickerForEvent(null);
       onRefresh();
     } catch (err) {
@@ -691,9 +912,13 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
           <ul className="flex flex-col gap-2">
             {day.events.map((ev) => {
               const slotMeta = MEAL_SLOTS.find((s) => s.value === ev.mealSlot);
-              const isOwn    = ev.createdById === currentUserId;
-              const canEdit  = (isHost || isOwn) && !isArchived;
-              const canVote  = isHost && !isArchived && ev.status === 'OPEN' && ev.options.length >= 2;
+              const isOwn       = ev.createdById === currentUserId;
+              const canEdit     = (isHost || isOwn) && !isArchived;
+              // Vote method follows the backend rule: host OR creator can
+              // change while the event is OPEN. Non-editors see the static
+              // badge from inside VoteMethodPicker.
+              const canEditVote = canEdit;
+              const canVote     = isHost && !isArchived && ev.status === 'OPEN' && ev.options.length >= 2;
               const busy     = actioningEventId === ev.id;
               const pickable = buildPickList(ev);
               return (
@@ -771,10 +996,62 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
                         ))}
                       </ul>
 
+                      <div className="mb-2">
+                        <VoteMethodPicker
+                          tripId={trip.id}
+                          event={ev}
+                          canEdit={canEditVote}
+                          onUpdated={onRefresh}
+                        />
+                      </div>
+
                       {!isArchived && (
                         optionPickerForEvent === ev.id ? (
-                          <div className="flex flex-col gap-1 mb-2">
-                            {pickable.length === 0 ? (
+                          <div className="flex flex-col gap-2 mb-2">
+                            {/* Tabbed source switcher — only show the "near
+                                anchor" tab when the trip has a primary anchor
+                                with a usable address. Otherwise stay on the
+                                saved-restaurants legacy path. */}
+                            {primaryAnchor?.address && (
+                              <div className="grid grid-cols-2 gap-1 text-[11px]">
+                                {[
+                                  { id: 'saved',  label: 'Your saved' },
+                                  { id: 'nearby', label: `Near ${primaryAnchor.label}` },
+                                ].map((t) => (
+                                  <button
+                                    key={t.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setPickerMode(t.id);
+                                      if (t.id === 'nearby') loadNearbyForAnchor(primaryAnchor);
+                                    }}
+                                    className={[
+                                      'rounded-md px-2 py-1 font-semibold border transition-colors truncate',
+                                      pickerMode === t.id
+                                        ? 'bg-orange-500 border-orange-500 text-white'
+                                        : 'bg-white border-gray-300 text-gray-600 hover:border-orange-400',
+                                    ].join(' ')}
+                                  >
+                                    {t.label}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            {pickerMode === 'nearby' && primaryAnchor?.address ? (
+                              <NearbyOptionPicker
+                                anchor={primaryAnchor}
+                                radiusMeters={NEARBY_RADIUS_METERS}
+                                loading={nearbyLoading}
+                                error={nearbyError}
+                                results={nearbyResults[primaryAnchor.address] ?? []}
+                                alreadyAddedPlaceIds={new Set(
+                                  (ev.options ?? []).map((o) => o.restaurant?.googlePlaceId).filter(Boolean),
+                                )}
+                                disabled={busy}
+                                onPick={(place) => handleAddNearbyOption(ev.id, place)}
+                              />
+                            ) : pickable.length === 0 ? (
                               <p className="text-[11px] text-gray-400 italic">
                                 Your favorites + selections are empty (or already added). Add some restaurants from the Search page first.
                               </p>
@@ -790,6 +1067,7 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
                                 ))}
                               </select>
                             )}
+
                             <button
                               onClick={() => setOptionPickerForEvent(null)}
                               className="text-[11px] text-gray-500 hover:text-gray-700 self-start"
@@ -799,7 +1077,18 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
                           </div>
                         ) : (
                           <button
-                            onClick={() => setOptionPickerForEvent(ev.id)}
+                            onClick={() => {
+                              setOptionPickerForEvent(ev.id);
+                              // Default to nearby when an anchor is available — the
+                              // whole point of trip planning is "places where we are,
+                              // not places at home." User can toggle back to saved.
+                              if (primaryAnchor?.address) {
+                                setPickerMode('nearby');
+                                loadNearbyForAnchor(primaryAnchor);
+                              } else {
+                                setPickerMode('saved');
+                              }
+                            }}
                             className="text-xs font-medium text-orange-600 hover:text-orange-800 mb-2"
                           >
                             + Add restaurant
@@ -1023,6 +1312,243 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
   );
 }
 
+// ── Trip insights panel ──────────────────────────────────────
+// Lazy-loaded rollup over the trip's completed meal events. Mirrors the
+// group insights panel (see GroupDetailPage.jsx) with one trip-specific
+// extra: a meal-slot breakdown (breakfast / lunch / dinner / snack counts).
+function TripInsightsPanel({ tripId }) {
+  const [open, setOpen]       = useState(false);
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState('');
+  const [infoForId, setInfoForId] = useState(null);
+
+  const handleToggle = async () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    if (data) return;
+    setLoading(true); setError('');
+    try {
+      const result = await api.trips.getInsights(tripId);
+      setData(result);
+    } catch (err) {
+      setError(err.message ?? 'Could not load insights.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const METHOD_LABELS = { vote: '🗳 Vote', flip: '🪙 Flip', spin: '🎰 Spin' };
+  const SLOT_LABELS   = { BREAKFAST: '🥐 Breakfast', LUNCH: '🥗 Lunch', DINNER: '🍽 Dinner', SNACK: '🍪 Snack' };
+
+  return (
+    <section>
+      <button
+        onClick={handleToggle}
+        className="w-full flex items-center justify-between text-left rounded-xl border border-gray-200 bg-white px-4 py-3 hover:bg-gray-50 transition-colors"
+      >
+        <span className="text-sm font-semibold text-gray-700">📊 Trip insights</span>
+        <svg className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="mt-2 rounded-xl border border-gray-200 bg-white p-4">
+          {loading && <p className="text-sm text-gray-400">Loading insights…</p>}
+          {error && <p className="text-sm text-red-500">{error}</p>}
+          {data && !loading && !error && (
+            data.totalEvents === 0 ? (
+              <p className="text-sm text-gray-500 text-center py-4">
+                No completed meals yet. Come back after the trip makes a few decisions.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-5">
+                {/* Stat tiles */}
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-lg bg-gray-50 p-3 text-center">
+                    <p className="text-2xl font-black text-orange-600">{data.totalEvents}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">meals decided</p>
+                  </div>
+                  <div className="rounded-lg bg-gray-50 p-3 text-center">
+                    <p className="text-2xl font-black text-orange-600">{data.distinctWinners}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">different winners</p>
+                  </div>
+                  <div className="rounded-lg bg-gray-50 p-3 text-center">
+                    <p className="text-2xl font-black text-orange-600">{Object.keys(data.memberAppearances ?? {}).length}</p>
+                    <p className="text-[10px] text-gray-500 mt-0.5">members participated</p>
+                  </div>
+                </div>
+
+                {/* Meal slot breakdown — trip-specific */}
+                {Object.keys(data.mealSlotCounts ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Meals by slot</p>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(data.mealSlotCounts).map(([slot, c]) => (
+                        <span key={slot} className="rounded-full bg-amber-50 border border-amber-100 text-amber-700 px-3 py-1 text-xs">
+                          {SLOT_LABELS[slot] ?? slot} · <span className="font-semibold">{c}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Method breakdown */}
+                {Object.keys(data.methodCounts ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">How decisions are made</p>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(data.methodCounts).map(([m, c]) => (
+                        <span key={m} className="rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-700">
+                          {METHOD_LABELS[m] ?? m} · <span className="font-semibold">{c}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {data.topWinners?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Trip favorites in practice</p>
+                    <ul className="space-y-1.5">
+                      {data.topWinners.map((r) => (
+                        <li key={r.restaurantId}>
+                          <button
+                            type="button"
+                            onClick={() => setInfoForId(r.restaurantId)}
+                            className="w-full flex items-center justify-between rounded-lg bg-green-50 border border-green-100 px-3 py-1.5 transition-colors hover:bg-green-100 hover:border-green-200 focus:outline-none focus:ring-2 focus:ring-green-400 text-left"
+                          >
+                            <span className="text-sm font-medium text-green-800 truncate">🏆 {r.name}</span>
+                            <span className="text-xs text-green-700 shrink-0">
+                              won {r.wins}× · {Math.round(r.winRate * 100)}%
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {data.oftenSkipped?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Always added, never chosen</p>
+                    <ul className="space-y-1.5">
+                      {data.oftenSkipped.map((r) => (
+                        <li key={r.restaurantId}>
+                          <button
+                            type="button"
+                            onClick={() => setInfoForId(r.restaurantId)}
+                            className="w-full flex items-center justify-between rounded-lg bg-amber-50 border border-amber-100 px-3 py-1.5 transition-colors hover:bg-amber-100 hover:border-amber-200 focus:outline-none focus:ring-2 focus:ring-amber-400 text-left"
+                          >
+                            <span className="text-sm font-medium text-amber-900 truncate">{r.name}</span>
+                            <span className="text-xs text-amber-700 shrink-0">
+                              considered {r.considered}× · 0 wins
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {Object.keys(data.memberAppearances ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Who shows up</p>
+                    <ul className="space-y-1.5">
+                      {Object.entries(data.memberAppearances)
+                        .sort(([, a], [, b]) => b - a)
+                        .slice(0, 8)
+                        .map(([name, count]) => (
+                          <li key={name} className="flex items-center justify-between text-sm">
+                            <span className="text-gray-700">{name}</span>
+                            <span className="text-xs text-gray-500">
+                              {count} of {data.totalEvents}
+                            </span>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Vote alignment — % of meals each member voted for the winner */}
+                {(() => {
+                  const aligned = Object.entries(data.memberWinAccuracy ?? {})
+                    .filter(([, v]) => v && v.picks > 0)
+                    .sort(([, a], [, b]) => b.rate - a.rate);
+                  if (aligned.length === 0) return null;
+                  return (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Vote alignment</p>
+                      <p className="text-[11px] text-gray-400 mb-2">
+                        How often each member's vote matched the meal's winner.
+                      </p>
+                      <ul className="space-y-1.5">
+                        {aligned.map(([name, v]) => {
+                          const pct = Math.round(v.rate * 100);
+                          const tone = pct >= 80 ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
+                                     : pct <= 25 ? 'text-purple-700 bg-purple-50 border-purple-100'
+                                     :             'text-gray-700 bg-gray-50 border-gray-100';
+                          return (
+                            <li key={name} className={`flex items-center gap-3 rounded-lg border px-3 py-1.5 ${tone}`}>
+                              <span className="text-sm font-medium flex-shrink-0 truncate min-w-0 flex-1">{name}</span>
+                              <div className="w-24 h-1.5 bg-white/60 rounded-full overflow-hidden flex-shrink-0">
+                                <div
+                                  className={pct >= 80 ? 'bg-emerald-500 h-full' : pct <= 25 ? 'bg-purple-500 h-full' : 'bg-gray-400 h-full'}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className="text-xs font-mono w-16 text-right flex-shrink-0">
+                                {pct}% · {v.wins}/{v.picks}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
+
+                {Object.keys(data.memberCuisines ?? {}).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">What each member proposes</p>
+                    <ul className="space-y-1.5">
+                      {Object.entries(data.memberCuisines).map(([name, cuisines]) => (
+                        <li key={name} className="flex items-center gap-2 text-sm">
+                          <span className="text-gray-700 font-medium min-w-0 truncate" style={{ flex: '0 0 6rem' }}>{name}</span>
+                          <div className="flex gap-1.5 flex-wrap min-w-0">
+                            {cuisines.map((c) => (
+                              <span
+                                key={c.cuisine}
+                                className="rounded-full bg-orange-50 border border-orange-100 text-orange-700 text-[11px] px-2 py-0.5"
+                              >
+                                {c.cuisine} <span className="font-semibold">·{c.count}</span>
+                              </span>
+                            ))}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )
+          )}
+        </div>
+      )}
+
+      {infoForId && (
+        <RestaurantDetailModal
+          restaurantId={Number(infoForId)}
+          readOnly
+          actions={null}
+          onClose={() => setInfoForId(null)}
+        />
+      )}
+    </section>
+  );
+}
+
 // ── Page ────────────────────────────────────────────────────
 
 export default function TripDetailPage() {
@@ -1113,6 +1639,8 @@ export default function TripDetailPage() {
           isArchived={isArchived}
           onRefresh={load}
         />
+
+        <TripInsightsPanel tripId={trip.id} />
       </div>
 
       {canHostAct && (

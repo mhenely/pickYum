@@ -526,7 +526,13 @@ router.post('/logout', (_req: Request, res: Response) => {
 router.get('/me', requireAuth, async (req: Request, res: Response) => {
   const user = await prisma.user.findUnique({
     where: { id: req.userId },
-    select: { id: true, email: true, username: true, flipCount: true, avatarUrl: true, createdAt: true },
+    select: {
+      id: true, email: true, username: true, flipCount: true, avatarUrl: true,
+      // Drives the navbar's "verify your email" banner — clients flip the
+      // banner off as soon as this returns true.
+      emailVerified: true,
+      createdAt: true,
+    },
   });
   if (!user) {
     res.status(404).json({ error: 'User not found' });

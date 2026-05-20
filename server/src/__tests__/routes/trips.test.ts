@@ -1346,3 +1346,131 @@ describe('GET /api/trips/:id — auto-launch overdue events', () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 });
+
+// ──────────────────────────────────────────────────────────────
+// Per-meal participant notifications
+// ──────────────────────────────────────────────────────────────
+describe('GET /api/trips/me/participant-meals', () => {
+  it('returns active meals the user is a participant in', async () => {
+    (mockPrisma.groupEvent.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 10, tripId: 5, name: 'Saturday brunch',
+        status: 'OPEN', mealSlot: 'BREAKFAST', scheduledFor: null,
+        createdAt: new Date('2026-06-01'), sessionId: null,
+        trip: { id: 5, name: 'Italy 2026', destination: 'Rome' },
+        createdBy: { id: 2, username: 'bob', avatarUrl: null },
+      },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/trips/me/participant-meals')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body.meals).toHaveLength(1);
+    expect(res.body.meals[0]).toMatchObject({
+      id: 10, tripId: 5, name: 'Saturday brunch', status: 'OPEN',
+    });
+    // The where clause is the load-bearing part — verify the filter is
+    // doing what the route advertises: not-DONE, has-current-user, not
+    // created-by-current-user, member of an active trip.
+    expect(mockPrisma.groupEvent.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          tripId:             { not: null },
+          status:             { not: 'DONE' },
+          participantUserIds: { has: 1 },
+          NOT: { createdById: 1 },
+          trip: expect.objectContaining({
+            archivedAt: null,
+            members: { some: { userId: 1 } },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('returns an empty list when the user has no participant meals', async () => {
+    (mockPrisma.groupEvent.findMany as jest.Mock).mockResolvedValue([]);
+    const res = await request(buildApp())
+      .get('/api/trips/me/participant-meals')
+      .set('Cookie', authCookie(1));
+    expect(res.status).toBe(200);
+    expect(res.body.meals).toEqual([]);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// Trip insights
+// ──────────────────────────────────────────────────────────────
+describe('GET /api/trips/:id/insights', () => {
+  it('returns 403 for non-members', async () => {
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue(tripMetaForNonMember);
+    const res = await request(buildApp())
+      .get('/api/trips/1/insights')
+      .set('Cookie', authCookie(99));
+    expect(res.status).toBe(403);
+  });
+
+  it('returns empty rollups when trip has no DONE meals', async () => {
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue(tripMetaForHost);
+    (mockPrisma.groupEventResult.findMany as jest.Mock).mockResolvedValue([]);
+    (mockPrisma.groupEventOption.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/trips/1/insights')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      totalEvents: 0,
+      distinctWinners: 0,
+      methodCounts: {},
+      mealSlotCounts: {},
+      topConsidered: [],
+      oftenSkipped: [],
+      topWinners: [],
+      recent: [],
+    });
+  });
+
+  it('aggregates wins, methods, member appearances, and the meal-slot breakdown', async () => {
+    (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValue(tripMetaForHost);
+    // 3 trip meals: pho wins twice (dinner + lunch), sushi wins once (dinner).
+    (mockPrisma.groupEventResult.findMany as jest.Mock).mockResolvedValue([
+      {
+        winnerName: 'Pho 99', method: 'vote', voteMethod: 'simple', participants: ['alice', 'bob', 'carol'],
+        restaurantPool: [{ id: 1, name: 'Pho 99' }, { id: 2, name: 'Sushi Bar' }],
+        ballots: null, createdAt: new Date('2026-06-01'),
+        event: { id: 1, name: 'Mon dinner',  voteMethod: 'SIMPLE', scheduledFor: null, mealSlot: 'DINNER' },
+      },
+      {
+        winnerName: 'Pho 99', method: 'flip', voteMethod: null, participants: ['alice', 'bob'],
+        restaurantPool: [{ id: 1, name: 'Pho 99' }, { id: 2, name: 'Sushi Bar' }],
+        ballots: null, createdAt: new Date('2026-06-02'),
+        event: { id: 2, name: 'Tue lunch',  voteMethod: 'SIMPLE', scheduledFor: null, mealSlot: 'LUNCH' },
+      },
+      {
+        winnerName: 'Sushi Bar', method: 'spin', voteMethod: null, participants: ['alice', 'bob'],
+        restaurantPool: [{ id: 1, name: 'Pho 99' }, { id: 2, name: 'Sushi Bar' }],
+        ballots: null, createdAt: new Date('2026-06-03'),
+        event: { id: 3, name: 'Wed dinner', voteMethod: 'SIMPLE', scheduledFor: null, mealSlot: 'DINNER' },
+      },
+    ]);
+    (mockPrisma.groupEventOption.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/trips/1/insights')
+      .set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalEvents).toBe(3);
+    expect(res.body.distinctWinners).toBe(2);
+    expect(res.body.methodCounts).toEqual({ vote: 1, flip: 1, spin: 1 });
+    expect(res.body.mealSlotCounts).toEqual({ DINNER: 2, LUNCH: 1 });
+    expect(res.body.memberAppearances).toEqual({ alice: 3, bob: 3, carol: 1 });
+
+    const pho = res.body.topConsidered.find((r: { restaurantId: string }) => r.restaurantId === '1');
+    expect(pho).toMatchObject({ name: 'Pho 99', considered: 3, wins: 2 });
+  });
+});

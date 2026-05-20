@@ -25,6 +25,7 @@ import groupRoutes from './routes/groups';
 import tripRoutes from './routes/trips';
 import healthRoutes from './routes/health';
 import flagsRoutes from './routes/flags';
+import notificationsRoutes from './routes/notifications';
 
 export function createApp() {
   const app = express();
@@ -59,6 +60,12 @@ export function createApp() {
   // 50 candidate IDs + restaurant snapshots, which weighs in around 5KB. 32KB
   // gives generous headroom while making it expensive for an attacker to push
   // megabytes of garbage at the JSON parser before any route validation runs.
+  // Avatar uploads send a base64 data URL that can run ~133KB encoded for a
+  // 100KB image — over the 32KB cap that the rest of the API uses. Register
+  // the avatar-specific parser BEFORE the global one so it sets `req.body`
+  // first; express.json() short-circuits when the body is already parsed,
+  // so the global cap stays in force for every other endpoint.
+  app.use('/api/users/me/avatar', express.json({ limit: '200kb' }));
   app.use(express.json({ limit: '32kb' }));
   app.use(cookieParser());
   app.use(passport.initialize());
@@ -73,6 +80,7 @@ export function createApp() {
   app.use('/api/trips', tripRoutes);
   app.use('/api/health', healthRoutes);
   app.use('/api/flags',  flagsRoutes);
+  app.use('/api/notifications', notificationsRoutes);
 
   // E2E test hooks — mounted ONLY when the env gate is set. Provides
   // destructive endpoints (reset / unlock test users) that have no

@@ -3,12 +3,7 @@ import { Link } from 'react-router-dom';
 const TermsPage = () => (
   <div className="max-w-3xl mx-auto px-4 py-8 prose prose-sm prose-orange">
     <h1 className="text-2xl font-bold text-gray-900 mb-2">Terms of Service</h1>
-    <p className="text-xs text-gray-400 mb-6">Last updated: 2026-05-07</p>
-
-    <p className="text-sm text-gray-700 leading-relaxed">
-      These are good-faith starter terms for a personal project. Replace them with a contract
-      reviewed by a lawyer before any public launch with real users or revenue.
-    </p>
+    <p className="text-xs text-gray-400 mb-6">Last updated: 2026-05-19</p>
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Using PickYum</h2>
     <p className="text-sm text-gray-700">
@@ -61,8 +56,8 @@ const TermsPage = () => (
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Disputes</h2>
     <p className="text-sm text-gray-700">
-      These terms are governed by the laws of <em>[your jurisdiction]</em>, excluding its
-      conflict-of-law rules. Disputes will be resolved in the courts of <em>[your jurisdiction]</em>.
+      These terms are governed by the laws of the State of Oregon, USA, excluding its
+      conflict-of-law rules. Disputes will be resolved in the courts of the State of Oregon, USA.
     </p>
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Changes</h2>
@@ -73,7 +68,7 @@ const TermsPage = () => (
 
     <h2 className="text-lg font-bold text-gray-900 mt-8 mb-3">Contact</h2>
     <p className="text-sm text-gray-700">
-      Questions or notices: <em>[your contact email]</em>.
+      Questions or notices: <a href="mailto:contact@pick-yum.com" className="text-orange-600 hover:underline">contact@pick-yum.com</a>.
     </p>
 
     <div className="mt-10 pt-6 border-t border-gray-200">

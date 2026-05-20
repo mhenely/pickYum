@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Dialog, DialogPanel } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { useDispatch, useSelector } from 'react-redux';
-import { addUserOption, removeUserOption, setRestaurantNote, persistAddReview, removeUserReview, addUserAcceptance, setMatchOptOut, updateCustomRestaurant, toggleAcceptedExcludeFromInsights } from '../redux/slices/userInfoSlice';
+import { addUserOption, removeUserOption, setRestaurantNote, persistAddReview, persistEditReview, removeUserReview, addUserAcceptance, setMatchOptOut, updateCustomRestaurant, toggleAcceptedExcludeFromInsights } from '../redux/slices/userInfoSlice';
 import { showChosenCelebration } from '../redux/slices/celebrationSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
 import InfoRow from './InfoRow';
@@ -353,6 +353,14 @@ const RestaurantDetailModal = ({
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewDate, setReviewDate] = useState(() => new Date().toLocaleDateString());
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  // Inline-edit state for an existing review. editingReviewId === null
+  // means "no row is in edit mode"; otherwise it matches the rv.id of the
+  // row currently being edited. Only one row at a time keeps the UI simple.
+  const [editingReviewId, setEditingReviewId] = useState(null);
+  const [editContent,     setEditContent]     = useState('');
+  const [editRating,      setEditRating]      = useState(5);
+  const [editSubmitting,  setEditSubmitting]  = useState(false);
+  const [editError,       setEditError]       = useState('');
   // Moved above the `if (!r) return null` early-return below so React's
   // hooks rule (must be called in the same order every render) is
   // never violated when the resolved row is briefly absent. The
@@ -1085,29 +1093,109 @@ const RestaurantDetailModal = ({
 
                   {reviews.length > 0 ? (
                     <div className="flex flex-col gap-2 max-h-52 overflow-y-auto pr-1">
-                      {reviews.map((rv) => (
-                        <div key={rv.id ?? `${rv.content}-${rv.date}`} className="rounded-lg bg-gray-50 px-3 py-2.5">
-                          <div className="flex justify-between items-center mb-0.5">
-                            <span className="text-xs font-bold text-amber-500">★ {rv.rating}</span>
-                            <div className="flex items-center gap-3">
-                              <span className="text-xs text-gray-400">{rv.date}</span>
-                              {/* Delete-review X is owner-only and a
-                                  write action — gated by !isReadOnly so
-                                  read-only viewers (Compare panel,
-                                  group modal) don't see it. */}
-                              {!isReadOnly && (
-                                <button
-                                  onClick={() => dispatch(removeUserReview({ restaurantId: sid(restaurantId), id: rv.id }))}
-                                  className="text-xs text-gray-300 hover:text-red-400 transition-colors"
-                                >
-                                  ✕
-                                </button>
-                              )}
-                            </div>
+                      {reviews.map((rv) => {
+                        const isEditing = editingReviewId === rv.id;
+                        return (
+                          <div key={rv.id ?? `${rv.content}-${rv.date}`} className="rounded-lg bg-gray-50 px-3 py-2.5">
+                            {isEditing ? (
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-2">
+                                  <label className="text-xs text-gray-500">Rating:</label>
+                                  <select
+                                    value={editRating}
+                                    onChange={(e) => setEditRating(Number(e.target.value))}
+                                    disabled={editSubmitting}
+                                    className="text-xs rounded border border-gray-300 pl-2 pr-7 py-0.5"
+                                  >
+                                    {[1, 2, 3, 4, 5].map((n) => (
+                                      <option key={n} value={n}>{n} star{n !== 1 ? 's' : ''}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <textarea
+                                  value={editContent}
+                                  onChange={(e) => { setEditContent(e.target.value); setEditError(''); }}
+                                  rows={3}
+                                  maxLength={2000}
+                                  className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                                />
+                                {editError && <p className="text-[11px] text-red-500">{editError}</p>}
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => { setEditingReviewId(null); setEditContent(''); setEditError(''); }}
+                                    disabled={editSubmitting}
+                                    className="text-xs font-medium text-gray-500 hover:text-gray-700 disabled:opacity-40"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={async () => {
+                                      const trimmed = editContent.trim();
+                                      if (!trimmed) { setEditError('Content is required'); return; }
+                                      // Bail out on a true no-op so we don't waste a round-trip.
+                                      if (trimmed === rv.content && Number(editRating) === Number(rv.rating)) {
+                                        setEditingReviewId(null); setEditContent(''); return;
+                                      }
+                                      setEditSubmitting(true);
+                                      try {
+                                        await dispatch(persistEditReview({
+                                          restaurantId: sid(restaurantId),
+                                          reviewId: rv.id,
+                                          content: trimmed,
+                                          rating: editRating,
+                                        })).unwrap();
+                                        setEditingReviewId(null); setEditContent('');
+                                      } catch (err) {
+                                        setEditError(err?.message ?? 'Could not save review');
+                                      } finally {
+                                        setEditSubmitting(false);
+                                      }
+                                    }}
+                                    disabled={editSubmitting || !editContent.trim()}
+                                    className="rounded-md bg-orange-500 px-2.5 py-1 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-40"
+                                  >
+                                    {editSubmitting ? 'Saving…' : 'Save'}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex justify-between items-center mb-0.5">
+                                  <span className="text-xs font-bold text-amber-500">★ {rv.rating}</span>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-gray-400">{rv.date}</span>
+                                    {/* Edit + delete are owner-only writes — gated by
+                                        !isReadOnly so read-only viewers (Compare panel,
+                                        group modal) don't see either affordance. */}
+                                    {!isReadOnly && (
+                                      <>
+                                        <button
+                                          onClick={() => {
+                                            setEditingReviewId(rv.id);
+                                            setEditContent(rv.content ?? '');
+                                            setEditRating(Number(rv.rating) || 5);
+                                            setEditError('');
+                                          }}
+                                          className="text-[11px] font-medium text-gray-400 hover:text-orange-500 transition-colors"
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          onClick={() => dispatch(removeUserReview({ restaurantId: sid(restaurantId), id: rv.id }))}
+                                          className="text-xs text-gray-300 hover:text-red-400 transition-colors"
+                                        >
+                                          ✕
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                                <p className="text-xs text-gray-600 leading-relaxed">{rv.content}</p>
+                              </>
+                            )}
                           </div>
-                          <p className="text-xs text-gray-600 leading-relaxed">{rv.content}</p>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : !showReviewForm ? (
                     <p className="text-xs text-gray-400 italic">No reviews yet. Be the first!</p>
