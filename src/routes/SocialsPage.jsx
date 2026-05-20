@@ -319,11 +319,23 @@ function FriendsTab() {
   }, [searchQ, searchResults]);
 
   const handleFollow = async (userId, isFollowing) => {
+    // Optimistic — toggle the row's isFollowing locally so the button
+    // flips instantly. Follow/unfollow doesn't affect friends or
+    // incoming requests, so we can skip the load()+refreshSearch()
+    // refetch entirely. Was firing 4 requests per click (1 follow +
+    // 3 unrelated reads); now just 1.
+    setSearchResults((prev) =>
+      prev?.map((u) => (u.id === userId ? { ...u, isFollowing: !isFollowing } : u)) ?? prev
+    );
     try {
       if (isFollowing) await socialApi.unfollow(userId);
       else             await socialApi.follow(userId);
-      await Promise.all([load(), refreshSearch()]);
-    } catch { /* ignore */ }
+    } catch {
+      // Rollback — the server rejected the change, so put isFollowing back.
+      setSearchResults((prev) =>
+        prev?.map((u) => (u.id === userId ? { ...u, isFollowing } : u)) ?? prev
+      );
+    }
   };
 
   const handleFriendAction = async (userId, friendStatus, requestId) => {
@@ -644,7 +656,11 @@ function RecommendationsTab() {
 
   const handleModalClose = () => {
     setModalId(null);
-    load();
+    // No load() here — recommendation changes inside the modal already
+    // dispatch `pickyum:recommendation-changed`, which the listener
+    // above picks up. Calling load() unconditionally was a wasteful
+    // refetch every time the user just peeked at a card without
+    // changing anything.
   };
 
   if (loading) return <p className="text-center text-sm text-gray-400 py-12">Loading…</p>;

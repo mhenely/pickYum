@@ -238,8 +238,17 @@ router.get('/', async (req: Request, res: Response) => {
     }),
     prisma.group.findMany({
       where: { hostId: req.userId, archivedAt: { not: null } },
-      // Archived groups display past results only — no member list rendered.
-      include: { events: archivedEventSummarySelect },
+      // Archived groups display past results only — no member list rendered,
+      // and the SocialsPage `doneEvents = events.filter(e => e.status === 'DONE')`
+      // filter throws away non-DONE rows on the client. Skip them server-side
+      // so users with many in-flight events on archived groups don't pay the
+      // serialized payload cost.
+      include: {
+        events: {
+          ...archivedEventSummarySelect,
+          where: { status: 'DONE' as const },
+        },
+      },
       orderBy: { archivedAt: 'desc' },
     }),
   ]);

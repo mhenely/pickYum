@@ -53,7 +53,17 @@ function invalidateInsightsCache() {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// `invalidate` override: pass a string to use that as the invalidation
+// prefix (instead of the default 3-segment slice of `path`), or `null` to
+// skip cache invalidation entirely. Used for mutations whose default
+// 3-segment prefix would over-invalidate — e.g. POST
+// /api/users/me/refresh-restaurant/:id touches a Restaurant row, not the
+// user — so its default prefix `/api/users/me` would wipe the entire
+// user-data cache (favorites/selections/accepted/...). Pointed
+// invalidation keeps the user cache warm.
+type RequestInitWithInvalidate = RequestInit & { invalidate?: string | null };
+
+async function request<T>(path: string, init?: RequestInitWithInvalidate): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase();
 
   if (method === 'GET') {
@@ -61,7 +71,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (cached && cached.expiresAt > Date.now()) return cached.data as T;
   }
 
-  const { headers, ...rest } = init ?? {};
+  const { headers, invalidate, ...rest } = init ?? {};
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
     ...rest,
@@ -76,13 +86,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const data = await res.json();
 
   if (method !== 'GET') {
-    // Strip query string, then take at most 3 path segments as the invalidation prefix.
-    // e.g. /api/users/me/favorites/123 → /api/users/me  (invalidates all user subresources)
-    //      /api/restaurants           → /api/restaurants (invalidates just the restaurant list)
-    const basePath = path.split('?')[0];
-    const segments = basePath.split('/').filter(Boolean);
-    const prefix = '/' + segments.slice(0, Math.min(3, segments.length)).join('/');
-    invalidateCache(prefix);
+    if (invalidate === null) {
+      // Caller explicitly opted out of invalidation (mutation that
+      // doesn't change any cached read).
+    } else if (typeof invalidate === 'string') {
+      invalidateCache(invalidate);
+    } else {
+      // Strip query string, then take at most 3 path segments as the invalidation prefix.
+      // e.g. /api/users/me/favorites/123 → /api/users/me  (invalidates all user subresources)
+      //      /api/restaurants           → /api/restaurants (invalidates just the restaurant list)
+      const basePath = path.split('?')[0];
+      const segments = basePath.split('/').filter(Boolean);
+      const prefix = '/' + segments.slice(0, Math.min(3, segments.length)).join('/');
+      invalidateCache(prefix);
+    }
   } else {
     GET_CACHE.set(path, { data, expiresAt: Date.now() + ttlForPath(path) });
   }
@@ -717,9 +734,24 @@ export const api = {
     // Always resolves; { refreshed: false, restaurant: null } when the
     // row was fresh, custom (no googlePlaceId), or any error occurred.
     refreshRestaurant: (restaurantId: number) =>
+      // Mutation touches a single Restaurant row, nothing else.
+      // - Doesn't change user data (favorites/selections/accepted),
+      //   so the default `/api/users/me` prefix invalidation was just
+      //   wiping the user cache for nothing.
+      // - The success callback dispatches updateCustomRestaurant which
+      //   is the Redux source-of-truth for all UI surfaces. The HTTP
+      //   GET cache for `/api/restaurants/:id` is only hit by the
+      //   detail modal when `restaurantMap` is empty (guest viewer on
+      //   the group session page), and a 60s stale window there is
+      //   acceptable.
+      // - Critically: invalidating `/api/restaurants/${id}` via
+      //   startsWith would ALSO wipe `/api/restaurants/${id}/reviews`,
+      //   causing every modal open to pay a fresh reviews fetch — the
+      //   exact regression that made repeat opens feel slow.
+      // So: skip invalidation entirely.
       request<{ refreshed: boolean; restaurant: ApiRestaurant | null }>(
         `/api/users/me/refresh-restaurant/${restaurantId}`,
-        { method: 'POST' },
+        { method: 'POST', invalidate: null },
       ),
     recordFlip: () =>
       request<{ flipCount: number }>('/api/users/me/flip', { method: 'POST' }),

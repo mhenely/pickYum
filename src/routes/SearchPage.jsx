@@ -107,10 +107,14 @@ function localSortKey(id, r, sortBy, currentUser, communityRatings) {
   }
 }
 
-function nearbySortKey(place, sortBy, currentUser, communityRatings, customRestaurants) {
-  const existingEntry = Object.entries(customRestaurants)
-    .find(([, r]) => r.googlePlaceId === place.googlePlaceId || r.name === place.name);
-  const existingId = existingEntry?.[0];
+// Maps are the pre-indexed customByPlaceId / customByName built once per
+// customRestaurants change in the component. Was O(customRestaurants) per
+// sort comparison via Object.entries().find(); the maps cut each lookup
+// to O(1). Heaviest visible win on the sort: 50 nearby × log₂(50) × 100
+// saved restaurants × 2 (a and b) = ~60k comparisons → ~600.
+function nearbySortKey(place, sortBy, currentUser, communityRatings, customByPlaceId, customByName) {
+  const existingId =
+    customByPlaceId.get(place.googlePlaceId) ?? customByName.get(place.name);
 
   switch (sortBy) {
     case 'google-desc': return -(place.googleRating ?? -Infinity);
@@ -801,22 +805,14 @@ export default function SearchPage() {
     [localResults, sortBy, currentUser, communityRatings],
   );
 
-  const sortedNearby = useMemo(
-    () => sortBy === 'none'
-      ? filteredNearby
-      : [...filteredNearby].sort((a, b) =>
-          nearbySortKey(a, sortBy, currentUser, communityRatings, customRestaurants) -
-          nearbySortKey(b, sortBy, currentUser, communityRatings, customRestaurants)
-        ),
-    [filteredNearby, sortBy, currentUser, communityRatings, customRestaurants],
-  );
-
   // ── Lookup maps for nearby-card matching ───────────────────────
   // The grid's per-card matching used to call Object.entries(customRestaurants)
   // .find(...) inside the map callback — O(cards × customRestaurants) per
   // render, ~1000 comparisons for a typical 10-card page with 100 saved
   // restaurants. These two indexes flatten it to O(1) per lookup and only
-  // rebuild when customRestaurants actually changes.
+  // rebuild when customRestaurants actually changes. nearbySortKey below
+  // reads from the same maps so its per-comparison cost is also O(1) —
+  // the sort was the heaviest user of these indexes.
   const customByPlaceId = useMemo(() => {
     const m = new Map();
     for (const [id, r] of Object.entries(customRestaurants)) {
@@ -832,6 +828,16 @@ export default function SearchPage() {
     }
     return m;
   }, [customRestaurants]);
+
+  const sortedNearby = useMemo(
+    () => sortBy === 'none'
+      ? filteredNearby
+      : [...filteredNearby].sort((a, b) =>
+          nearbySortKey(a, sortBy, currentUser, communityRatings, customByPlaceId, customByName) -
+          nearbySortKey(b, sortBy, currentUser, communityRatings, customByPlaceId, customByName)
+        ),
+    [filteredNearby, sortBy, currentUser, communityRatings, customByPlaceId, customByName],
+  );
 
   // Same idea for the "is this already in user's options?" check below —
   // currentUser.options is small but the lookup runs per card. Set lookup

@@ -1795,33 +1795,63 @@ router.get('/me/insights', async (req: Request, res: Response) => {
   const effectiveWindowDays = windowDays ?? INSIGHTS_ALL_TIME_CAP_DAYS;
   const sinceDate = new Date(Date.now() - effectiveWindowDays * 24 * 60 * 60 * 1000);
 
-  const rows = await prisma.userAccepted.findMany({
-    where: {
-      userId,
-      acceptedAt: { gte: sinceDate },
-      // Per-entry opt-out from insights. Excluded rows still appear in
-      // History (the user wants the visit logged) but drop out of every
-      // aggregation here — totals, breakdowns, weekday heatmap, cuisine
-      // trends, sparklines. The other UserAccepted reads below
-      // (previousPeriodCount, sparklineRows, neglectedFavorites'
-      // lastChosenRows) MUST also filter on this flag or the numbers
-      // disagree across panels.
-      excludeFromInsights: false,
-    },
-    select: {
-      restaurantId: true,
-      acceptedAt: true,
-      optionsSnapshot: true,
-      chooseMethod: true,
-      // Surface eventId + groupId so the Insights page can deep-link recent
-      // group-vote acceptances to their ballot detail. Solo acceptances have
-      // null event, in which case both fields fall through as null.
-      eventId: true,
-      event: { select: { groupId: true } },
-      restaurant: { select: { id: true, name: true, cuisineType: true } },
-    },
-    orderBy: { acceptedAt: 'desc' },
-  });
+  // ── Phase 1: kick off every independent query in parallel ────────────
+  // These four queries don't depend on each other. Previously they ran
+  // sequentially across the handler — for power users the first-paint
+  // wait could exceed 400ms. Parallelizing collapses the wait to the
+  // single slowest query.
+  const sparklineStart = sparklineWindowStartUtc();
+  const prevStart = windowDays ? new Date(Date.now() - 2 * windowDays * DAY_MS) : null;
+  const prevEnd   = windowDays ? new Date(Date.now() - windowDays * DAY_MS) : null;
+
+  const [rows, favoriteRows, sparklineRows, previousPeriodCountRaw] = await Promise.all([
+    prisma.userAccepted.findMany({
+      where: {
+        userId,
+        acceptedAt: { gte: sinceDate },
+        // Per-entry opt-out from insights. Excluded rows still appear in
+        // History (the user wants the visit logged) but drop out of every
+        // aggregation here — totals, breakdowns, weekday heatmap, cuisine
+        // trends, sparklines. The other UserAccepted reads below
+        // (previousPeriodCount, sparklineRows, neglectedFavorites'
+        // lastChosenRows) MUST also filter on this flag or the numbers
+        // disagree across panels.
+        excludeFromInsights: false,
+      },
+      select: {
+        restaurantId: true,
+        acceptedAt: true,
+        optionsSnapshot: true,
+        chooseMethod: true,
+        // Surface eventId + groupId so the Insights page can deep-link recent
+        // group-vote acceptances to their ballot detail. Solo acceptances have
+        // null event, in which case both fields fall through as null.
+        eventId: true,
+        event: { select: { groupId: true } },
+        restaurant: { select: { id: true, name: true, cuisineType: true } },
+      },
+      orderBy: { acceptedAt: 'desc' },
+    }),
+    prisma.userFavorite.findMany({
+      where: { userId },
+      include: { restaurant: { select: { id: true, name: true, cuisineType: true } } },
+    }),
+    prisma.userAccepted.findMany({
+      where: { userId, acceptedAt: { gte: sparklineStart }, excludeFromInsights: false },
+      select: {
+        acceptedAt: true,
+        restaurant: { select: { cuisineType: true } },
+      },
+    }),
+    // Previous-period count for the "this month vs last month" delta. Only
+    // computed when the user is viewing a windowed slice — there's no
+    // "previous all-time", so we return null and the UI hides the indicator.
+    prevStart && prevEnd
+      ? prisma.userAccepted.count({
+          where: { userId, acceptedAt: { gte: prevStart, lt: prevEnd }, excludeFromInsights: false },
+        })
+      : Promise.resolve(0),
+  ]);
 
   // Single-pass roll-up.
   //
@@ -1979,14 +2009,7 @@ router.get('/me/insights', async (req: Request, res: Response) => {
   // (or has never picked at all). This is computed against ALL UserAccepted —
   // not the current `since` window — because the whole point is "you haven't
   // chosen this in a long time," which only makes sense over full history.
-  // `?? []` guards against jest automocks that resolve to undefined for any
-  // Prisma call we haven't explicitly mocked in a given test. Real Prisma
-  // always returns an array here, so this is a test-only fallback.
-  const favoriteRows = (await prisma.userFavorite.findMany({
-    where: { userId },
-    include: { restaurant: { select: { id: true, name: true, cuisineType: true } } },
-  })) ?? [];
-
+  // favoriteRows was prefetched in Phase 1 above.
   let neglectedFavorites: Array<{
     restaurantId: string;
     name: string;
@@ -2031,18 +2054,8 @@ router.get('/me/insights', async (req: Request, res: Response) => {
   }
 
   // ── Cuisine sparklines — 12 weekly buckets, top 5 cuisines ────────────
-  // A small dedicated query over the last 12 weeks of acceptances. Selects
-  // only acceptedAt + cuisineType to keep the payload tiny. Bucket index 0 is
-  // the oldest week, so the sparkline reads left-to-right oldest→newest.
-  const sparklineStart = sparklineWindowStartUtc();
-  const sparklineRows = (await prisma.userAccepted.findMany({
-    where: { userId, acceptedAt: { gte: sparklineStart }, excludeFromInsights: false },
-    select: {
-      acceptedAt: true,
-      restaurant: { select: { cuisineType: true } },
-    },
-  })) ?? [];
-
+  // sparklineRows was prefetched in Phase 1 above. Bucket index 0 is the
+  // oldest week, so the sparkline reads left-to-right oldest→newest.
   const cuisineWeekly = new Map<string, number[]>();
   for (const row of sparklineRows) {
     const cuisine = row.restaurant?.cuisineType;
@@ -2069,16 +2082,9 @@ router.get('/me/insights', async (req: Request, res: Response) => {
     .forEach((x) => { cuisineWeeklyCounts[x.cuisine] = x.weeks; });
 
   // ── Previous-period count (for "this month vs last month" delta) ──────
-  // Only computed when the user is viewing a windowed slice — there's no
-  // "previous all-time", so we return null and the UI hides the indicator.
-  let previousPeriodCount: number | null = null;
-  if (windowDays) {
-    const prevStart = new Date(Date.now() - 2 * windowDays * DAY_MS);
-    const prevEnd   = new Date(Date.now() - windowDays * DAY_MS);
-    previousPeriodCount = await prisma.userAccepted.count({
-      where: { userId, acceptedAt: { gte: prevStart, lt: prevEnd }, excludeFromInsights: false },
-    }) ?? 0;
-  }
+  // previousPeriodCountRaw was prefetched in Phase 1; the UI hides the
+  // indicator when no window is in effect, so we surface null in that case.
+  const previousPeriodCount: number | null = windowDays ? (previousPeriodCountRaw ?? 0) : null;
 
   res.json({
     totalDecisions,

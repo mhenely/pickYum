@@ -247,22 +247,33 @@ router.get('/:id', async (req: Request, res: Response) => {
   // the groups.ts on-read sweeper — no background process, just opportunistic
   // start when someone loads the trip page. Skipped for archived trips so a
   // member browsing history doesn't trigger a fresh vote post-archive.
-  if (!tripMeta.archivedAt) {
-    // `?? []` is defensive against a Prisma test-double that doesn't
-    // explicitly return an array; in production findMany always does.
-    // Parallel launches — each is independent (different event id, no
-    // row-level contention). Backed by composite index
-    // group_events(trip_id, status, voting_starts_at).
-    const overdue = (await prisma.groupEvent.findMany({
-      where: { tripId, status: 'OPEN', votingStartsAt: { lte: new Date() } },
-      select: { id: true },
-    })) ?? [];
-    if (overdue.length > 0) {
-      await Promise.all(overdue.map((ev) => launchTripVoting(tripId, ev.id, tripMeta.hostId)));
-    }
+  //
+  // The overdue scan and the full-trip fetch are independent — the launch
+  // happens server-side and is reflected in the next refetch, not this one.
+  // Running them in parallel cuts one round-trip of latency from the
+  // request. The launches themselves are still serialized to the overdue
+  // scan via the outer await/Promise.all gate below.
+  const overduePromise = tripMeta.archivedAt
+    ? Promise.resolve([] as Array<{ id: number }>)
+    : prisma.groupEvent.findMany({
+        where: { tripId, status: 'OPEN', votingStartsAt: { lte: new Date() } },
+        select: { id: true },
+      }).then((r) => r ?? []);
+
+  const tripPromise = prisma.trip.findUnique({ where: { id: tripId }, include: tripInclude });
+
+  const [overdue, trip] = await Promise.all([overduePromise, tripPromise]);
+
+  // Parallel launches — each is independent (different event id, no
+  // row-level contention). Backed by composite index
+  // group_events(trip_id, status, voting_starts_at).
+  if (overdue.length > 0) {
+    await Promise.all(overdue.map((ev) => launchTripVoting(tripId, ev.id, tripMeta.hostId)));
+    // Note: trip variable is from before the launch. A subsequent
+    // refetch will pick up the new VOTING status. Acceptable — the
+    // client just re-renders on the next mutation or interval.
   }
 
-  const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: tripInclude });
   res.json({ trip });
 });
 

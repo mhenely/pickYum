@@ -533,7 +533,9 @@ function VoteMethodPicker({ tripId, event, canEdit, onUpdated }) {
     const myReqId = ++reqIdRef.current;
     try {
       await api.trips.setVoteMethod(tripId, event.id, next);
-      if (reqIdRef.current === myReqId) onUpdated();
+      // Pass the new method back so the parent can apply a local-only
+      // update instead of refetching the whole trip.
+      if (reqIdRef.current === myReqId) onUpdated(next);
     } catch (err) {
       if (reqIdRef.current === myReqId) {
         setError(err.message ?? 'Could not update vote method.');
@@ -601,7 +603,20 @@ function VoteMethodPicker({ tripId, event, canEdit, onUpdated }) {
   );
 }
 
-function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh }) {
+// Sorts events by scheduledFor asc (no-schedule events last) with
+// createdAt as the tiebreaker — same ordering the server applies on
+// the trip GET, so an optimistically-inserted event lands in the same
+// position it would after a refetch.
+function compareEventOrder(a, b) {
+  const aSf = a.scheduledFor ? new Date(a.scheduledFor).getTime() : Infinity;
+  const bSf = b.scheduledFor ? new Date(b.scheduledFor).getTime() : Infinity;
+  if (aSf !== bSf) return aSf - bSf;
+  const aCa = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+  const bCa = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+  return aCa - bCa;
+}
+
+function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh, setTrip }) {
   const navigate = useNavigate();
   // User's personal favorites + selections are the source for the per-meal
   // restaurant picker. We don't run a separate Places search here — keep
@@ -654,6 +669,22 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
 
   const events = trip.events ?? [];
 
+  // Apply a local change to a single event in the trip, skipping the full
+  // /api/trips/:id refetch. All the per-event handlers below use this so
+  // each action lands instantly instead of waiting for the trip to refetch
+  // (~300-700ms each, plus the visible delay of the list updating after
+  // the click). Falls back to onRefresh when setTrip isn't wired up.
+  const updateEvent = (eventId, updater) => {
+    if (!setTrip) { onRefresh(); return; }
+    setTrip((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        events: (prev.events ?? []).map((e) => (e.id === eventId ? updater(e) : e)),
+      };
+    });
+  };
+
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -667,7 +698,7 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
         const t = newTime || '12:00';
         scheduledFor = new Date(`${newDate}T${t}`).toISOString();
       }
-      await api.trips.createEvent(trip.id, {
+      const { event } = await api.trips.createEvent(trip.id, {
         name: newName.trim(),
         scheduledFor,
         mealSlot: newSlot || null,
@@ -676,7 +707,20 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
       setShowCreate(false);
       setNewName(''); setNewDate(''); setNewTime(''); setNewSlot('');
       setNewParticipants(new Set());
-      onRefresh();
+      // Optimistic: insert the server-returned event into the local trip
+      // (sorted by the same scheduledFor/createdAt order the server uses).
+      // Skips the full-trip refetch — previously the list flashed empty
+      // for ~500-1000ms after submit while waiting on `load()`. Falls back
+      // to `onRefresh()` if setTrip isn't wired up.
+      if (setTrip) {
+        setTrip((prev) => {
+          if (!prev) return prev;
+          const events = [...(prev.events ?? []), event].sort(compareEventOrder);
+          return { ...prev, events };
+        });
+      } else {
+        onRefresh();
+      }
     } catch (err) {
       setCreateError(err.message ?? 'Could not create meal.');
     } finally {
@@ -695,9 +739,17 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
   const handleAddOption = async (eventId, restaurantId) => {
     setActioningEventId(eventId);
     try {
-      await api.trips.addEventOption(trip.id, eventId, Number(restaurantId));
+      const { option } = await api.trips.addEventOption(trip.id, eventId, Number(restaurantId));
       setOptionPickerForEvent(null);
-      onRefresh();
+      updateEvent(eventId, (e) => ({
+        ...e,
+        // Append while skipping a server-side duplicate (the route uses
+        // upsert, so adding an already-existing option returns the
+        // existing row).
+        options: (e.options ?? []).some((o) => o.restaurantId === option.restaurantId)
+          ? e.options
+          : [...(e.options ?? []), option],
+      }));
     } catch (err) {
       setCreateError(err.message ?? 'Could not add option.');
     } finally {
@@ -756,9 +808,14 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
         lat: place.lat ?? undefined,
         lng: place.lng ?? undefined,
       });
-      await api.trips.addEventOption(trip.id, eventId, restaurant.id);
+      const { option } = await api.trips.addEventOption(trip.id, eventId, restaurant.id);
       setOptionPickerForEvent(null);
-      onRefresh();
+      updateEvent(eventId, (e) => ({
+        ...e,
+        options: (e.options ?? []).some((o) => o.restaurantId === option.restaurantId)
+          ? e.options
+          : [...(e.options ?? []), option],
+      }));
     } catch (err) {
       setCreateError(err.message ?? 'Could not add option.');
     } finally {
@@ -770,7 +827,10 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
     setActioningEventId(eventId);
     try {
       await api.trips.removeEventOption(trip.id, eventId, restaurantId);
-      onRefresh();
+      updateEvent(eventId, (e) => ({
+        ...e,
+        options: (e.options ?? []).filter((o) => String(o.restaurantId) !== String(restaurantId)),
+      }));
     } catch (err) {
       setCreateError(err.message ?? 'Could not remove option.');
     } finally {
@@ -815,7 +875,14 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
     setActioningEventId(eventId);
     try {
       await api.trips.deleteEvent(trip.id, eventId);
-      onRefresh();
+      // Optimistic: drop the event from the local trip immediately.
+      // Without this the deleted row lingered until the full trip
+      // refetch landed.
+      if (setTrip) {
+        setTrip((prev) => prev ? { ...prev, events: (prev.events ?? []).filter((e) => e.id !== eventId) } : prev);
+      } else {
+        onRefresh();
+      }
     } catch (err) {
       setCreateError(err.message ?? 'Could not delete meal.');
     } finally {
@@ -831,10 +898,10 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
     setActioningEventId(eventId);
     try {
       const iso = new Date(scheduleDraft).toISOString();
-      await api.trips.setSchedule(trip.id, eventId, iso);
+      const { votingStartsAt } = await api.trips.setSchedule(trip.id, eventId, iso);
       setSchedulePickerForEvent(null);
       setScheduleDraft('');
-      onRefresh();
+      updateEvent(eventId, (e) => ({ ...e, votingStartsAt }));
     } catch (err) {
       setCreateError(err.message ?? 'Could not set schedule.');
     } finally {
@@ -848,7 +915,7 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
       await api.trips.setSchedule(trip.id, eventId, null);
       setSchedulePickerForEvent(null);
       setScheduleDraft('');
-      onRefresh();
+      updateEvent(eventId, (e) => ({ ...e, votingStartsAt: null }));
     } catch (err) {
       setCreateError(err.message ?? 'Could not clear schedule.');
     } finally {
@@ -1016,7 +1083,15 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh 
                           tripId={trip.id}
                           event={ev}
                           canEdit={canEditVote}
-                          onUpdated={onRefresh}
+                          // Picker passes the new method through so we can
+                          // apply it locally instead of refetching the full
+                          // trip. Falls back to onRefresh if a caller invokes
+                          // onUpdated() with no argument.
+                          onUpdated={(nextMethod) =>
+                            nextMethod
+                              ? updateEvent(ev.id, (e) => ({ ...e, voteMethod: nextMethod }))
+                              : onRefresh()
+                          }
                         />
                       </div>
 
@@ -1569,6 +1644,13 @@ function TripInsightsPanel({ tripId }) {
       {infoForId && (
         <RestaurantDetailModal
           restaurantId={Number(infoForId)}
+          // Without restaurantMap the modal renders nothing until its own
+          // /api/restaurants/:id fetch resolves — which is the 2+ second
+          // delay between click and modal appearing. Threading the user's
+          // customRestaurants here lets the modal open instantly for any
+          // restaurant they've previously interacted with (the common
+          // case for trip-insights clicks).
+          restaurantMap={customRestaurants}
           readOnly
           actions={null}
           onClose={() => setInfoForId(null)}
@@ -1593,8 +1675,15 @@ export default function TripDetailPage() {
   // null = no dialog; true = archive-confirm dialog open.
   const [confirmArchive, setConfirmArchive] = useState(false);
 
+  // `load` is called both on initial mount AND from every mutation
+  // handler. Without the `trip != null` gate we'd set loading=true on
+  // every refresh, which blanks the entire page with "Loading trip…"
+  // for the duration of the fetch — making every click feel laggy.
+  // Now: first load shows the placeholder; subsequent refreshes keep
+  // the existing trip on screen and swap in the fresh copy when it
+  // arrives.
   const load = useCallback(async () => {
-    setLoading(true);
+    setTrip((prev) => { if (!prev) setLoading(true); return prev; });
     setError('');
     try {
       const { trip: t } = await api.trips.get(Number(id));
@@ -1667,6 +1756,11 @@ export default function TripDetailPage() {
           isHost={isHost}
           isArchived={isArchived}
           onRefresh={load}
+          // Optimistic-update lever — lets handlers apply local trip
+          // mutations (event add/remove) without waiting for a refetch.
+          // The list updates the moment the server confirms instead of
+          // the moment the entire trip refetch returns.
+          setTrip={setTrip}
         />
 
         <TripInsightsPanel tripId={trip.id} />
