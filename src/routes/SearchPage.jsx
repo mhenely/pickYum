@@ -183,10 +183,25 @@ export default function SearchPage() {
   // through "Adding…" when the user only meant to open the modal.
   const [addingId,      setAddingId]      = useState(null);
   const [detailId,      setDetailId]      = useState(null);
-  // Saved restaurants is a "filter my own collection" surface. On Search,
-  // the primary intent is discovery, so we collapse it by default and let
-  // the user expand when they want to grep their existing picks.
-  const [savedExpanded, setSavedExpanded] = useState(false);
+  // Your Lists is a "filter my own collection" surface. Default behavior:
+  //   - No active nearby search → expand (gives the user something to see
+  //     instead of a near-empty page; reduces friction for revisiting
+  //     saved restaurants).
+  //   - Active nearby search   → collapse (nearby cards are the hero
+  //     content; pushing them below the fold for a wall of saved cards
+  //     inverts the page's discovery-first purpose).
+  // Synced reactively to nearbyResults UNLESS the user has manually
+  // toggled — once they've expressed intent, we stop auto-overriding.
+  const [savedExpanded, setSavedExpanded] = useState(() => nearbyResults === null);
+  const [savedToggledByUser, setSavedToggledByUser] = useState(false);
+  useEffect(() => {
+    if (savedToggledByUser) return;
+    setSavedExpanded(nearbyResults === null);
+  }, [nearbyResults, savedToggledByUser]);
+  const handleToggleSaved = () => {
+    setSavedToggledByUser(true);
+    setSavedExpanded((v) => !v);
+  };
 
   // ── Your Lists view ───────────────────────────────────────────
   // The "Saved Restaurants" section was a grab-bag of every-
@@ -1250,8 +1265,9 @@ export default function SearchPage() {
 
       {/* ── Nearby results section (Places API) ──────────────── */}
       {/* Discovery is the primary intent on this page, so Nearby renders
-          BEFORE the user's Saved Restaurants section. Saved is collapsed by
-          default below — see the rationale on `savedExpanded`. */}
+          BEFORE the user's Saved Restaurants section. Your Lists below
+          auto-expands when no nearby search is active and collapses when
+          one is — see the rationale on `savedExpanded`. */}
       {isNearbyMode && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
@@ -1448,7 +1464,7 @@ export default function SearchPage() {
           <div className="w-full flex items-center gap-2 mb-3 px-2 -mx-2">
             <button
               type="button"
-              onClick={() => setSavedExpanded((v) => !v)}
+              onClick={handleToggleSaved}
               aria-expanded={savedExpanded}
               className="flex items-center gap-2 text-left rounded-lg hover:bg-gray-50 transition-colors px-2 py-1.5 -mx-2"
             >

@@ -18,7 +18,14 @@ export type UserNotificationReason =
   | 'group-invite'
   | 'trip-invite'
   | 'meal-participant'
-  | 'friend-request';
+  | 'friend-request'
+  // Fired when a session reaches `status: 'done'` (winner determined,
+  // whether via close-and-tally, flip, or spin). Sent to every event
+  // participant except the host, who already saw the result via the
+  // request they made. Group events notify all group members; trip
+  // meal events notify the meal's participantUserIds (or all trip
+  // members when participantUserIds is empty = "everyone").
+  | 'vote-result';
 
 // Map<userId, Set<Response>> — per-instance registry of open SSE
 // connections. A user can hold multiple connections (two tabs open).

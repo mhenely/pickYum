@@ -18,6 +18,7 @@ import DietaryTagChips from '../components/DietaryTagChips';
 // Redux's dev-mode selector-stability check would warn on every
 // dispatch. Same pattern as `allLists` / `Toaster`'s EMPTY_QUEUE.
 const EMPTY_ID_LIST = [];
+const EMPTY_OBJECT  = Object.freeze({});
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -621,7 +622,7 @@ function MealEventsSection({ trip, currentUserId, isHost, isArchived, onRefresh,
   // User's personal favorites + selections are the source for the per-meal
   // restaurant picker. We don't run a separate Places search here — keep
   // the UI compact and reuse what the user has already curated.
-  const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? {});
+  const customRestaurants = useSelector((s) => s.userInfo.customRestaurants ?? EMPTY_OBJECT);
   // Path was `users?.[0]?.favorites` before the slice-flatten migration
   // (Tier 2 #6 + #7). The legacy path always returned undefined post-
   // flatten, then the `?? []` fallback minted a fresh array each call

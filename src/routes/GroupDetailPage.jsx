@@ -370,13 +370,18 @@ function SchedulePicker({ groupId, event, onUpdated }) {
 
   const handleSave = async () => {
     setSaving(true); setError('');
-    try { await groupsApi.setSchedule(groupId, event.id, value || null); onUpdated(); }
-    catch (err) { setError(err.message); }
+    try {
+      const next = value || null;
+      const { votingStartsAt } = await groupsApi.setSchedule(groupId, event.id, next);
+      // Pass the server's normalized value through so the parent applies it
+      // locally instead of refetching the whole group.
+      onUpdated(votingStartsAt ?? next);
+    } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   };
   const handleClear = async () => {
     setValue(''); setSaving(true);
-    try { await groupsApi.setSchedule(groupId, event.id, null); onUpdated(); }
+    try { await groupsApi.setSchedule(groupId, event.id, null); onUpdated(null); }
     catch { /* ignore */ } finally { setSaving(false); }
   };
 
@@ -442,7 +447,9 @@ function VoteMethodPicker({ groupId, event, isHost, onUpdated }) {
     const myReqId = ++reqIdRef.current;
     try {
       await groupsApi.setVoteMethod(groupId, event.id, next);
-      if (reqIdRef.current === myReqId) onUpdated();
+      // Pass the new method through so the parent applies it locally
+      // instead of refetching the whole group.
+      if (reqIdRef.current === myReqId) onUpdated(next);
     } catch (err) {
       // Only the latest click owns the error/revert. Older racing
       // requests that fail should be ignored — the user already moved on.
@@ -545,13 +552,16 @@ function EventDatePicker({ groupId, event, isHost, onUpdated }) {
 
   const handleSave = async () => {
     setSaving(true); setError('');
-    try { await groupsApi.setEventDate(groupId, event.id, value || null); onUpdated(); }
-    catch (err) { setError(err.message); }
+    try {
+      const next = value || null;
+      const { scheduledFor } = await groupsApi.setEventDate(groupId, event.id, next);
+      onUpdated(scheduledFor ?? next);
+    } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   };
   const handleClear = async () => {
     setValue(''); setSaving(true);
-    try { await groupsApi.setEventDate(groupId, event.id, null); onUpdated(); }
+    try { await groupsApi.setEventDate(groupId, event.id, null); onUpdated(null); }
     catch { /* ignore */ } finally { setSaving(false); }
   };
 
@@ -849,7 +859,7 @@ function ResultDisplay({ result, scheduledFor }) {
 
 // ── Event card ────────────────────────────────────────────────
 
-function EventCard({ event, group, isHost, authUserId, userOptions, allRestaurants, onRefresh, onConfirm }) {
+function EventCard({ event, group, isHost, authUserId, userOptions, allRestaurants, onRefresh, onConfirm, updateEvent, removeEvent }) {
   const [expanded, setExpanded] = useState(event.status !== 'DONE');
   const [startingVote, setStartingVote] = useState(false);
   const [voteError, setVoteError] = useState('');
@@ -896,7 +906,10 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
       // Same noopener guard as the calendar handler — the opened vote tab
       // hosts authenticated UI; we don't want it able to navigate this one.
       window.open(`/vote/${sessionId}`, '_blank', 'noopener,noreferrer');
-      await onRefresh();
+      // Optimistic: server flipped status to VOTING and stored the
+      // sessionId. The "Resume voting" button now wires up automatically
+      // without paying a full refetch.
+      updateEvent(event.id, (e) => ({ ...e, status: 'VOTING', sessionId }));
     } catch (err) {
       setVoteError(err.message);
     } finally {
@@ -908,7 +921,11 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
     onConfirm({
       message: 'Cancel the active voting session? The event will return to Open so you can restart it later.',
       onConfirm: async () => {
-        try { await groupsApi.cancelVoting(group.id, event.id); await onRefresh(); } catch { /* ignore */ }
+        try {
+          await groupsApi.cancelVoting(group.id, event.id);
+          // Optimistic: reset locally to OPEN (server clears sessionId too).
+          updateEvent(event.id, (e) => ({ ...e, status: 'OPEN', sessionId: null }));
+        } catch { /* ignore */ }
       },
     });
   };
@@ -917,6 +934,10 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
     onConfirm({
       message: 'Archive this result and close the event?',
       onConfirm: async () => {
+        // Accept-result's response is `{ message }` — we don't have the
+        // freshly-persisted GroupEventResult row to apply locally, so we
+        // refetch. Rare action (once per voting event), so the refetch
+        // cost is acceptable.
         try { await groupsApi.acceptResult(group.id, event.id); await onRefresh(); } catch { /* ignore */ }
       },
     });
@@ -927,13 +948,22 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
       message: `Delete "${event.name}"? This cannot be undone.`,
       onConfirm: async () => {
         setDeleting(true);
-        try { await groupsApi.deleteEvent(group.id, event.id); await onRefresh(); } catch { /* ignore */ } finally { setDeleting(false); }
+        try {
+          await groupsApi.deleteEvent(group.id, event.id);
+          removeEvent(event.id);
+        } catch { /* ignore */ } finally { setDeleting(false); }
       },
     });
   };
 
   const handleRemoveOption = async (restaurantId) => {
-    try { await groupsApi.removeOption(group.id, event.id, restaurantId); await onRefresh(); } catch { /* ignore */ }
+    try {
+      await groupsApi.removeOption(group.id, event.id, restaurantId);
+      updateEvent(event.id, (e) => ({
+        ...e,
+        options: (e.options ?? []).filter((o) => String(o.restaurantId) !== String(restaurantId)),
+      }));
+    } catch { /* ignore */ }
   };
 
   const handleSearchAdd = async (e) => {
@@ -954,8 +984,15 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
   const handleAddOption = async (restaurantId) => {
     setAddingId(restaurantId);
     try {
-      await groupsApi.addOption(group.id, event.id, restaurantId);
-      await onRefresh();
+      const { option } = await groupsApi.addOption(group.id, event.id, restaurantId);
+      // Optimistic: append the server-returned option (dedup-safe — the
+      // route uses upsert, so re-adding an existing option returns it).
+      updateEvent(event.id, (e) => ({
+        ...e,
+        options: (e.options ?? []).some((o) => o.restaurantId === option.restaurantId)
+          ? e.options
+          : [...(e.options ?? []), option],
+      }));
       setAddDbResults(null); setAddPlacesResults(null); setAddQuery('');
     } catch (err) { setAddError(err.message); } finally { setAddingId(null); }
   };
@@ -974,8 +1011,13 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
         takeout: place.takeout,
         delivery: place.delivery,
       });
-      await groupsApi.addOption(group.id, event.id, restaurant.id);
-      await onRefresh();
+      const { option } = await groupsApi.addOption(group.id, event.id, restaurant.id);
+      updateEvent(event.id, (e) => ({
+        ...e,
+        options: (e.options ?? []).some((o) => o.restaurantId === option.restaurantId)
+          ? e.options
+          : [...(e.options ?? []), option],
+      }));
       setAddDbResults(null); setAddPlacesResults(null); setAddQuery('');
     } catch (err) { setAddError(err.message); } finally { setAddingPlacesId(null); }
   };
@@ -1211,9 +1253,27 @@ function EventCard({ event, group, isHost, authUserId, userOptions, allRestauran
           {/* OPEN — voting controls (host only; suppressed for archived groups) */}
           {canHostAct && isOpen && (
             <section className="flex flex-col gap-3">
-              <VoteMethodPicker groupId={group.id} event={event} isHost={canHostAct} onUpdated={onRefresh} />
-              <EventDatePicker groupId={group.id} event={event} isHost={isHost} onUpdated={onRefresh} />
-              <SchedulePicker groupId={group.id} event={event} onUpdated={onRefresh} />
+              {/* Pickers now pass the new value through onUpdated(value) so
+                  we can apply it locally instead of refetching the entire
+                  group. Falls back to onRefresh when onUpdated() is called
+                  with no value (defensive). */}
+              <VoteMethodPicker
+                groupId={group.id}
+                event={event}
+                isHost={canHostAct}
+                onUpdated={(v) => v != null ? updateEvent(event.id, (e) => ({ ...e, voteMethod: v })) : onRefresh()}
+              />
+              <EventDatePicker
+                groupId={group.id}
+                event={event}
+                isHost={isHost}
+                onUpdated={(v) => updateEvent(event.id, (e) => ({ ...e, scheduledFor: v ?? null }))}
+              />
+              <SchedulePicker
+                groupId={group.id}
+                event={event}
+                onUpdated={(v) => updateEvent(event.id, (e) => ({ ...e, votingStartsAt: v ?? null }))}
+              />
               <div className="rounded-xl border border-gray-200 bg-white p-4">
                 <h4 className="text-sm font-semibold text-gray-700 mb-2">Start voting now</h4>
                 <p className="text-xs text-gray-500 mb-3">Locks options immediately and opens a live voting session.</p>
@@ -1670,6 +1730,25 @@ const GroupDetailPage = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  // Optimistic-update helpers — apply a local change to a single event (or
+  // remove it entirely) without refetching the whole group. Every per-event
+  // mutation routes through these so clicks land instantly instead of
+  // waiting on a full /api/groups/:id refetch (which re-pulls every event
+  // with options + result + voterMeta + members).
+  const updateEvent = useCallback((eventId, updater) => {
+    setGroup((prev) => prev ? {
+      ...prev,
+      events: (prev.events ?? []).map((e) => (e.id === eventId ? updater(e) : e)),
+    } : prev);
+  }, []);
+
+  const removeEvent = useCallback((eventId) => {
+    setGroup((prev) => prev ? {
+      ...prev,
+      events: (prev.events ?? []).filter((e) => e.id !== eventId),
+    } : prev);
+  }, []);
+
   if (loading) return <p className="text-center text-sm text-gray-400 py-20">Loading…</p>;
   if (error)   return <p className="text-center text-sm text-red-500 py-20">{error}</p>;
   if (!group)  return null;
@@ -1858,6 +1937,8 @@ const GroupDetailPage = () => {
                   allRestaurants={customRestaurants}
                   onRefresh={load}
                   onConfirm={setConfirm}
+                  updateEvent={updateEvent}
+                  removeEvent={removeEvent}
                 />
               ))}
               {/* Past events */}

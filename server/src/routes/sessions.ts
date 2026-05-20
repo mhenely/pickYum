@@ -17,6 +17,7 @@ import {
 import { requireAuth, getOptionalAuthUserId } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
 import { tallyRanked } from '../lib/irv';
+import { notifyVoteResult } from '../lib/eventLifecycle';
 import prisma from '../lib/prisma';
 
 const router = Router();
@@ -528,6 +529,12 @@ router.post('/:id/close', requireAuth, async (req: Request, res: Response) => {
 
     await saveSession(session);
     notifyClients(session.id, session);
+    // Push a navbar notification to every participant when voting actually
+    // concluded with a winner. Ties leave status='closed' and trigger the
+    // tiebreak path (flip/spin) which fires its own notification below.
+    if (session.status === 'done') {
+      notifyVoteResult(session).catch(() => { /* logged in helper */ });
+    }
     res.json({ session: redactForClient(session) });
   });
 });
@@ -560,6 +567,9 @@ router.post('/:id/flip', requireAuth, async (req: Request, res: Response) => {
 
     await saveSession(session);
     notifyClients(session.id, session);
+    // Same notification fire as the close-and-tally path — winner determined
+    // via flip/spin still warrants a navbar nudge for every participant.
+    notifyVoteResult(session).catch(() => { /* logged in helper */ });
     res.json({ session: redactForClient(session) });
   });
 });

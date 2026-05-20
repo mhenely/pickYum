@@ -6,6 +6,7 @@ import { Bars3Icon, XMarkIcon, BellIcon } from '@heroicons/react/24/outline'
 import { useDispatch, useSelector } from "react-redux";
 import { removeUserOption } from "../redux/slices/userInfoSlice";
 import { logoutUser } from "../redux/slices/authSlice";
+import { pushToast } from "../redux/slices/toastSlice";
 import useCurrentUser from "../hooks/useCurrentUser";
 import RestaurantDetailModal from "./RestaurantDetailModal";
 import { socialApi } from "../lib/socialApi";
@@ -265,13 +266,32 @@ const NavBar = () => {
     // withCredentials so the auth cookie rides along — the /stream
     // endpoint is gated by requireAuth.
     const es = new EventSource(`${BASE}/api/notifications/stream`, { withCredentials: true });
-    es.addEventListener('refresh', () => { fetchNotifications(); });
+    es.addEventListener('refresh', (e) => {
+      // The server frames carry { reason } so the client can route on
+      // type without an extra round-trip. Parsing is defensive: any
+      // malformed payload still falls through to a plain refetch.
+      let reason = null;
+      try { reason = JSON.parse(e.data)?.reason ?? null; } catch { /* ignore */ }
+      fetchNotifications();
+      // 'vote-result' is transient — the just-concluded vote drops off
+      // the activeVotes list (it's no longer in VOTING status) and the
+      // bell has no persistent "recent results" row. Surface it as a
+      // toast so the user doesn't miss the outcome of a vote they were
+      // part of, especially when they closed the live session tab.
+      if (reason === 'vote-result') {
+        dispatch(pushToast({
+          id: `vote-result-${Date.now()}`,
+          status: 'info',
+          label: 'A vote you joined just concluded — check your groups or trips for the winner.',
+        }));
+      }
+    });
     // No need to handle the default `message` event — the server only
     // emits typed refreshes plus heartbeat comments (which EventSource
     // ignores). errors trigger the built-in retry; we just close on
     // unmount so a re-mount opens a fresh connection.
     return () => { es.close(); };
-  }, [isAuthenticated, fetchNotifications]);
+  }, [isAuthenticated, fetchNotifications, dispatch]);
 
   const handleAccept = async (requestId) => {
     try {

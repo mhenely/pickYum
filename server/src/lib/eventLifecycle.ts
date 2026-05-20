@@ -10,9 +10,12 @@ import prisma from './prisma';
 import {
   createSession, generateSessionId, withSessionLock,
   getSession, saveSession, notifyClients,
+  type GroupSession,
   type RestaurantSnapshot,
   type SnapshotPhoto,
 } from '../sessions';
+import { notifyUser } from './userNotifications';
+import { logger } from './logger';
 
 export type EventParent = 'group' | 'trip';
 
@@ -140,5 +143,67 @@ export async function revokeVoterTokensForUserOnParent(
       await saveSession(sess);
       notifyClients(sess.id, sess);
     }).catch(() => { /* non-fatal */ });
+  }
+}
+
+// Pushes a `vote-result` notification to every event participant when a
+// session reaches `status: 'done'` (winner determined). Called from the
+// three transition points in sessions.ts: close-and-tally, flip, and
+// spin. Fire-and-forget — a notification miss isn't fatal (the user
+// will see the result when they next visit the group/trip page).
+//
+// Audience:
+//   - Trip meal event: meal.participantUserIds, OR all trip members if
+//     participantUserIds is empty (the "everyone" sentinel).
+//   - Group event:     all group members.
+//   - Ad-hoc session (no eventId): skipped — no canonical participant
+//     list to address.
+// The host is always excluded; they triggered the transition and saw
+// the result via their own request.
+export async function notifyVoteResult(session: GroupSession): Promise<void> {
+  if (!session.eventId) return;
+
+  try {
+    let userIds: number[] = [];
+
+    if (session.tripId) {
+      const event = await prisma.groupEvent.findUnique({
+        where: { id: session.eventId },
+        select: { tripId: true, participantUserIds: true },
+      });
+      if (!event?.tripId) return;
+      const explicit = Array.isArray(event.participantUserIds)
+        ? (event.participantUserIds as unknown[]).filter((n): n is number => typeof n === 'number')
+        : [];
+      if (explicit.length > 0) {
+        userIds = explicit;
+      } else {
+        const members = await prisma.tripMember.findMany({
+          where:  { tripId: event.tripId },
+          select: { userId: true },
+        });
+        userIds = members.map((m) => m.userId);
+      }
+    } else if (session.groupId) {
+      const members = await prisma.groupMember.findMany({
+        where:  { groupId: session.groupId },
+        select: { userId: true },
+      });
+      userIds = members.map((m) => m.userId);
+    } else {
+      return;
+    }
+
+    // Dedup defensively (a host might appear in both lists in edge cases)
+    // and skip the host themselves — they already saw the result.
+    const seen = new Set<number>();
+    for (const id of userIds) {
+      if (id === session.hostUserId) continue;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      notifyUser(id, 'vote-result');
+    }
+  } catch (err) {
+    logger.warn({ err, sessionId: session.id }, 'notifyVoteResult failed');
   }
 }
