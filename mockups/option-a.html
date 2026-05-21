@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Option A — pickYum nav mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }</style>
+</head>
+<body class="bg-orange-50 min-h-screen">
+
+  <!-- Annotation banner -->
+  <div class="bg-blue-50 border-b border-blue-200 px-4 py-3 text-sm text-blue-900">
+    <div class="mx-auto max-w-7xl flex items-center gap-3 flex-wrap">
+      <a href="index.html" class="text-blue-600 hover:underline font-medium shrink-0">← back to options</a>
+      <span class="text-blue-300">|</span>
+      <strong>Option A:</strong>
+      <span>Drop Insights from top nav. Drop Your History from avatar. New <code class="bg-blue-100 px-1.5 py-0.5 rounded text-xs">/you</code> page tabs Timeline + Insights + Settings + Top picks. Avatar = direct link.</span>
+    </div>
+  </div>
+
+  <!-- Desktop nav -->
+  <nav class="bg-white border-b border-orange-200 shadow-sm" style="box-shadow: 0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06);">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="flex h-16 items-center justify-between">
+        <div class="flex items-center">
+          <a href="#" class="flex items-center gap-2 mr-2">
+            <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-lg shadow">🍽</span>
+            <span class="font-extrabold text-lg tracking-tight bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </a>
+          <div class="hidden md:block">
+            <div class="ml-10 flex items-baseline space-x-1">
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Search</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Compare</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Choose</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Socials</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Trips</a>
+              <span class="text-xs text-red-400 italic px-3 py-2" title="Removed from top nav — now lives in /you">∅ Insights (moved to /you)</span>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="relative p-2 text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md transition-colors">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 10-12 0v3.2a2 2 0 01-.6 1.4L4 17h5m6 0a3 3 0 11-6 0"/></svg>
+            <span class="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">3</span>
+          </button>
+          <a href="#you" class="ml-1 h-8 w-8 rounded-full overflow-hidden bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center" title="Direct link to /you — no dropdown">
+            <svg class="h-5 w-5 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Annotation -->
+  <div class="bg-amber-50 border-b border-amber-200 px-4 py-1.5 text-xs text-amber-900 text-center">
+    Below: the new <strong>/you</strong> page (consolidates History + Insights + Settings + Top picks)
+  </div>
+
+  <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">You</h1>
+    <p class="text-sm text-gray-500 mb-5">Your activity, your preferences, all in one place.</p>
+
+    <!-- Tabs -->
+    <div class="border-b border-gray-200 mb-6">
+      <nav class="-mb-px flex gap-6 overflow-x-auto">
+        <button class="border-b-2 border-orange-500 text-orange-600 py-3 px-1 text-sm font-semibold whitespace-nowrap flex items-center gap-1.5">
+          <span>📊</span> Timeline
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>📈</span> Insights
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>⭐</span> Top picks
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>⚙️</span> Settings
+        </button>
+      </nav>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div class="md:col-span-2">
+        <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3">Recent picks</h2>
+        <div class="space-y-3">
+          <div class="rounded-lg border border-orange-100 bg-white p-4 hover:border-orange-300 transition-colors">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-sm font-medium text-gray-900">Tasty Slice Pizza</p>
+                <p class="text-xs text-gray-500">2 days ago · 🪙 coin flip · Italian</p>
+              </div>
+              <span class="text-xs text-orange-600 font-medium">View →</span>
+            </div>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4 hover:border-orange-300 transition-colors">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-sm font-medium text-gray-900">Sushi Roll House</p>
+                <p class="text-xs text-gray-500">5 days ago · 🎡 roulette · Japanese</p>
+              </div>
+              <span class="text-xs text-orange-600 font-medium">View →</span>
+            </div>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4 hover:border-orange-300 transition-colors">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-sm font-medium text-gray-900">Burger Joint</p>
+                <p class="text-xs text-gray-500">1 week ago · ⚡ quick pick · American</p>
+              </div>
+              <span class="text-xs text-orange-600 font-medium">View →</span>
+            </div>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4 hover:border-orange-300 transition-colors">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-sm font-medium text-gray-900">Pho Real</p>
+                <p class="text-xs text-gray-500">2 weeks ago · 🗳 group vote · Vietnamese</p>
+              </div>
+              <span class="text-xs text-orange-600 font-medium">View →</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3">At a glance</h2>
+        <div class="space-y-3">
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-3xl font-bold text-orange-600">28</p>
+            <p class="text-xs text-gray-500 mt-1">decisions this month</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-lg font-bold text-gray-900">Italian</p>
+            <p class="text-xs text-gray-500 mt-1">top cuisine · 9 picks</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-lg font-bold text-gray-900">Thursday</p>
+            <p class="text-xs text-gray-500 mt-1">most-decided day</p>
+          </div>
+          <a href="#" class="block text-center text-xs font-semibold text-orange-600 hover:text-orange-700 py-2">
+            See full insights →
+          </a>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Mobile preview -->
+  <div class="bg-gray-100 border-t border-gray-300 px-4 py-8 mt-8">
+    <div class="mx-auto max-w-sm">
+      <p class="text-xs text-gray-500 text-center mb-3 uppercase tracking-wider font-semibold">Mobile · hamburger expanded</p>
+      <div class="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-200">
+        <div class="flex items-center justify-between px-4 h-14 border-b border-orange-100">
+          <span class="flex items-center gap-2">
+            <span class="flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-sm">🍽</span>
+            <span class="font-extrabold text-base bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </span>
+          <div class="flex items-center gap-3">
+            <span class="relative text-stone-500 text-base">🔔<span class="absolute -top-0.5 -right-1 inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[8px] font-bold">3</span></span>
+            <span class="text-stone-500 text-lg">✕</span>
+          </div>
+        </div>
+        <div class="px-3 py-3 space-y-0.5 border-b border-orange-100">
+          <a href="#" class="block bg-orange-50 text-orange-600 font-semibold rounded-md px-3 py-2 text-sm">Search</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Compare</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Choose</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Socials</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Trips</a>
+        </div>
+        <div class="px-3 py-3 space-y-0.5">
+          <a href="#you" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">You</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Log out</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

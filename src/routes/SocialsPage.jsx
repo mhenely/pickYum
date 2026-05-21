@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { socialApi } from '../lib/socialApi';
@@ -9,6 +9,7 @@ import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import SectionEmpty from '../components/SectionEmpty';
 import { SkeletonSection, SkeletonList } from '../components/Skeleton';
 import Button from '../components/ui/Button';
+import { TripsTab } from './TripsPage';
 
 // Toast helper: each mutation pushes a one-shot success/error so silent
 // catches don't leave the user wondering "did that work?" Centralized
@@ -312,11 +313,17 @@ function GroupsTab() {
   );
 }
 
-// ── Friends tab ───────────────────────────────────────────────
+// ── People tab ────────────────────────────────────────────────
+// Friends + Following + Followers unified. The split into separate Friends
+// / Followers tabs was always a leak of the underlying data model — users
+// think of it as "people I'm connected to," not "people with relationship
+// type X." Per-row buttons handle the relationship-specific actions.
 
-function FriendsTab() {
+function PeopleTab() {
   const dispatch = useDispatch();
   const [friends, setFriends]         = useState([]);
+  const [following, setFollowing]     = useState([]);
+  const [followers, setFollowers]     = useState([]);
   const [incoming, setIncoming]       = useState([]);
   const [friendPicks, setFriendPicks] = useState([]);
   // Drill-in filter for the picks feed — click a friend's avatar/username
@@ -328,17 +335,24 @@ function FriendsTab() {
   const [searchError, setSearchError] = useState('');
   const [loading, setLoading]         = useState(true);
   const [actionId, setActionId]       = useState(null);
+  // Sub-tab selector for the secondary "Following" / "Followers" list.
+  // Defaults to 'following' to match the previous Followers tab.
+  const [subTab, setSubTab]           = useState('following');
 
   const load = useCallback(async () => {
     try {
-      const [{ friends: f }, { requests }, picks] = await Promise.all([
+      const [{ friends: f }, { requests }, picks, { following: fg }, { followers: fw }] = await Promise.all([
         socialApi.getFriends(),
         socialApi.getIncoming(),
         socialApi.getFriendRecentPicks(),
+        socialApi.getFollowing(),
+        socialApi.getFollowers(),
       ]);
       setFriends(f ?? []);
       setIncoming(requests ?? []);
       setFriendPicks(picks.picks ?? []);
+      setFollowing(fg ?? []);
+      setFollowers(fw ?? []);
     } catch { /* ignore */ } finally {
       setLoading(false);
     }
@@ -433,6 +447,31 @@ function FriendsTab() {
     } finally {
       setActionId(null);
     }
+  };
+
+  // Following/Followers list mutations — distinct from the search-results
+  // follow toggle above because they operate on already-loaded rows and
+  // optimistically prune the local list instead of reloading.
+  const handleListUnfollow = async (userId) => {
+    setActionId(userId);
+    try {
+      await socialApi.unfollow(userId);
+      setFollowing((f) => f.filter((u) => u.id !== userId));
+      toastOk(dispatch, 'Unfollowed');
+    } catch (err) {
+      toastErr(dispatch, 'Could not unfollow', err);
+    } finally { setActionId(null); }
+  };
+
+  const handleListFollow = async (userId) => {
+    setActionId(userId);
+    try {
+      await socialApi.follow(userId);
+      await load();
+      toastOk(dispatch, 'Following');
+    } catch (err) {
+      toastErr(dispatch, 'Could not follow', err);
+    } finally { setActionId(null); }
   };
 
   if (loading) {
@@ -566,6 +605,57 @@ function FriendsTab() {
         )}
       </section>
 
+      {/* Following / Followers — one-way relationships. Kept as a sub-tabbed
+          section so the page doesn't grow two separate lists in parallel;
+          the counts in each chip make it obvious which side has activity. */}
+      <section>
+        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Following &amp; followers</h3>
+        <div className="flex rounded-lg bg-gray-100 p-1 w-fit mb-3">
+          {['following', 'followers'].map((t) => (
+            <button
+              key={t}
+              onClick={() => setSubTab(t)}
+              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                subTab === t ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {t === 'following' ? `Following (${following.length})` : `Followers (${followers.length})`}
+            </button>
+          ))}
+        </div>
+        {(subTab === 'following' ? following : followers).length === 0 ? (
+          <SectionEmpty
+            icon={subTab === 'following' ? '🔭' : '👋'}
+            title={subTab === 'following' ? "You're not following anyone yet" : 'No followers yet'}
+            subtitle={subTab === 'following' ? 'Search for people above and tap Follow.' : 'Share your profile to get followers.'}
+          />
+        ) : (
+          <ul className="divide-y divide-gray-100 rounded-xl border border-gray-200 overflow-hidden">
+            {(subTab === 'following' ? following : followers).map((u) => (
+              <li key={u.id} className="flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50 gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="h-8 w-8 rounded-full bg-gradient-to-br from-orange-400 to-red-400 flex items-center justify-center text-white font-bold text-sm shrink-0">
+                    {u.username?.[0]?.toUpperCase() ?? '?'}
+                  </div>
+                  <span className="font-medium text-sm text-gray-900 truncate">{u.username}</span>
+                </div>
+                {subTab === 'following' ? (
+                  <button disabled={actionId === u.id} onClick={() => handleListUnfollow(u.id)} className="text-xs text-gray-400 hover:text-red-500 transition-colors disabled:opacity-50">
+                    Unfollow
+                  </button>
+                ) : (
+                  !following.some((f) => f.id === u.id) && (
+                    <button disabled={actionId === u.id} onClick={() => handleListFollow(u.id)} className="text-xs font-semibold text-orange-600 border border-orange-300 bg-white hover:bg-orange-50 px-2.5 py-1 rounded-full transition-colors disabled:opacity-50">
+                      Follow back
+                    </button>
+                  )
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {/* Friends' recent picks */}
       {friendPicks.length > 0 && (() => {
         const filteredPicks = pickFilterUserId
@@ -628,109 +718,6 @@ function FriendsTab() {
         </section>
         );
       })()}
-    </div>
-  );
-}
-
-// ── Followers tab ─────────────────────────────────────────────
-
-function FollowersTab() {
-  const dispatch = useDispatch();
-  const [following, setFollowing] = useState([]);
-  const [followers, setFollowers] = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [actionId, setActionId]   = useState(null);
-  const [subTab, setSubTab]       = useState('following');
-
-  const load = useCallback(async () => {
-    try {
-      const [{ following: fg }, { followers: fw }] = await Promise.all([
-        socialApi.getFollowing(),
-        socialApi.getFollowers(),
-      ]);
-      setFollowing(fg ?? []);
-      setFollowers(fw ?? []);
-    } catch { /* ignore */ } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  const handleUnfollow = async (userId) => {
-    setActionId(userId);
-    try {
-      await socialApi.unfollow(userId);
-      setFollowing((f) => f.filter((u) => u.id !== userId));
-      toastOk(dispatch, 'Unfollowed');
-    } catch (err) {
-      toastErr(dispatch, 'Could not unfollow', err);
-    } finally { setActionId(null); }
-  };
-
-  const handleFollow = async (userId) => {
-    setActionId(userId);
-    try {
-      await socialApi.follow(userId);
-      await load();
-      toastOk(dispatch, 'Following');
-    } catch (err) {
-      toastErr(dispatch, 'Could not follow', err);
-    } finally { setActionId(null); }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-5">
-        <div className="h-9 w-56 rounded-lg bg-gray-100 animate-pulse" />
-        <SkeletonList count={3} />
-      </div>
-    );
-  }
-
-  const list = subTab === 'following' ? following : followers;
-
-  return (
-    <div className="flex flex-col gap-5">
-      <div className="flex rounded-lg bg-gray-100 p-1 w-fit">
-        {['following', 'followers'].map((t) => (
-          <button key={t} onClick={() => setSubTab(t)} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${subTab === t ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-            {t === 'following' ? `Following (${following.length})` : `Followers (${followers.length})`}
-          </button>
-        ))}
-      </div>
-
-      {list.length === 0 ? (
-        <SectionEmpty
-          icon={subTab === 'following' ? '🔭' : '👋'}
-          title={subTab === 'following' ? "You're not following anyone yet" : "No followers yet"}
-          subtitle={subTab === 'following' ? 'Use the Friends tab to find and follow people.' : 'Share your profile to get followers.'}
-        />
-      ) : (
-        <ul className="divide-y divide-gray-100 rounded-xl border border-gray-200 overflow-hidden">
-          {list.map((u) => (
-            <li key={u.id} className="flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50 gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="h-8 w-8 rounded-full bg-gradient-to-br from-orange-400 to-red-400 flex items-center justify-center text-white font-bold text-sm shrink-0">
-                  {u.username?.[0]?.toUpperCase() ?? '?'}
-                </div>
-                <span className="font-medium text-sm text-gray-900 truncate">{u.username}</span>
-              </div>
-              {subTab === 'following' ? (
-                <button disabled={actionId === u.id} onClick={() => handleUnfollow(u.id)} className="text-xs text-gray-400 hover:text-red-500 transition-colors disabled:opacity-50">
-                  Unfollow
-                </button>
-              ) : (
-                !following.some((f) => f.id === u.id) && (
-                  <button disabled={actionId === u.id} onClick={() => handleFollow(u.id)} className="text-xs font-semibold text-orange-600 border border-orange-300 bg-white hover:bg-orange-50 px-2.5 py-1 rounded-full transition-colors disabled:opacity-50">
-                    Follow back
-                  </button>
-                )
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
@@ -869,14 +856,36 @@ function RecommendationsTab() {
 
 const TABS = [
   { id: 'groups',          label: 'Groups',          icon: '👥' },
-  { id: 'friends',         label: 'Friends',         icon: '🤝' },
-  { id: 'followers',       label: 'Followers',       icon: '📡' },
-  { id: 'recommendations', label: 'Recommendations', icon: '⭐' },
+  { id: 'trips',           label: 'Trips',           icon: '🧳' },
+  { id: 'people',          label: 'People',          icon: '🤝' },
+  { id: 'recommendations', label: 'Recs',            icon: '⭐' },
 ];
 
+// Subset of tab ids that may be set via `?tab=…` on the URL. Keeps the
+// query parser strict: any unrecognized value falls back to the default.
+const VALID_TAB_IDS = new Set(TABS.map((t) => t.id));
+
 const SocialsPage = () => {
-  const [activeTab, setActiveTab] = useState('groups');
+  // Allow deep-linking into a specific tab via ?tab=trips etc. Falls
+  // back to 'groups' (the most-active surface for return visits) when
+  // no/unknown tab is requested.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = VALID_TAB_IDS.has(searchParams.get('tab')) ? searchParams.get('tab') : 'groups';
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [socialStats, setSocialStats] = useState(null);
+
+  // Keep the URL in sync as the user clicks between tabs so refreshes
+  // and bookmarks land in the same place. `replace: true` avoids
+  // polluting browser history with one entry per tab switch.
+  const onTabChange = (tabId) => {
+    setActiveTab(tabId);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (tabId === 'groups') next.delete('tab');
+      else                    next.set('tab', tabId);
+      return next;
+    }, { replace: true });
+  };
 
   useEffect(() => {
     socialApi.getMe()
@@ -886,7 +895,7 @@ const SocialsPage = () => {
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
-      <h1 className="text-2xl font-bold text-gray-900 mb-5">Socials</h1>
+      <h1 className="text-2xl font-bold text-gray-900 mb-5">Social</h1>
 
       {/* Always-visible social stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
@@ -901,7 +910,7 @@ const SocialsPage = () => {
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => onTabChange(tab.id)}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap ${
               activeTab === tab.id
                 ? 'border-orange-500 text-orange-600'
@@ -915,8 +924,8 @@ const SocialsPage = () => {
       </div>
 
       {activeTab === 'groups'          && <GroupsTab />}
-      {activeTab === 'friends'         && <FriendsTab />}
-      {activeTab === 'followers'       && <FollowersTab />}
+      {activeTab === 'trips'           && <TripsTab />}
+      {activeTab === 'people'          && <PeopleTab />}
       {activeTab === 'recommendations' && <RecommendationsTab />}
     </div>
   );

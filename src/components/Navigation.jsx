@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import Footer from "./Footer";
-import { Disclosure, DisclosureButton, DisclosurePanel, Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react'
-import { Bars3Icon, XMarkIcon, BellIcon } from '@heroicons/react/24/outline'
+import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react'
+import { BellIcon } from '@heroicons/react/24/outline'
 import { useDispatch, useSelector } from "react-redux";
 import { removeUserOption } from "../redux/slices/userInfoSlice";
 import { logoutUser } from "../redux/slices/authSlice";
@@ -286,27 +286,47 @@ const NavBar = () => {
   };
 
   const handleLogout = () => {
-    // The auth slice + listener now wipe local user data on BOTH fulfilled
-    // and rejected, so `.then()` works for the navigation regardless of API
+    // The auth slice + listener wipe local user data on BOTH fulfilled and
+    // rejected, so `.then()` works for the navigation regardless of API
     // outcome. The user lands on home with no residual data either way.
     dispatch(logoutUser()).then(() => navigate('/'));
   };
 
+  // 4-item desktop top nav + 5-item mobile bottom-tab bar. The two share
+  // this list; the mobile bar adds 'You' as a 5th entry. Compare stays in
+  // both because it's the entry point for the favorites-compare flow (the
+  // page has a favorites sidebar). Insights / History / Settings consolidated
+  // into /you, reached via the avatar on desktop and the You tab on mobile.
+  //
+  // The 'Social' entry covers Groups + Trips + People + Recs — all
+  // multi-user surfaces in one place. It's still authOnly; for guests the
+  // desktop nav drops it and the mobile bar keeps the slot active but
+  // routes to the auth wall via ProtectedRoute.
+  // /you is the new consolidated personal hub (Phase 3). Old per-user
+  // paths still resolve so existing bookmarks/links keep working until
+  // Phase 4 wires redirects.
+  const youLink = '/you';
+  const socialBadge = pendingGroupInvites.length + pendingTripInvites.length + activeVotes.length;
   const navigation = [
-    { name: 'Search',   link: '/',                active: pathname === '/' },
+    { name: 'Search',   link: '/',                 active: pathname === '/' },
     { name: 'Compare',  link: '/restaurant',       active: pathname.startsWith('/restaurant') },
     { name: 'Choose',   link: `/choose/${userId}`, active: pathname.startsWith('/choose') },
-    { name: 'Socials',  link: '/socials',          active: pathname.startsWith('/socials') || pathname.startsWith('/groups'), authOnly: true },
-    { name: 'Trips',    link: '/trips',            active: pathname.startsWith('/trips'), authOnly: true },
-    { name: 'Insights', link: '/insights',         active: pathname.startsWith('/insights'), authOnly: true },
+    {
+      name: 'Social',
+      link: '/socials',
+      active: pathname.startsWith('/socials') || pathname.startsWith('/groups') || pathname.startsWith('/trips'),
+      authOnly: true,
+      badge: socialBadge,
+    },
   ];
 
-  const userNavigation = isAuthenticated
-    ? [
-        { name: 'Your Info',    link: `/userInfo/${userId}` },
-        { name: 'Your History', link: `/History/${userId}` },
-      ]
-    : [];
+  // Mobile-only 5th slot. Desktop's avatar in the top bar plays the same
+  // role; keeping it as a tab on mobile means the bottom bar stays the
+  // single source of truth there.
+  const mobileNavigation = [
+    ...navigation,
+    { name: 'You', link: youLink, active: pathname.startsWith('/you') || pathname.startsWith('/userInfo') || pathname.startsWith('/History') || pathname.startsWith('/insights'), authOnly: true },
+  ];
 
   return (
     <>
@@ -340,9 +360,8 @@ const NavBar = () => {
             this requires no `overflow-*` on any ancestor that would
             otherwise create a new scroll container; the `min-h-screen
             flex flex-col` wrapper is sticky-friendly. */}
-        <Disclosure
-          as="nav"
-          className="bg-white border-b border-orange-200 md:sticky md:top-0 md:z-30 md:bg-white/90 md:backdrop-blur-sm"
+        <nav
+          className="bg-white border-b border-orange-200 sticky top-0 z-30 md:bg-white/90 md:backdrop-blur-sm"
           style={{boxShadow: '0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06)'}}
         >
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -371,14 +390,9 @@ const NavBar = () => {
                         )}
                       >
                         {item.name}
-                        {item.name === 'Groups' && (pendingGroupInvites.length + activeVotes.length) > 0 && (
+                        {item.badge > 0 && (
                           <span className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
-                            {pendingGroupInvites.length + activeVotes.length}
-                          </span>
-                        )}
-                        {item.name === 'Trips' && pendingTripInvites.length > 0 && (
-                          <span className="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
-                            {pendingTripInvites.length}
+                            {item.badge}
                           </span>
                         )}
                       </Link>
@@ -609,10 +623,14 @@ const NavBar = () => {
                     </Menu>
                   )}
 
-                  {/* Profile dropdown / Sign in. During the 'idle'/'loading'
-                      window we render a neutral placeholder so the slot doesn't
-                      flicker between the Sign-in CTA and the avatar on every
-                      refresh. */}
+                  {/* Avatar dropdown — quick access to /you + Log out from
+                      anywhere. The dropdown was dropped in Phase 1 in favor of
+                      a direct avatar link, but burying Log out two clicks deep
+                      (avatar → Account tab → button) was real friction; this
+                      restores parity with the pre-merge UX. During
+                      'idle'/'loading' we render a neutral placeholder so the
+                      slot doesn't flicker between the Sign-in CTA and the
+                      avatar on every refresh. */}
                   {isAuthenticated ? (
                     <Menu as="div" className="relative ml-1">
                       <MenuButton className="flex items-center rounded-full bg-white text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 focus:ring-offset-white">
@@ -624,16 +642,14 @@ const NavBar = () => {
                         transition
                         className="absolute right-0 z-10 mt-2 w-48 origin-top-right rounded-lg bg-white ring-1 ring-black/5 shadow-xl transition focus:outline-none data-[closed]:scale-95 data-[closed]:opacity-0 data-[enter]:duration-100 data-[leave]:duration-75 data-[enter]:ease-out data-[leave]:ease-in overflow-hidden py-1"
                       >
-                        {userNavigation.map((item) => (
-                          <MenuItem key={item.name}>
-                            <Link
-                              to={item.link}
-                              className="block px-4 py-2 text-sm text-gray-700 hover:bg-orange-50 hover:text-orange-600 transition-colors"
-                            >
-                              {item.name}
-                            </Link>
-                          </MenuItem>
-                        ))}
+                        <MenuItem>
+                          <Link
+                            to={youLink}
+                            className="block px-4 py-2 text-sm text-gray-700 hover:bg-orange-50 hover:text-orange-600 transition-colors"
+                          >
+                            Your profile
+                          </Link>
+                        </MenuItem>
                         <MenuItem>
                           <button
                             onClick={handleLogout}
@@ -655,243 +671,11 @@ const NavBar = () => {
                     <div className="ml-1 h-8 w-8 rounded-full bg-gray-100 animate-pulse" aria-hidden="true" />
                   )}
                 </div>
-
-                {/* Mobile hamburger */}
-                <div className="flex md:hidden">
-                  <DisclosureButton className="group relative inline-flex items-center justify-center rounded-md bg-white p-2 text-stone-500 hover:bg-orange-50 hover:text-orange-600 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 focus:ring-offset-white">
-                    <span className="absolute -inset-0.5" />
-                    <span className="sr-only">Open main menu</span>
-                    <Bars3Icon aria-hidden="true" className="block h-6 w-6 group-data-[open]:hidden" />
-                    <XMarkIcon aria-hidden="true" className="hidden h-6 w-6 group-data-[open]:block" />
-                  </DisclosureButton>
-                </div>
               </div>
             </div>
           </div>
 
-          {/* Mobile menu panel */}
-          <DisclosurePanel className="md:hidden border-t border-orange-100 bg-white">
-            {/* Nav links */}
-            <div className="px-2 pt-2 pb-3 space-y-1">
-              {navigation.filter((item) => !item.authOnly || isAuthenticated).map((item) => (
-                <DisclosureButton
-                  key={item.name}
-                  as={Link}
-                  to={item.link}
-                  aria-current={item.active ? 'page' : undefined}
-                  className={classNames(
-                    item.active
-                      ? 'bg-orange-50 text-orange-600 font-semibold'
-                      : 'text-stone-500 hover:bg-orange-50 hover:text-orange-600',
-                    'block rounded-md px-3 py-2 text-base font-medium transition-colors'
-                  )}
-                >
-                  <span className="flex items-center gap-2">
-                    {item.name}
-                    {item.name === 'Groups' && (pendingGroupInvites.length + activeVotes.length) > 0 && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingGroupInvites.length + activeVotes.length}</span>
-                    )}
-                    {item.name === 'Trips' && (pendingTripInvites.length + participantMeals.length) > 0 && (
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingTripInvites.length + participantMeals.length}</span>
-                    )}
-                  </span>
-                </DisclosureButton>
-              ))}
-            </div>
-
-            {/* Friend requests — mobile */}
-            {isAuthenticated && pendingRequests.length > 0 && (
-              <div className="border-t border-orange-100 px-4 py-3">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                  Friend Requests
-                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingRequests.length}</span>
-                </p>
-                <div className="flex flex-col gap-2">
-                  {pendingRequests.map((r) => (
-                    <div key={r.id} className="flex items-center justify-between text-sm">
-                      <span className="text-gray-700">{r.sender.username}</span>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleAccept(r.id)}
-                          className="rounded px-2 py-1 text-xs font-semibold bg-orange-500 text-white hover:bg-orange-400 transition-colors"
-                        >
-                          Accept
-                        </button>
-                        <button
-                          onClick={() => handleReject(r.id)}
-                          className="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                        >
-                          Decline
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Group invites — mobile */}
-            {isAuthenticated && pendingGroupInvites.length > 0 && (
-              <div className="border-t border-orange-100 px-4 py-3">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                  Group Invites
-                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingGroupInvites.length}</span>
-                </p>
-                <div className="flex flex-col gap-2">
-                  {pendingGroupInvites.map((inv) => (
-                    <div key={inv.id} className="flex items-start justify-between text-sm gap-2">
-                      <div className="min-w-0">
-                        <p className="text-gray-700 truncate">{inv.group.name}</p>
-                        <p className="text-xs text-gray-400">from {inv.invitedBy.username}</p>
-                      </div>
-                      <div className="flex gap-2 shrink-0">
-                        <button
-                          onClick={() => handleGroupInviteRespond(inv, 'accept')}
-                          className="rounded px-2 py-1 text-xs font-semibold bg-orange-500 text-white hover:bg-orange-400 transition-colors"
-                        >
-                          Accept
-                        </button>
-                        <button
-                          onClick={() => handleGroupInviteRespond(inv, 'decline')}
-                          className="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                        >
-                          Decline
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Trip invites — mobile */}
-            {isAuthenticated && pendingTripInvites.length > 0 && (
-              <div className="border-t border-orange-100 px-4 py-3">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                  Trip Invites
-                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{pendingTripInvites.length}</span>
-                </p>
-                <div className="flex flex-col gap-2">
-                  {pendingTripInvites.map((inv) => (
-                    <div key={inv.id} className="flex items-start justify-between text-sm gap-2">
-                      <div className="min-w-0">
-                        <p className="text-gray-700 truncate">{inv.trip.name}</p>
-                        <p className="text-xs text-gray-400">{inv.trip.destination} · from {inv.invitedBy.username}</p>
-                      </div>
-                      <div className="flex gap-2 shrink-0">
-                        <button
-                          onClick={() => handleTripInviteRespond(inv, 'accept')}
-                          className="rounded px-2 py-1 text-xs font-semibold bg-orange-500 text-white hover:bg-orange-400 transition-colors"
-                        >
-                          Accept
-                        </button>
-                        <button
-                          onClick={() => handleTripInviteRespond(inv, 'decline')}
-                          className="text-xs text-gray-500 hover:text-red-400 transition-colors"
-                        >
-                          Decline
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Your meals — mobile */}
-            {isAuthenticated && participantMeals.length > 0 && (
-              <div className="border-t border-orange-100 px-4 py-3">
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                  Your Meals
-                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">{participantMeals.length}</span>
-                </p>
-                <div className="flex flex-col gap-2">
-                  {participantMeals.map((m) => {
-                    const dest = m.status === 'VOTING' && m.sessionId
-                      ? `/vote/${m.sessionId}`
-                      : `/trips/${m.tripId}`;
-                    return (
-                      <DisclosureButton
-                        key={m.id}
-                        as={Link}
-                        to={dest}
-                        className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-orange-50 transition-colors"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-gray-800 truncate">{m.name}</p>
-                          <p className="text-xs text-gray-400 truncate">
-                            {m.trip.name}
-                            {m.createdBy && <> · from {m.createdBy.username}</>}
-                          </p>
-                        </div>
-                        <span className="text-gray-400 text-xs shrink-0">→</span>
-                      </DisclosureButton>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Active votes — mobile */}
-            {isAuthenticated && activeVotes.length > 0 && (
-              <div className="border-t border-orange-100 px-4 py-3">
-                <p className="text-xs font-semibold text-orange-500 uppercase tracking-wider mb-2">
-                  Voting In Progress
-                  <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-orange-500 text-white text-[9px] font-bold">{activeVotes.length}</span>
-                </p>
-                <div className="flex flex-col gap-2">
-                  {activeVotes.map((v) => (
-                    <DisclosureButton
-                      key={`${v.groupId}-${v.eventId}`}
-                      as={Link}
-                      to={`/vote/${v.sessionId}`}
-                      className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-orange-50 transition-colors"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-800 truncate">{v.eventName}</p>
-                        <p className="text-xs text-orange-500 truncate">🗳 {v.groupName} — tap to vote</p>
-                      </div>
-                      <span className="text-gray-400 text-xs shrink-0">→</span>
-                    </DisclosureButton>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* User section */}
-            <div className="border-t border-orange-100 pt-3 pb-4 px-2">
-              {isAuthenticated ? (
-                <>
-                  {userNavigation.map((item) => (
-                    <DisclosureButton
-                      key={item.name}
-                      as={Link}
-                      to={item.link}
-                      className="block rounded-md px-3 py-2 text-base font-medium text-stone-500 hover:bg-orange-50 hover:text-orange-600 transition-colors"
-                    >
-                      {item.name}
-                    </DisclosureButton>
-                  ))}
-                  <DisclosureButton
-                    as="button"
-                    onClick={handleLogout}
-                    className="block w-full text-left rounded-md px-3 py-2 text-base font-medium text-stone-500 hover:bg-orange-50 hover:text-orange-600 transition-colors"
-                  >
-                    Log out
-                  </DisclosureButton>
-                </>
-              ) : (
-                <DisclosureButton
-                  as={Link}
-                  to="/authentication"
-                  className="block rounded-md px-3 py-2 text-base font-semibold text-orange-600 hover:bg-orange-50 transition-colors"
-                >
-                  Log in / Sign up
-                </DisclosureButton>
-              )}
-            </div>
-          </DisclosurePanel>
-        </Disclosure>
+        </nav>
 
         {/* Verify-your-email banner — shown on every page when the auth'd
             user hasn't clicked the link in their welcome email yet. The
@@ -981,11 +765,56 @@ const NavBar = () => {
       {/* Outlet wrapped in a flex-1 main so it absorbs vertical slack and
           pushes the Footer to the bottom of the viewport on short pages.
           Routes that want their own internal flex layout can wrap their
-          root in `flex flex-col h-full` to fill this container. */}
-      <main className="flex-1 flex flex-col">
+          root in `flex flex-col h-full` to fill this container.
+          pb-20 on mobile so the last row of content clears the fixed bottom
+          tab bar (h-16 + breathing room); md:pb-0 since desktop has no
+          bottom bar. */}
+      <main className="flex-1 flex flex-col pb-20 md:pb-0">
         <Outlet />
       </main>
       <Footer />
+
+      {/* Mobile bottom-tab bar. Fixed to the viewport bottom so it's always
+          reachable by thumb regardless of page scroll position. Hidden on
+          md:+ where the top nav carries the same destinations.
+          z-30 matches the top nav; modals (z-50+) draw above it.
+          The active tab gets the orange-50 background + top border to
+          mirror the desktop top-nav pill styling. */}
+      {!isUnauthenticated && (
+        <nav
+          aria-label="Primary"
+          className="md:hidden fixed bottom-0 inset-x-0 bg-white border-t border-orange-200 grid grid-cols-5 z-30"
+          style={{boxShadow: '0 -2px 12px rgba(234,88,12,0.08)'}}
+        >
+          {mobileNavigation.filter((item) => !item.authOnly || isAuthenticated).map((item) => (
+            <Link
+              key={item.name}
+              to={item.link}
+              aria-current={item.active ? 'page' : undefined}
+              className={classNames(
+                'relative flex flex-col items-center justify-center py-2 text-xs transition-colors',
+                item.active
+                  ? 'text-orange-600 bg-orange-50 border-t-2 border-orange-500 -mt-px font-semibold'
+                  : 'text-stone-500 hover:text-orange-600 border-t-2 border-transparent -mt-px'
+              )}
+            >
+              <span className="text-lg leading-none mb-0.5" aria-hidden="true">
+                {item.name === 'Search' && '🔍'}
+                {item.name === 'Compare' && '⚖️'}
+                {item.name === 'Choose' && '🎲'}
+                {item.name === 'Social' && '👥'}
+                {item.name === 'You' && '📊'}
+              </span>
+              <span>{item.name}</span>
+              {item.badge > 0 && (
+                <span className="absolute top-1 right-3 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">
+                  {item.badge}
+                </span>
+              )}
+            </Link>
+          ))}
+        </nav>
+      )}
       </div>{/* /app shell */}
 
       {detailId && (

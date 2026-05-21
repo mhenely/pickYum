@@ -9,7 +9,6 @@ import {
 
 import {
   setUserData,
-  updateUserFavorites,
   addAddress,
   updateAddress,
   removeAddress,
@@ -18,64 +17,24 @@ import { logoutUser, patchAuthUser } from "../redux/slices/authSlice";
 import { fileToDownscaledAvatarDataUrl } from "../utils/downscaleAvatar";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
-import getMostRecentDate from "../utils/getMostRecentDate";
 import useCurrentUser from "../hooks/useCurrentUser";
-import RestaurantReviewModal from "../components/RestaurantReviewModal";
-import RatingDisplay from "../components/RatingDisplay";
-import { PRICE_LABELS } from "../utils/restaurantConstants";
 
-const RANK_STYLES = [
-  'bg-yellow-400 text-yellow-900',
-  'bg-gray-300 text-gray-700',
-  'bg-orange-300 text-orange-900',
-  'bg-gray-100 text-gray-500',
-];
-
-const RANK_LABELS = ['1st', '2nd', '3rd', '4th'];
-
-const getTop4MostChosen = (accepted) => {
-  const data = {};
-  accepted.forEach(({ restaurantId, date }) => {
-    const key = String(restaurantId);
-    if (!data[key]) data[key] = { count: 0, latestDate: new Date(0) };
-    data[key].count += 1;
-    const d = new Date(date);
-    if (d > data[key].latestDate) data[key].latestDate = d;
-  });
-  return Object.entries(data)
-    .sort(([, a], [, b]) =>
-      b.count !== a.count ? b.count - a.count : b.latestDate - a.latestDate
-    )
-    .slice(0, 4)
-    .map(([id, { count }], index) => ({ id, count, rank: index + 1 }));
-};
-
-const StatCard = ({ label, value, sub }) => (
-  <div className="rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm text-center">
-    <p className="text-3xl font-bold text-orange-600">{value}</p>
-    <p className="text-sm font-medium text-gray-700 mt-1">{label}</p>
-    {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
-  </div>
-);
-
-const UserInfoPage = () => {
+// `view` selects which subset of sections to render. Used by YouPage to
+// split this large page across its Account and Preferences tabs without
+// duplicating the state and handlers that all the sections share. When
+// rendered standalone (e.g. via the legacy /userInfo redirect path) the
+// default 'account' view fires.
+//   - 'account'     → Profile, Account security, Sign out, Danger Zone
+//   - 'preferences' → Dietary tags, Push notifications, Address book
+const UserInfoPage = ({ view = 'account' }) => {
   const userInfo = useCurrentUser();
   const dispatch = useDispatch();
   const navigate = useNavigate();
-  const customRestaurants = useSelector((state) => state.userInfo.customRestaurants);
-  const allRestaurants = customRestaurants;
 
   const [username, setUsername] = useState('');
   const [usernameError, setUsernameError] = useState('');
-  const [selectedRestaurantId, setSelectedRestaurantId] = useState(null);
 
   const isAuthenticated = useSelector((state) => state.auth.status === 'authenticated');
-  // Empty-state suppression: hide "No history yet" until loadUserData
-  // lands so refreshes don't briefly flash the prompt before the
-  // user's real history shows up.
-  const isUnauthenticated = useSelector((state) => state.auth.status === 'unauthenticated');
-  const isDataLoaded      = useSelector((state) => state.userInfo.isDataLoaded);
-  const isDataPending     = !isUnauthenticated && !isDataLoaded;
 
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameSuccess, setUsernameSuccess] = useState(false);
@@ -460,19 +419,13 @@ const UserInfoPage = () => {
     }
   };
 
-  const flipCount = userInfo.flipCount ?? 0;
-  const acceptanceCount = userInfo.accepted.length;
-  const acceptanceRate = flipCount > 0
-    ? `${Math.round((acceptanceCount / flipCount) * 100)}%`
-    : '—';
-
-  const top4 = getTop4MostChosen(userInfo.accepted);
-
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 items-start">
+    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 lg:px-8">
 
-        {/* ── LEFT: Profile + Stats ────────────────────────────── */}
+      {/* Single-column layout — Top Picks + Stats lived in a 2nd column
+          historically and now render on the Insights tab instead. The
+          view prop above selects which sections to show. */}
+      {view === 'account' && (
         <div className="min-w-0 flex flex-col gap-8">
 
           {/* Profile form */}
@@ -743,6 +696,11 @@ const UserInfoPage = () => {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {view === 'preferences' && (
+        <div className="min-w-0 flex flex-col gap-8">
 
           {/* Dietary tags — surfaced in group + trip member rows so meal
               planners can see restrictions at a glance. Free-form, but the
@@ -820,74 +778,6 @@ const UserInfoPage = () => {
             {dietaryTags.length >= 10 && !tagsError && (
               <p className="mt-2 text-xs text-gray-400">You've reached the 10-tag limit.</p>
             )}
-          </div>
-
-          {/* Push notifications — per-device opt-in. Browsers gate the
-              permission prompt on a user gesture so we surface a
-              real button instead of asking on app load. Subscription
-              is scoped to this device; the user has to opt-in
-              separately on a phone vs laptop. Falls back to a
-              disabled state on browsers/situations that can't
-              support push (Safari < 16.4 non-PWA, missing VAPID
-              keys on the server). */}
-          <div className="border-b border-gray-900/10 pb-8">
-            <h2 className="text-base font-semibold leading-7 text-gray-900">Push notifications</h2>
-            <p className="mt-1 text-sm leading-6 text-gray-600">
-              Get a browser notification on this device when friends invite you to a group, a trip vote opens, or someone recommends a spot.
-            </p>
-
-            <div className="mt-4 flex items-center gap-3 flex-wrap">
-              {pushState === 'subscribed' && (
-                <>
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                    ✓ Enabled on this device
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleDisablePush}
-                    disabled={pushSaving}
-                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-                  >
-                    {pushSaving ? 'Turning off…' : 'Turn off on this device'}
-                  </button>
-                </>
-              )}
-
-              {pushState === 'unsubscribed' && (
-                <button
-                  type="button"
-                  onClick={handleEnablePush}
-                  disabled={pushSaving}
-                  className="rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white shadow-brand-sm hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all"
-                >
-                  {pushSaving ? 'Enabling…' : '🔔 Enable notifications'}
-                </button>
-              )}
-
-              {pushState === 'denied' && (
-                <p className="text-xs text-gray-500">
-                  Browser notifications are blocked for this site. Re-enable them in your browser's site settings to opt in.
-                </p>
-              )}
-
-              {pushState === 'unsupported' && (
-                <p className="text-xs text-gray-500">
-                  This browser doesn't support web push notifications. Try Chrome, Edge, Firefox, or Safari 16.4+ (added to home screen on iOS).
-                </p>
-              )}
-
-              {pushState === 'disabled' && (
-                <p className="text-xs text-gray-500">
-                  Push notifications aren't configured on the server yet — check back later.
-                </p>
-              )}
-
-              {pushState === 'unknown' && (
-                <span className="text-xs text-gray-400">Checking notification status…</span>
-              )}
-            </div>
-
-            {pushError && <p className="mt-2 text-xs text-red-500">{pushError}</p>}
           </div>
 
           {/* Address book — replaces the older single "Default search
@@ -995,7 +885,6 @@ const UserInfoPage = () => {
                 ))}
               </ul>
             )}
-
             {/* Inline-add form — hidden once the user hits the cap. The
                 server-enforced limit is 10; we mirror it client-side so
                 the user gets a friendly hint instead of a 400. */}
@@ -1039,151 +928,82 @@ const UserInfoPage = () => {
             )}
           </div>
         </div>
+      )}
 
-        {/* ── RIGHT: Top 4 most chosen + Stats ─────────────────── */}
-        <div className="flex flex-col gap-8">
-
-          {/* Top 4 picks — wrapped in a single block so the column's
-              `gap-8` only applies between Top 4 and the Stats panel,
-              not between the heading and its cards. */}
-          <div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-1">Top Picks</h2>
-          <p className="text-sm text-gray-500 mb-4">Your 4 most chosen restaurants</p>
-
-          {isDataPending && top4.length === 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4" aria-hidden="true">
-              {[0, 1, 2, 3].map((i) => (
-                <div key={i} className="h-32 rounded-lg bg-gray-100 animate-pulse" />
-              ))}
-            </div>
-          ) : top4.length === 0 ? (
-            <p className="text-gray-500 text-sm italic">
-              No history yet. Accept a restaurant from the coin flip to get started.
+          {/* Push notifications — per-device opt-in. Browsers gate the
+              permission prompt on a user gesture so we surface a
+              real button instead of asking on app load. Subscription
+              is scoped to this device; the user has to opt-in
+              separately on a phone vs laptop. Falls back to a
+              disabled state on browsers/situations that can't
+              support push (Safari < 16.4 non-PWA, missing VAPID
+              keys on the server). */}
+          <div className="border-b border-gray-900/10 pb-8">
+            <h2 className="text-base font-semibold leading-7 text-gray-900">Push notifications</h2>
+            <p className="mt-1 text-sm leading-6 text-gray-600">
+              Get a browser notification on this device when friends invite you to a group, a trip vote opens, or someone recommends a spot.
             </p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {top4.map(({ id, count, rank }) => {
-                const restaurant = allRestaurants[id];
-                if (!restaurant) return null;
 
-                const reviews = userInfo.reviews[id] || [];
-                const personalRating =
-                  reviews.length > 0
-                    ? reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length
-                    : null;
-                const isFavorited = userInfo.favorites.map(String).includes(String(id));
-
-                return (
-                  // flex-col + h-full lets `mt-auto` on the button push it to
-                  // the bottom of the card. The 2-column grid already gives
-                  // each card the same height (align-items: stretch), so once
-                  // the buttons all anchor to the bottom they line up across
-                  // a row regardless of how much content sits above.
-                  <div
-                    key={id}
-                    className="relative flex flex-col h-full rounded-lg border border-gray-200 p-4 shadow-sm bg-white transition-all duration-150 hover:shadow-md hover:border-orange-300 hover:bg-orange-50"
+            <div className="mt-4 flex items-center gap-3 flex-wrap">
+              {pushState === 'subscribed' && (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                    ✓ Enabled on this device
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleDisablePush}
+                    disabled={pushSaving}
+                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
                   >
-                    <span className={`absolute -top-2.5 -left-2.5 w-10 h-6 rounded-full text-[11px] font-black flex items-center justify-center shadow-sm ${RANK_STYLES[rank - 1]}`}>
-                      {RANK_LABELS[rank - 1]}
-                    </span>
-                    <div className="flex justify-between items-start gap-2">
-                      <div className="min-w-0">
-                        <span className="text-orange-600 font-semibold block truncate">{restaurant.name}</span>
-                        {getMostRecentDate(userInfo.accepted, id) && (
-                          <span className="text-xs text-gray-400">
-                            Last chosen {getMostRecentDate(userInfo.accepted, id)}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          dispatch(updateUserFavorites({ restaurantId: id, userId: userInfo.id }))
-                        }
-                        className={`text-xl leading-none shrink-0 ${isFavorited ? 'text-red-500' : 'text-gray-300 hover:text-red-300'}`}
-                      >
-                        &#9829;
-                      </button>
-                    </div>
+                    {pushSaving ? 'Turning off…' : 'Turn off on this device'}
+                  </button>
+                </>
+              )}
 
-                    <p className="text-sm text-gray-500 mt-1">
-                      {restaurant.type} · {PRICE_LABELS[restaurant.price]} · Opens {restaurant.hours}
-                    </p>
+              {pushState === 'unsubscribed' && (
+                <button
+                  type="button"
+                  onClick={handleEnablePush}
+                  disabled={pushSaving}
+                  className="rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white shadow-brand-sm hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all"
+                >
+                  {pushSaving ? 'Enabling…' : '🔔 Enable notifications'}
+                </button>
+              )}
 
-                    <div className="mt-1">
-                      <RatingDisplay
-                        restaurantId={id}
-                        googleRating={restaurant.rating ?? null}
-                        personalRating={personalRating}
-                        personalReviews={reviews}
-                        restaurantName={restaurant.name}
-                      />
-                      {reviews.length > 0 && (
-                        <span className="text-xs text-gray-400 ml-1">
-                          ({reviews.length} review{reviews.length !== 1 ? 's' : ''})
-                        </span>
-                      )}
-                    </div>
+              {pushState === 'denied' && (
+                <p className="text-xs text-gray-500">
+                  Browser notifications are blocked for this site. Re-enable them in your browser's site settings to opt in.
+                </p>
+              )}
 
-                    <div className="flex items-center justify-between mt-3">
-                      <div className="flex gap-2 text-xs text-gray-500">
-                        {restaurant.takeout && (
-                          <span className="bg-gray-100 px-2 py-0.5 rounded">Takeout</span>
-                        )}
-                        {restaurant.delivery && (
-                          <span className="bg-gray-100 px-2 py-0.5 rounded">Delivery</span>
-                        )}
-                      </div>
-                      <span className="text-xs text-gray-400 italic">
-                        Chosen {count}×
-                      </span>
-                    </div>
+              {pushState === 'unsupported' && (
+                <p className="text-xs text-gray-500">
+                  This browser doesn't support web push notifications. Try Chrome, Edge, Firefox, or Safari 16.4+ (added to home screen on iOS).
+                </p>
+              )}
 
-                    {/* Wrapper carries `mt-auto` (push to bottom of the flex
-                        column) and the breathing-room gap above the button.
-                        Putting the auto-margin on a wrapper instead of the
-                        button itself avoids inflating the button's clickable
-                        area. Cards in the same row line up regardless of
-                        their above-the-button content (reviews-count line,
-                        takeout/delivery badges, last-chosen string). */}
-                    <div className="mt-auto pt-3">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedRestaurantId(id)}
-                        className="w-full rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-500"
-                      >
-                        See Reviews
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+              {pushState === 'disabled' && (
+                <p className="text-xs text-gray-500">
+                  Push notifications aren't configured on the server yet — check back later.
+                </p>
+              )}
+
+              {pushState === 'unknown' && (
+                <span className="text-xs text-gray-400">Checking notification status…</span>
+              )}
             </div>
-          )}
-          </div>{/* /Top Picks block */}
 
-          {/* Stats — moved here so it sits underneath Top 4 and to the
-              right of the address book. Keeps the visual rhythm of the
-              two-column layout: profile info on the left, history/stats
-              on the right. */}
-          <div>
-            <h2 className="text-base font-semibold leading-7 text-gray-900 mb-1">Your Stats</h2>
-            <p className="text-sm text-gray-500 mb-4">How indecisive are you?</p>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <StatCard label="Total Flips & Spins" value={flipCount} />
-              <StatCard label="Times Accepted" value={acceptanceCount} />
-              <StatCard
-                label="Acceptance Rate"
-                value={acceptanceRate}
-                sub={flipCount > 0 ? `${acceptanceCount} of ${flipCount}` : 'No flips yet'}
-              />
-            </div>
+            {pushError && <p className="mt-2 text-xs text-red-500">{pushError}</p>}
           </div>
-        </div>
-      </div>
+
 
       {/* ── Danger zone ─────────────────────────────────── */}
-      {isAuthenticated && (
+      {/* Only shown in the Account view (this page's `view` prop) — keeps
+          account deletion next to other account-management actions, away
+          from the dietary/notifications/addresses settings. */}
+      {isAuthenticated && view === 'account' && (
         <div className="mt-12 border-t border-red-100 pt-8">
           <h2 className="text-base font-semibold text-red-600 mb-1">Danger Zone</h2>
           <p className="text-sm text-gray-500 mb-4">Permanently delete your account and all associated data. This cannot be undone.</p>
@@ -1297,14 +1117,6 @@ const UserInfoPage = () => {
         </div>
       )}
 
-      {selectedRestaurantId && (
-        <RestaurantReviewModal
-          readOnly
-          restaurant={allRestaurants[selectedRestaurantId]}
-          reviews={userInfo.reviews[selectedRestaurantId] || []}
-          onClose={() => setSelectedRestaurantId(null)}
-        />
-      )}
     </div>
   );
 };

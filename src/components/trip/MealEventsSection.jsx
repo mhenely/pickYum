@@ -25,6 +25,7 @@ const EMPTY_OBJECT  = Object.freeze({});
 
 const MEAL_SLOTS = [
   { value: 'BREAKFAST', label: 'Breakfast', icon: '☕' },
+  { value: 'BRUNCH',    label: 'Brunch',    icon: '🥞' },
   { value: 'LUNCH',     label: 'Lunch',     icon: '🥪' },
   { value: 'DINNER',    label: 'Dinner',    icon: '🍽️' },
   { value: 'SNACK',     label: 'Snack',     icon: '🍪' },
@@ -66,6 +67,24 @@ function formatDayLabel(key) {
   return new Date(y, m - 1, d).toLocaleDateString(undefined, {
     weekday: 'long', month: 'short', day: 'numeric',
   });
+}
+
+// Compute "Day N" for a meal's calendar date relative to the trip's
+// startDate. Returns null if either input is missing or the meal is
+// scheduled before the trip starts (which we leave alone rather than
+// surfacing as "Day 0" or "Day -1" — uncommon, and the date label still
+// shows). Trip startDate is stored as UTC midnight; the meal's dayKey is
+// derived in the user's local TZ, so we read each via local-date parts
+// to make the day-count math comparable.
+function dayNumber(dayKey, tripStartDateIso) {
+  if (!tripStartDateIso || dayKey === 'unscheduled') return null;
+  const [my, mm, md] = dayKey.split('-').map(Number);
+  const start = new Date(tripStartDateIso);
+  if (Number.isNaN(start.getTime())) return null;
+  const startLocal = new Date(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  const mealLocal  = new Date(my, mm - 1, md);
+  const diffDays   = Math.round((mealLocal.getTime() - startLocal.getTime()) / (24 * 60 * 60 * 1000));
+  return diffDays >= 0 ? diffDays + 1 : null;
 }
 
 function formatTime(iso) {
@@ -268,6 +287,17 @@ export default function MealEventsSection({ trip, currentUserId, isHost, isArchi
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
 
+  // Bulk-add form state. Same submit path as single-create but produces
+  // dates × slots combinations under one workflow so the user doesn't
+  // have to create breakfast / lunch / dinner for each trip day by hand.
+  const [showBulk,    setShowBulk]    = useState(false);
+  const [bulkFrom,    setBulkFrom]    = useState('');
+  const [bulkTo,      setBulkTo]      = useState('');
+  const [bulkSlots,   setBulkSlots]   = useState(new Set(['BREAKFAST', 'LUNCH', 'DINNER']));
+  const [bulking,     setBulking]     = useState(false);
+  const [bulkError,   setBulkError]   = useState('');
+  const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
+
   // Per-event UI state: which event has its add-option dropdown open, which
   // is busy with an action, etc. Keyed by event id so they don't collide.
   const [optionPickerForEvent, setOptionPickerForEvent] = useState(null);
@@ -306,6 +336,106 @@ export default function MealEventsSection({ trip, currentUserId, isHost, isArchi
         ...prev,
         events: (prev.events ?? []).map((e) => (e.id === eventId ? updater(e) : e)),
       };
+    });
+  };
+
+  // Generate a list of YYYY-MM-DD strings between two ISO dates inclusive.
+  // Used by the bulk-add flow to expand fromDate→toDate into per-day rows.
+  const enumerateDays = (from, to) => {
+    const out = [];
+    const start = new Date(from);
+    const end   = new Date(to);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return out;
+    const cur = new Date(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+    const stop = new Date(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate());
+    while (cur <= stop) {
+      const y = cur.getFullYear();
+      const m = String(cur.getMonth() + 1).padStart(2, '0');
+      const d = String(cur.getDate()).padStart(2, '0');
+      out.push(`${y}-${m}-${d}`);
+      cur.setDate(cur.getDate() + 1);
+    }
+    return out;
+  };
+
+  // Sensible default times so bulk-created meals don't all stack at noon.
+  // Users can edit individual times later via the per-meal time input.
+  const SLOT_DEFAULT_TIMES = {
+    BREAKFAST: '08:00',
+    BRUNCH:    '10:30',
+    LUNCH:     '12:30',
+    DINNER:    '19:00',
+    SNACK:     '15:30',
+  };
+
+  const handleBulkCreate = async (e) => {
+    e.preventDefault();
+    if (bulkSlots.size === 0) { setBulkError('Pick at least one meal slot.'); return; }
+    if (!bulkFrom || !bulkTo)  { setBulkError('Pick a date range.');           return; }
+    const days = enumerateDays(bulkFrom, bulkTo);
+    if (days.length === 0)     { setBulkError('End date must be on or after start date.'); return; }
+    if (days.length > 60)      { setBulkError('Range too long — pick up to 60 days at a time.'); return; }
+
+    // Build the combinations in calendar order so meals appear in the
+    // right sequence even if a create errors and stops the loop.
+    const slotsOrdered = MEAL_SLOTS.map((s) => s.value).filter((v) => bulkSlots.has(v));
+    const combos = [];
+    for (const day of days) {
+      for (const slot of slotsOrdered) {
+        const meta = MEAL_SLOTS.find((s) => s.value === slot);
+        combos.push({
+          day, slot,
+          name: `${meta.icon} ${meta.label}`,
+          scheduledFor: new Date(`${day}T${SLOT_DEFAULT_TIMES[slot] ?? '12:00'}`).toISOString(),
+        });
+      }
+    }
+
+    setBulking(true);
+    setBulkError('');
+    setBulkProgress({ done: 0, total: combos.length });
+    let createdAny = false;
+    try {
+      // Serial loop rather than Promise.all so partial-failure errors land
+      // on the actual failed combo (and to be gentle on the API). 60×N is
+      // the upper bound, well within the trip-event rate limit.
+      for (let i = 0; i < combos.length; i += 1) {
+        const c = combos[i];
+        try {
+          await api.trips.createEvent(trip.id, {
+            name: c.name,
+            scheduledFor: c.scheduledFor,
+            mealSlot: c.slot,
+            participantUserIds: [], // empty = all members (default)
+          });
+          createdAny = true;
+        } catch (err) {
+          setBulkError(`Stopped at ${c.day} ${c.slot}: ${err?.message ?? 'create failed'}`);
+          break;
+        }
+        setBulkProgress({ done: i + 1, total: combos.length });
+      }
+      if (createdAny) {
+        // Full refetch — simpler than reconciling N inserts into setTrip
+        // optimistic state, and bulk-add is a one-shot user gesture.
+        if (onRefresh) await onRefresh();
+        if (!bulkError) {
+          setShowBulk(false);
+          setBulkFrom(''); setBulkTo('');
+        }
+      }
+    } finally {
+      setBulking(false);
+      setBulkProgress(null);
+    }
+  };
+
+  const toggleBulkSlot = (slot) => {
+    setBulkSlots((prev) => {
+      const next = new Set(prev);
+      if (next.has(slot)) next.delete(slot);
+      else                next.add(slot);
+      return next;
     });
   };
 
@@ -632,10 +762,46 @@ export default function MealEventsSection({ trip, currentUserId, isHost, isArchi
         <p className="text-xs text-gray-400 italic mb-3">No meals planned yet.</p>
       )}
 
-      {/* Day-grouped event list */}
-      {groupedByDay.map((day) => (
+      {/* Day-grouped event list. Each day header shows "Day N · Mon Jan 6"
+          (Day N relative to trip.startDate; suppressed for trips with no
+          start date or for meals scheduled before the trip starts) plus a
+          thin slot-coverage strip that marks which meal slots already have
+          at least one event on this day. The strip helps users spot
+          "missing dinner on Day 3" at a glance without reading every row. */}
+      {groupedByDay.map((day) => {
+        const dayNum = dayNumber(day.key, trip.startDate);
+        const slotsPresent = new Set(day.events.map((ev) => ev.mealSlot).filter(Boolean));
+        return (
         <div key={day.key} className="mb-4 last:mb-3">
-          <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">{day.label}</p>
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              {dayNum != null && (
+                <span className="text-orange-600 mr-1.5">Day {dayNum}</span>
+              )}
+              {dayNum != null && <span className="text-gray-300 mr-1.5">·</span>}
+              {day.label}
+            </p>
+            {day.key !== 'unscheduled' && (
+              <div className="flex items-center gap-1" aria-label="Slot coverage for this day">
+                {MEAL_SLOTS.map((s) => {
+                  const filled = slotsPresent.has(s.value);
+                  return (
+                    <span
+                      key={s.value}
+                      title={`${s.label}: ${filled ? 'planned' : 'not planned'}`}
+                      className={`text-[10px] leading-none px-1.5 py-0.5 rounded ${
+                        filled
+                          ? 'bg-orange-100 text-orange-700'
+                          : 'bg-gray-100 text-gray-300'
+                      }`}
+                    >
+                      {s.icon}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <ul className="flex flex-col gap-2">
             {day.events.map((ev) => {
               const slotMeta = MEAL_SLOTS.find((s) => s.value === ev.mealSlot);
@@ -946,7 +1112,104 @@ export default function MealEventsSection({ trip, currentUserId, isHost, isArchi
             })}
           </ul>
         </div>
-      ))}
+        );
+      })}
+
+      {/* Bulk add — date range × meal slots → fan-out create calls. Sits
+          above the single-meal "+ Add a meal" affordance so a user setting
+          up a new trip sees the faster path first. Hidden once the bulk
+          form is open to avoid stacking two giant forms. */}
+      {canCreate && !showBulk && !showCreate && (
+        <button
+          type="button"
+          onClick={() => {
+            setShowBulk(true);
+            setBulkError('');
+            if (!bulkFrom && trip.startDate) setBulkFrom(tripDateToInputValue(trip.startDate));
+            if (!bulkTo   && trip.endDate)   setBulkTo(tripDateToInputValue(trip.endDate));
+          }}
+          className="block text-xs font-medium text-orange-600 hover:text-orange-800 mt-2 mb-1"
+        >
+          + Bulk add meals for a date range
+        </button>
+      )}
+
+      {canCreate && showBulk && (
+        <form onSubmit={handleBulkCreate} className="flex flex-col gap-2 border-t border-gray-100 pt-3 mt-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Bulk add meals</p>
+          <p className="text-[11px] text-gray-500 -mt-1">
+            Creates one meal per selected slot for each day in the range. Default times can be edited per meal after.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <label className="flex flex-col flex-1 min-w-[140px]">
+              <span className="text-[11px] text-gray-500 mb-0.5">From</span>
+              <input
+                type="date"
+                value={bulkFrom}
+                min={tripDateToInputValue(trip.startDate)}
+                max={tripDateToInputValue(trip.endDate)}
+                onChange={(e) => { setBulkFrom(e.target.value); setBulkError(''); }}
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+              />
+            </label>
+            <label className="flex flex-col flex-1 min-w-[140px]">
+              <span className="text-[11px] text-gray-500 mb-0.5">To</span>
+              <input
+                type="date"
+                value={bulkTo}
+                min={bulkFrom || tripDateToInputValue(trip.startDate)}
+                max={tripDateToInputValue(trip.endDate)}
+                onChange={(e) => { setBulkTo(e.target.value); setBulkError(''); }}
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+              />
+            </label>
+          </div>
+          <div>
+            <span className="text-[11px] text-gray-500 block mb-1">Meal slots</span>
+            <div className="flex flex-wrap gap-1.5">
+              {MEAL_SLOTS.map((s) => {
+                const active = bulkSlots.has(s.value);
+                return (
+                  <button
+                    key={s.value}
+                    type="button"
+                    onClick={() => toggleBulkSlot(s.value)}
+                    className={`rounded-full px-2.5 py-1 text-xs border transition-colors ${
+                      active
+                        ? 'bg-orange-100 border-orange-300 text-orange-700 font-medium'
+                        : 'bg-white border-gray-300 text-gray-500 hover:border-orange-300'
+                    }`}
+                  >
+                    {s.icon} {s.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {bulkError    && <p className="text-xs text-red-500">{bulkError}</p>}
+          {bulkProgress && (
+            <p className="text-xs text-gray-500">
+              Creating {bulkProgress.done} of {bulkProgress.total}…
+            </p>
+          )}
+          <div className="flex items-center gap-2 mt-1">
+            <button
+              type="submit"
+              disabled={bulking || bulkSlots.size === 0 || !bulkFrom || !bulkTo}
+              className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulking ? 'Creating…' : 'Create meals'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setShowBulk(false); setBulkError(''); }}
+              className="text-xs font-medium text-gray-500 hover:text-gray-700"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
 
       {/* Create-meal form — collapsed by default */}
       {canCreate && (

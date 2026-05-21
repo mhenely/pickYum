@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
 import { Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { api } from '../lib/api';
@@ -6,6 +6,7 @@ import { addCustomRestaurant } from '../redux/slices/userInfoSlice';
 import RestaurantDetailModal from '../components/RestaurantDetailModal';
 import BallotDetailModal from '../components/BallotDetailModal';
 import { SkeletonLine, SkeletonStatGrid, SkeletonList } from '../components/Skeleton';
+import UserStatsPanel from '../components/UserStatsPanel';
 
 // Stable empty-object sentinel for the useSelector fallback — without
 // this, `?? {}` minted a new {} every dispatch and forced a re-render.
@@ -46,11 +47,15 @@ const WINDOW_OPTIONS = [
   { value: 'week',  label: 'Last 7 days' },
 ];
 
+// Narrative subtitle for the page header. For windows with a comparable
+// prior period the phrasing leans into the comparison ("vs prior month")
+// so the user reads the page as "what changed" rather than "how many."
+// `all` stays declarative since there's nothing to compare against.
 const WINDOW_SUBTITLE = {
   all:   'lifetime',
-  year:  'in the last 365 days',
-  month: 'in the last 30 days',
-  week:  'in the last 7 days',
+  year:  'this year vs prior year',
+  month: 'this month vs prior month',
+  week:  'this week vs prior week',
 };
 
 // Human-readable label for the sparkline window. The bucket strategy is
@@ -155,16 +160,104 @@ const Sparkline = ({ values, width = 64, height = 18 }) => {
   );
 };
 
+// Empty state for a brand-new user with no recorded decisions yet. Shows
+// a faded "this is what you'll see" preview so the page doesn't read as
+// broken — the preview tiles use sample numbers (clearly labeled) so it's
+// obvious they're not real data. CTA points the user at /choose to make
+// their first decision.
+// One-tap decision-regret answer. `value` is the current
+// wouldPickAgain field: null = unanswered, true = thumbs-up,
+// false = thumbs-down. Clicking the active answer clears it
+// (back to unanswered) — onChange receives the requested new
+// value; the caller decides whether to apply it or toggle off.
+// stopPropagation on click so the surrounding row's open-detail
+// handler doesn't fire.
+const RegretToggle = ({ value, onChange }) => {
+  const handle = (e, requested) => {
+    e.stopPropagation();
+    onChange(requested);
+  };
+  return (
+    <div className="inline-flex items-center gap-0.5 rounded-md bg-gray-50 border border-gray-200 p-0.5">
+      <button
+        type="button"
+        aria-label="Would pick this again"
+        title="Would pick this again"
+        onClick={(e) => handle(e, true)}
+        className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+          value === true
+            ? 'bg-emerald-500 text-white'
+            : 'text-gray-400 hover:bg-emerald-50 hover:text-emerald-600'
+        }`}
+      >
+        👍
+      </button>
+      <button
+        type="button"
+        aria-label="Would not pick this again"
+        title="Would not pick this again"
+        onClick={(e) => handle(e, false)}
+        className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+          value === false
+            ? 'bg-red-500 text-white'
+            : 'text-gray-400 hover:bg-red-50 hover:text-red-600'
+        }`}
+      >
+        👎
+      </button>
+    </div>
+  );
+};
+
 const EmptyState = () => (
-  <div className="text-center py-16">
-    <p className="text-5xl mb-3">📊</p>
-    <p className="font-semibold text-gray-700 mb-2">No decisions yet</p>
-    <p className="text-sm text-gray-500 max-w-xs mx-auto mb-6">
-      Once you flip, spin, vote, or pick a restaurant, insights about your decision patterns will show up here.
-    </p>
-    <Link to="/choose" className="inline-block rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-5 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm">
-      Make a decision →
-    </Link>
+  <div className="py-8">
+    <div className="text-center mb-6">
+      <p className="text-5xl mb-3">📊</p>
+      <p className="font-semibold text-gray-700 mb-2">No decisions yet</p>
+      <p className="text-sm text-gray-500 max-w-xs mx-auto mb-5">
+        Once you flip, spin, vote, or pick a restaurant, insights about your decision patterns will show up here.
+      </p>
+      <Link to="/choose" className="inline-block rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-5 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm">
+        Make a decision →
+      </Link>
+    </div>
+
+    {/* Preview strip — desaturated sample tiles so the user sees the
+        shape of the page they'll get. `aria-hidden` so screen readers
+        skip the placeholder numbers. */}
+    <div className="opacity-50 pointer-events-none select-none" aria-hidden="true">
+      <p className="text-xs uppercase tracking-wider text-gray-400 text-center mb-3">
+        Here's what you'll see
+      </p>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        {[
+          { value: 24, label: 'Total decisions', sub: '+18% vs prior period' },
+          { value: 17, label: 'Different restaurants', sub: 'variety 71%' },
+          { value: '🪙', label: 'Most-used method', sub: 'Coin flip · 12 times' },
+        ].map((t) => (
+          <div key={t.label} className="rounded-lg border border-gray-200 bg-white p-3 text-center">
+            <p className="text-2xl font-bold text-orange-400">{t.value}</p>
+            <p className="text-[11px] font-medium text-gray-500 mt-1">{t.label}</p>
+            <p className="text-[10px] text-gray-400 mt-0.5">{t.sub}</p>
+          </div>
+        ))}
+      </div>
+      <div className="rounded-lg border border-gray-200 bg-white p-3">
+        <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Cuisine trends</p>
+        {['Italian', 'Japanese', 'Mexican'].map((c, i) => (
+          <div key={c} className="flex items-center justify-between gap-3 py-1 text-xs">
+            <span className="text-gray-600">{c}</span>
+            <svg width="80" height="14" viewBox="0 0 80 14" className="text-orange-300">
+              <polyline
+                fill="none" stroke="currentColor" strokeWidth="1.5"
+                points={i === 0 ? '0,10 20,7 40,4 60,5 80,2' : i === 1 ? '0,8 20,9 40,6 60,4 80,5' : '0,4 20,6 40,8 60,10 80,9'}
+              />
+            </svg>
+            <span className="text-gray-500 tabular-nums w-8 text-right">{8 - i * 2}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   </div>
 );
 
@@ -187,6 +280,25 @@ const InsightsPage = () => {
   // cleared by an explicit "× clear" affordance on the section header.
   const recentSectionRef = useRef(null);
   const [methodFilter, setMethodFilter] = useState(null);
+
+  // Per-row expansion for the cuisine-trends table. Clicking a row's
+  // trend cell swaps the inline sparkline for a larger chart with axis
+  // values below the row. Only one cuisine can be expanded at a time so
+  // the table doesn't grow unbounded.
+  const [expandedCuisine, setExpandedCuisine] = useState(null);
+
+  // Friend comparison — fetched lazily once on mount. Independent of
+  // the `since` selector because the comparison endpoint uses its own
+  // fixed one-year window. Empty array means "no friends yet"; an
+  // unset value means "still loading."
+  const [friendInsights, setFriendInsights] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.users.getFriendInsights()
+      .then((r) => { if (!cancelled) setFriendInsights(r.friends); })
+      .catch(() => { if (!cancelled) setFriendInsights([]); });
+    return () => { cancelled = true; };
+  }, []);
   const scrollToRecent = useCallback(() => {
     recentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
@@ -386,6 +498,54 @@ const InsightsPage = () => {
         />
       </div>
 
+      {/* Regret-rate tile — surfaces the share of acceptances the user
+          has flagged as "wouldn't pick again." Hidden until they've
+          answered the prompt on at least 3 acceptances (small-sample
+          floor enforced server-side via regretRate=null). The "—" + CTA
+          variant covers the gap before that threshold so the prompt
+          actually gets discovered. */}
+      <div className="mb-8">
+        {data.regretRate != null ? (
+          <div className={`rounded-xl border p-4 flex items-center justify-between gap-3 ${
+            data.regretRate >= 30
+              ? 'border-red-200 bg-red-50'
+              : data.regretRate >= 15
+                ? 'border-amber-200 bg-amber-50'
+                : 'border-emerald-200 bg-emerald-50'
+          }`}>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-600 mb-0.5">Regret rate</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {data.regretRate}<span className="text-base font-medium text-gray-500">%</span>
+              </p>
+              <p className="text-[11px] text-gray-500 mt-0.5">
+                of {data.regretAnswered} answered acceptances you'd skip next time
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={scrollToRecent}
+              className="text-xs font-medium text-orange-600 hover:text-orange-700"
+            >
+              Review picks →
+            </button>
+          </div>
+        ) : data.recent.length > 0 ? (
+          <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-3 flex items-center justify-between gap-3">
+            <p className="text-xs text-gray-500">
+              Tag a few recent picks with 👍 or 👎 to start tracking regret.
+            </p>
+            <button
+              type="button"
+              onClick={scrollToRecent}
+              className="text-xs font-medium text-orange-600 hover:text-orange-700"
+            >
+              Jump to recent →
+            </button>
+          </div>
+        ) : null}
+      </div>
+
       {/* Weekday pattern */}
       <section className="mb-8">
         <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-1">When you decide</h2>
@@ -547,21 +707,57 @@ const InsightsPage = () => {
                   // acceptances in the trend window won't have a series — render
                   // a low-key em dash so the column stays aligned.
                   const series = data.cuisineWeeklyCounts?.[r.cuisine];
+                  const isExpanded = expandedCuisine === r.cuisine;
+                  const seriesMax  = series ? Math.max(1, ...series) : 0;
                   return (
-                    <tr key={r.cuisine} className="border-b border-gray-50 last:border-b-0">
-                      <td className="px-4 py-2 font-medium text-gray-700">{r.cuisine}</td>
-                      <td className="px-4 py-2 text-right font-mono text-gray-500">{r.considered}</td>
-                      <td className="px-4 py-2 text-right font-mono text-orange-600 font-semibold">{r.chosen}</td>
-                      <td className="px-4 py-2 text-right">
-                        {series ? (
-                          <div className="inline-flex" title={`${series.reduce((a, b) => a + b, 0)} ${WINDOW_SUBTITLE[since] ?? 'in window'}`}>
-                            <Sparkline values={series} />
-                          </div>
-                        ) : (
-                          <span className="text-gray-300">—</span>
-                        )}
-                      </td>
-                    </tr>
+                    <Fragment key={r.cuisine}>
+                      <tr className={`border-b border-gray-50 last:border-b-0 ${isExpanded ? 'bg-orange-50/40' : ''}`}>
+                        <td className="px-4 py-2 font-medium text-gray-700">{r.cuisine}</td>
+                        <td className="px-4 py-2 text-right font-mono text-gray-500">{r.considered}</td>
+                        <td className="px-4 py-2 text-right font-mono text-orange-600 font-semibold">{r.chosen}</td>
+                        <td className="px-4 py-2 text-right">
+                          {series ? (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedCuisine(isExpanded ? null : r.cuisine)}
+                              className="inline-flex items-center gap-1 rounded px-1 -mx-1 hover:bg-orange-100 transition-colors"
+                              title={isExpanded ? 'Hide chart' : 'Expand chart'}
+                            >
+                              <Sparkline values={series} />
+                              <span className="text-gray-400 text-[10px] leading-none">{isExpanded ? '▾' : '▸'}</span>
+                            </button>
+                          ) : (
+                            <span className="text-gray-300">—</span>
+                          )}
+                        </td>
+                      </tr>
+                      {isExpanded && series && (
+                        <tr className="bg-orange-50/40 border-b border-gray-50">
+                          <td colSpan={4} className="px-4 pt-1 pb-3">
+                            {/* Expanded chart — taller SVG with bar marks + value
+                                labels under each bucket so the user can read the
+                                actual count rather than relative shape only.
+                                Buckets are whatever the server chose (see
+                                SPARKLINE_LABEL). */}
+                            <p className="text-[11px] text-gray-500 mb-2">
+                              {r.cuisine} · {SPARKLINE_LABEL[since] ?? 'picks over the selected window'}
+                            </p>
+                            <div className="flex items-end gap-1 h-20">
+                              {series.map((v, i) => (
+                                <div key={i} className="flex-1 flex flex-col items-center justify-end">
+                                  <div
+                                    className="w-full rounded-t bg-gradient-to-t from-orange-400 to-orange-300"
+                                    style={{ height: `${(v / seriesMax) * 100}%`, minHeight: v > 0 ? 2 : 0 }}
+                                    title={`${v} pick${v === 1 ? '' : 's'}`}
+                                  />
+                                  <span className="text-[9px] text-gray-400 mt-0.5">{v}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -627,21 +823,56 @@ const InsightsPage = () => {
                         {METHOD_LABELS[r.chooseMethod ?? 'unknown']}
                         {r.competing.length > 0 && ` · beat ${r.competing.slice(0, 3).join(', ')}${r.competing.length > 3 ? ` +${r.competing.length - 3}` : ''}`}
                       </p>
-                      {hasBallot && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            // Don't also open the restaurant detail — these
-                            // two actions are mutually exclusive paths from
-                            // the same row.
-                            e.stopPropagation();
-                            setBallotEvent({ groupId: r.groupId, eventId: r.eventId });
+                      <div className="flex items-center gap-2 shrink-0">
+                        {/* Regret toggle. Two buttons rather than one
+                            because users want to differentiate "I haven't
+                            answered" from "I tried answering and clicked
+                            no." Clicking the active answer again clears
+                            it (back to unanswered). */}
+                        <RegretToggle
+                          value={r.wouldPickAgain}
+                          onChange={async (next) => {
+                            // Optimistic — flip locally first, refetch
+                            // insights on success to pick up the new
+                            // regret-rate stat.
+                            const optimistic = next === r.wouldPickAgain ? null : next;
+                            setData((prev) => prev && ({
+                              ...prev,
+                              recent: prev.recent.map((row) => row.id === r.id ? { ...row, wouldPickAgain: optimistic } : row),
+                            }));
+                            try {
+                              await api.users.setAcceptedRegret(r.id, optimistic);
+                              // Refetch only when the answer transitioned
+                              // through the small-sample threshold so the
+                              // headline tile re-renders. Cheap GET; cache
+                              // already invalidated by the PATCH.
+                              const fresh = await api.users.getInsights(since);
+                              setData(fresh);
+                            } catch {
+                              // Roll back on failure.
+                              setData((prev) => prev && ({
+                                ...prev,
+                                recent: prev.recent.map((row) => row.id === r.id ? { ...row, wouldPickAgain: r.wouldPickAgain } : row),
+                              }));
+                            }
                           }}
-                          className="shrink-0 text-xs font-medium text-emerald-700 hover:text-emerald-800 underline-offset-2 hover:underline"
-                        >
-                          View ballot →
-                        </button>
-                      )}
+                        />
+                        {hasBallot && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              // Don't also open the restaurant detail — these
+                              // two actions are mutually exclusive paths from
+                              // the same row.
+                              e.stopPropagation();
+                              setBallotEvent({ groupId: r.groupId, eventId: r.eventId });
+                            }}
+                            className="text-xs font-medium text-emerald-700 hover:text-emerald-800 underline-offset-2 hover:underline"
+                          >
+                            View ballot →
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </li>
@@ -652,6 +883,63 @@ const InsightsPage = () => {
         </section>
         );
       })()}
+
+      {/* Friend comparison — only renders for users with at least one
+          friend who shares cuisine history. The endpoint uses a fixed
+          one-year window (separate from this page's `since` selector)
+          so the comparison stays stable as the user toggles windows. */}
+      {Array.isArray(friendInsights) && friendInsights.length > 0 && (
+        <section className="mt-10 pt-10 border-t border-gray-200">
+          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-1">
+            Friend comparison
+          </h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Cuisine overlap with friends, based on the last 365 days.
+          </p>
+          <ul className="divide-y divide-gray-100 rounded-xl border border-gray-200 overflow-hidden bg-white">
+            {friendInsights.map((f) => (
+              <li key={f.id} className="flex items-start gap-3 px-4 py-3">
+                <div className="h-9 w-9 rounded-full overflow-hidden bg-gradient-to-br from-orange-400 to-red-400 flex items-center justify-center text-white font-bold text-sm shrink-0">
+                  {f.avatarUrl
+                    ? <img src={f.avatarUrl} alt="" className="h-full w-full object-cover" />
+                    : (f.username?.[0]?.toUpperCase() ?? '?')}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-gray-900">{f.username}</p>
+                  {f.topShared ? (
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      You both pick <span className="font-semibold text-orange-600">{f.topShared.cuisine}</span>
+                      {' · '}
+                      <span className="text-gray-500">
+                        you {f.topShared.mineCount}× / them {f.topShared.theirCount}×
+                        {' · '}
+                        {Math.round(f.topShared.alignment * 100)}% aligned
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-400 italic mt-0.5">
+                      No cuisine overlap in the last year.
+                    </p>
+                  )}
+                  {f.theirFavorite && (
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      They lean into <span className="font-medium text-gray-700">{f.theirFavorite.cuisine}</span>
+                      {' '}({f.theirFavorite.theirCount}× vs your {f.theirFavorite.mineCount}×)
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {/* Top picks + indecision stats. Lives here (not Settings) because
+          it's all derived from history, matching the analytics framing of
+          the rest of the page. */}
+      <div className="mt-10 pt-10 border-t border-gray-200">
+        <UserStatsPanel />
+      </div>
 
       {detailId && (
         <RestaurantDetailModal

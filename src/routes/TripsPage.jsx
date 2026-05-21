@@ -28,6 +28,12 @@ const TripCard = ({ trip }) => {
         weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
       })
     : null;
+  // Meal-decision progress for the trip. Suppressed entirely when there
+  // are no planned meals yet — a 0/0 bar would look like a stalled trip
+  // rather than an empty one.
+  const totalMeals    = trip._count.events;
+  const decidedMeals  = trip._count.decidedEvents ?? 0;
+  const progressPct   = totalMeals > 0 ? Math.round((decidedMeals / totalMeals) * 100) : 0;
   return (
     <Link
       to={`/trips/${trip.id}`}
@@ -49,6 +55,26 @@ const TripCard = ({ trip }) => {
           </span>
         )}
       </div>
+
+      {/* Meal-decision progress bar — surfaces "what's actionable" at a
+          glance across the trip list. Skipped for empty trips so a brand-
+          new trip without meals reads as "ready to plan" rather than
+          "0% done." */}
+      {totalMeals > 0 && !trip.archivedAt && (
+        <div className="mt-3">
+          <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1">
+            <span>{decidedMeals} of {totalMeals} meal{totalMeals === 1 ? '' : 's'} decided</span>
+            <span className="font-semibold text-gray-700">{progressPct}%</span>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-gray-100 overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-orange-400 to-red-400 transition-[width] duration-300"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Next-meal callout — only renders when the server returned a
           scheduled upcoming meal for this trip. Helps users answer
           "what's next?" without clicking into the trip. */}
@@ -71,7 +97,11 @@ const TripCard = ({ trip }) => {
   );
 };
 
-export default function TripsPage() {
+// Headerless body of the trips list — used both by the standalone /trips
+// route (via the default export below) and by SocialsPage's Trips tab.
+// Splitting it out lets the embedded version skip the outer max-w wrapper
+// + page <h1>, which would clash with the host page's own chrome.
+export function TripsTab({ showHeader = true } = {}) {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const [trips,   setTrips]   = useState([]);
@@ -144,14 +174,16 @@ export default function TripsPage() {
   const archived = trips.filter((t) => t.archivedAt);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 lg:px-8">
+    <>
       <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Trips</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Plan a multi-meal trip with friends — vote on each meal as you go.
-          </p>
-        </div>
+        {showHeader ? (
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Your trips</h2>
+            <p className="text-sm text-gray-500 mt-0.5">
+              Plan a multi-meal trip with friends — vote on each meal as you go.
+            </p>
+          </div>
+        ) : <div />}
         {!showCreate && (
           <Button onClick={() => setShowCreate(true)}>+ New trip</Button>
         )}
@@ -259,6 +291,7 @@ export default function TripsPage() {
           )}
         </>
       )}
-    </div>
+    </>
   );
 }
+

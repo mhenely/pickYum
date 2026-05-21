@@ -79,7 +79,7 @@ function TripInsightsPanel({ tripId }) {
   };
 
   const METHOD_LABELS = { vote: '🗳 Vote', flip: '🪙 Flip', spin: '🎰 Spin' };
-  const SLOT_LABELS   = { BREAKFAST: '🥐 Breakfast', LUNCH: '🥗 Lunch', DINNER: '🍽 Dinner', SNACK: '🍪 Snack' };
+  const SLOT_LABELS   = { BREAKFAST: '🥐 Breakfast', BRUNCH: '🥞 Brunch', LUNCH: '🥗 Lunch', DINNER: '🍽 Dinner', SNACK: '🍪 Snack' };
 
   return (
     <section>
@@ -421,6 +421,42 @@ export default function TripDetailPage() {
           );
         }
         return null;
+      })()}
+
+      {/* Dietary roll-up — union of every member's dietaryTags. Surfaces
+          the group's collective constraints up front so the meal planner
+          (or whoever's adding candidates) can keep them in mind. Hidden
+          when no member has tagged anything to avoid an empty chip strip. */}
+      {(() => {
+        const tagSet = new Set();
+        const tagByUser = new Map(); // tag → [usernames] for the tooltip
+        for (const m of trip.members ?? []) {
+          const tags = m.user?.dietaryTags ?? [];
+          for (const t of tags) {
+            tagSet.add(t);
+            if (!tagByUser.has(t)) tagByUser.set(t, []);
+            tagByUser.get(t).push(m.user.username);
+          }
+        }
+        if (tagSet.size === 0) return null;
+        return (
+          <div className="rounded-md border border-emerald-100 bg-emerald-50/50 px-3 py-2 mb-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700 shrink-0">
+                Group dietary
+              </span>
+              {[...tagSet].sort().map((t) => (
+                <span
+                  key={t}
+                  title={`${(tagByUser.get(t) ?? []).join(', ')}`}
+                  className="inline-flex items-center text-xs px-2 py-0.5 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-800"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          </div>
+        );
       })()}
 
       {/* Next-meal callout — surfaces the nearest upcoming meal so users

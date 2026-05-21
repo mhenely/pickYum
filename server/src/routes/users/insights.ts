@@ -84,6 +84,127 @@ function sparklineWindow(windowDays: number | undefined): {
   return { start, buckets, daysPerBucket };
 }
 
+// GET /api/users/me/insights/friends
+// Friend-by-friend comparison metrics over the past year of acceptances:
+//   - topShared:     cuisine you and they both pick, ordered by alignment
+//   - theirFavorite: cuisine they over-index on vs you (their:you ≥ 2:1)
+// Used by the "Friend comparison" panel on the Insights tab. Capped at 20
+// friends so the per-friend SQL stays bounded; in practice users don't
+// have more than that to compare anyway.
+router.get('/me/insights/friends', async (req: Request, res: Response) => {
+  const userId = req.userId as number;
+  const key = cacheKeyForUser('insights-friends', userId);
+  const payload = await cacheRead(key, INSIGHTS_CACHE_TTL_S, () => computeFriendComparison(userId));
+  res.json(payload);
+});
+
+async function computeFriendComparison(userId: number) {
+  // Discover friends via accepted friend requests on either direction.
+  const friendRows = await prisma.friendRequest.findMany({
+    where: { status: 'ACCEPTED', OR: [{ senderId: userId }, { receiverId: userId }] },
+    select: {
+      senderId: true,
+      receiverId: true,
+      sender:   { select: { id: true, username: true, avatarUrl: true } },
+      receiver: { select: { id: true, username: true, avatarUrl: true } },
+    },
+    orderBy: { updatedAt: 'desc' },
+    take: 20,
+  });
+  const friends = friendRows.map((r) => (r.senderId === userId ? r.receiver : r.sender));
+  if (friends.length === 0) return { friends: [] };
+
+  // One-year window — long enough to give cuisine signal, short enough
+  // that "they used to love Thai" doesn't dominate current behavior.
+  const cutoff = new Date(Date.now() - 365 * DAY_MS);
+  const rows = await prisma.userAccepted.findMany({
+    where: {
+      userId: { in: [userId, ...friends.map((f) => f.id)] },
+      acceptedAt: { gte: cutoff },
+      excludeFromInsights: false,
+    },
+    select: {
+      userId: true,
+      restaurant: { select: { cuisineType: true } },
+    },
+  });
+
+  // Bucket by userId → cuisine → count.
+  const byUser = new Map<number, Map<string, number>>();
+  for (const r of rows) {
+    const cuisine = r.restaurant?.cuisineType ?? null;
+    if (!cuisine) continue;
+    if (!byUser.has(r.userId)) byUser.set(r.userId, new Map());
+    const m = byUser.get(r.userId) as Map<string, number>;
+    m.set(cuisine, (m.get(cuisine) ?? 0) + 1);
+  }
+
+  const mine = byUser.get(userId) ?? new Map<string, number>();
+
+  type FriendInsight = {
+    id: number;
+    username: string;
+    avatarUrl: string | null;
+    sharedCuisineCount: number;
+    topShared:     { cuisine: string; mineCount: number; theirCount: number; alignment: number } | null;
+    theirFavorite: { cuisine: string; theirCount: number; mineCount: number } | null;
+  };
+
+  const out: FriendInsight[] = friends.map((f) => {
+    const theirs = byUser.get(f.id) ?? new Map<string, number>();
+
+    // Shared cuisines: both have picked it at least once. Alignment is
+    // min/max so two users who both ate Italian 4 times score 1.0 while
+    // 4 vs 1 scores 0.25. The ranking key multiplies alignment by total
+    // volume so a 1.0-aligned pair of (1, 1) doesn't beat a 0.6-aligned
+    // (8, 5).
+    const shared: Array<{ cuisine: string; mineCount: number; theirCount: number; alignment: number }> = [];
+    for (const [cuisine, mineCount] of mine) {
+      const theirCount = theirs.get(cuisine) ?? 0;
+      if (theirCount > 0) {
+        const min = Math.min(mineCount, theirCount);
+        const max = Math.max(mineCount, theirCount);
+        shared.push({ cuisine, mineCount, theirCount, alignment: max > 0 ? min / max : 0 });
+      }
+    }
+    shared.sort((a, b) =>
+      (b.alignment * (b.mineCount + b.theirCount)) - (a.alignment * (a.mineCount + a.theirCount))
+    );
+
+    // "Their favorite vs yours" — cuisines they've picked ≥ 3 times AND
+    // ≥ 2× as often as you. Surfaces the strongest divergence; 3-pick
+    // floor avoids noise from a single dinner that doesn't match your
+    // pattern.
+    let theirFavorite: FriendInsight['theirFavorite'] = null;
+    let bestRatio = 0;
+    for (const [cuisine, theirCount] of theirs) {
+      const mineCount = mine.get(cuisine) ?? 0;
+      if (theirCount < 3) continue;
+      if (theirCount < 2 * Math.max(mineCount, 1)) continue;
+      const ratio = theirCount / Math.max(mineCount, 1);
+      if (ratio > bestRatio || (ratio === bestRatio && theirCount > (theirFavorite?.theirCount ?? 0))) {
+        bestRatio = ratio;
+        theirFavorite = { cuisine, theirCount, mineCount };
+      }
+    }
+
+    return {
+      id: f.id,
+      username: f.username,
+      avatarUrl: f.avatarUrl,
+      sharedCuisineCount: shared.length,
+      topShared: shared[0] ?? null,
+      theirFavorite,
+    };
+  });
+
+  // Order: most overlap first so the user sees their closest dining
+  // matches at the top; alphabetic tie-break for stability.
+  out.sort((a, b) => (b.sharedCuisineCount - a.sharedCuisineCount) || a.username.localeCompare(b.username));
+
+  return { friends: out };
+}
+
 // GET /api/users/me/insights?since=week|month|year|all
 router.get('/me/insights', async (req: Request, res: Response) => {
   const userId = req.userId;
@@ -137,10 +258,15 @@ async function computeInsights(userId: number, sinceParam: string) {
         excludeFromInsights: false,
       },
       select: {
+        // id is needed for the regret-toggle wiring (PATCH /me/accepted/:id)
+        // so the UI can pin a per-row answer to the right entry.
+        id: true,
         restaurantId: true,
         acceptedAt: true,
         optionsSnapshot: true,
         chooseMethod: true,
+        // Decision-regret signal — null until user answers.
+        wouldPickAgain: true,
         // Surface eventId + groupId so the Insights page can deep-link recent
         // group-vote acceptances to their ballot detail. Solo acceptances have
         // null event, in which case both fields fall through as null.
@@ -296,10 +422,17 @@ async function computeInsights(userId: number, sinceParam: string) {
     .slice(0, 5);
 
   const recent = rows.slice(0, 8).map((r) => ({
+    // The acceptance row's primary key — needed by the regret-toggle
+    // (PATCH /me/accepted/:id) so the UI can pin the user's answer to
+    // the right entry.
+    id: r.id,
     restaurantId: String(r.restaurantId),
     name: r.restaurant?.name ?? `Restaurant #${r.restaurantId}`,
     acceptedAt: r.acceptedAt,
     chooseMethod: r.chooseMethod ?? null,
+    // Decision-regret signal — null until the user answers. The UI shows
+    // a thumb-up/down pair below each recent row.
+    wouldPickAgain: r.wouldPickAgain ?? null,
     // Present only when the acceptance came from a group event (post-rollout).
     // The page uses both ids together to deep-link into the ballot modal.
     eventId: r.eventId ?? null,
@@ -311,6 +444,22 @@ async function computeInsights(userId: number, sinceParam: string) {
           .map((id) => stats.get(id)?.name ?? `Restaurant #${id}`)
       : [],
   }));
+
+  // Regret-rate stat — fraction of ANSWERED acceptances marked
+  // "would NOT pick again". Computed over the window's rows so the
+  // headline regret rate moves in step with the rest of the page.
+  // Skipped (returned as null) when the user has answered fewer than 3
+  // rows — too small a sample to surface "you regret 50% of decisions"
+  // off a single thumbs-down.
+  let regretAnswered = 0;
+  let regretCount    = 0;
+  for (const r of rows) {
+    if (r.wouldPickAgain === true)  { regretAnswered += 1; }
+    if (r.wouldPickAgain === false) { regretAnswered += 1; regretCount += 1; }
+  }
+  const regretRate: number | null = regretAnswered >= 3
+    ? Math.round((regretCount / regretAnswered) * 100)
+    : null;
 
   // ── Variety score ──────────────────────────────────────────
   // Ratio of distinct restaurants chosen to total decisions, scaled to 0–10
@@ -423,6 +572,8 @@ async function computeInsights(userId: number, sinceParam: string) {
     oftenSkipped,
     neglectedFavorites,
     recent,
+    regretRate,
+    regretAnswered,
   };
 }
 

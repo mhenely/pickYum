@@ -878,7 +878,7 @@ describe('POST /api/trips/:id/events', () => {
     (mockPrisma.trip.findUnique as jest.Mock).mockResolvedValueOnce(tripMetaForHost);
     const res = await request(buildApp())
       .post('/api/trips/1/events').set('Cookie', authCookie(1))
-      .send({ name: 'Dinner', mealSlot: 'BRUNCH' }); // not in enum
+      .send({ name: 'Dinner', mealSlot: 'TEATIME' }); // not in enum (BRUNCH became valid in 20260601000000_meal_slot_brunch)
     expect(res.status).toBe(400);
   });
 

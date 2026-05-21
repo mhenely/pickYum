@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
-import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Navigate, useSearchParams } from 'react-router-dom';
 import { Provider } from 'react-redux';
 import store from './redux/store';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -16,8 +16,6 @@ const ForgotPasswordPage  = lazy(() => import('./routes/ForgotPasswordPage'));
 const ResetPasswordPage   = lazy(() => import('./routes/ResetPasswordPage'));
 const VerifyEmailPage     = lazy(() => import('./routes/VerifyEmailPage'));
 const HelpMeChoosePage    = lazy(() => import('./routes/HelpMeChoosePage'));
-const HistoryPage         = lazy(() => import('./routes/HistoryPage.jsx'));
-const UserInfoPage        = lazy(() => import('./routes/UserInfoPage'));
 const RestaurantPage      = lazy(() => import('./routes/RestaurantPage'));
 // HomePage is the `/` dispatcher: renders LandingPage for guests and
 // SearchPage for signed-in users. It lazy-loads its own children, so
@@ -28,10 +26,9 @@ const AboutPage           = lazy(() => import('./routes/AboutPage'));
 const GroupSessionPage    = lazy(() => import('./routes/GroupSessionPage'));
 const GroupDetailPage     = lazy(() => import('./routes/GroupDetailPage'));
 const SocialsPage         = lazy(() => import('./routes/SocialsPage'));
-const TripsPage           = lazy(() => import('./routes/TripsPage'));
 const TripDetailPage      = lazy(() => import('./routes/TripDetailPage'));
 const TripJoinPage        = lazy(() => import('./routes/TripJoinPage'));
-const InsightsPage        = lazy(() => import('./routes/InsightsPage'));
+const YouPage             = lazy(() => import('./routes/YouPage.jsx'));
 const PrivacyPage         = lazy(() => import('./routes/PrivacyPage'));
 const TermsPage           = lazy(() => import('./routes/TermsPage'));
 // Admin dashboard for ops-level visibility into Google Places spend.
@@ -41,6 +38,17 @@ const TermsPage           = lazy(() => import('./routes/TermsPage'));
 const AdminUsagePage      = lazy(() => import('./routes/AdminUsagePage'));
 
 const PageFallback = <div className="min-h-screen flex items-center justify-center text-gray-400">Loading…</div>;
+
+// Redirect helper that forwards existing query params while injecting/replacing
+// a `tab` value. Used to map the legacy per-feature routes onto the new
+// consolidated /you and /socials tabbed pages without dropping user filter
+// state (e.g. /History/123?fav=1 → /you?tab=timeline&fav=1).
+function RedirectToTab({ to, tab }: { to: string; tab: string }) {
+  const [params] = useSearchParams();
+  const next = new URLSearchParams(params);
+  next.set('tab', tab);
+  return <Navigate to={`${to}?${next.toString()}`} replace />;
+}
 
 const router = createBrowserRouter([
   // Auth page — standalone, no navbar
@@ -90,13 +98,21 @@ const router = createBrowserRouter([
           // shared "auth-resolving" skeleton in one place.
           { index: true, element: <Suspense fallback={PageFallback}><HomePage /></Suspense> },
           { path: 'choose/*', element: <Suspense fallback={PageFallback}><HelpMeChoosePage /></Suspense> },
-          { path: 'History/:userId', element: <Suspense fallback={PageFallback}><HistoryPage /></Suspense> },
-          { path: 'userInfo/:userId', element: <Suspense fallback={PageFallback}><UserInfoPage /></Suspense> },
+          // Consolidated personal hub. The three legacy routes below
+          // (History, userInfo, insights) redirect into the matching
+          // tab here so old bookmarks and shared links still land somewhere
+          // sensible. Filter query params (HistoryPage's fav/archives/method)
+          // ride through via RedirectToTab.
+          { path: 'you', element: <Suspense fallback={PageFallback}><YouPage /></Suspense> },
+          { path: 'History/:userId',  element: <RedirectToTab to="/you"      tab="timeline" /> },
+          { path: 'userInfo/:userId', element: <RedirectToTab to="/you"      tab="account" /> },
+          { path: 'insights',         element: <RedirectToTab to="/you"      tab="insights" /> },
           { path: 'restaurant/:restaurantId?', element: <Suspense fallback={PageFallback}><RestaurantPage /></Suspense> },
           { path: 'socials', element: <Suspense fallback={PageFallback}><SocialsPage /></Suspense> },
-          { path: 'insights', element: <Suspense fallback={PageFallback}><InsightsPage /></Suspense> },
           { path: 'groups/:id', element: <Suspense fallback={PageFallback}><GroupDetailPage /></Suspense> },
-          { path: 'trips',           element: <Suspense fallback={PageFallback}><TripsPage /></Suspense> },
+          // /trips redirects into the Social page's Trips tab; the
+          // per-trip detail + join routes below stay standalone.
+          { path: 'trips',           element: <RedirectToTab to="/socials" tab="trips" /> },
           // Order matters — `:id` is greedy, so the more specific
           // `trips/join/:token` must come first or it gets shadowed.
           { path: 'trips/join/:token', element: <Suspense fallback={PageFallback}><TripJoinPage /></Suspense> },

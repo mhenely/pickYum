@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Option B' — pickYum nav mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }</style>
+</head>
+<body class="bg-orange-50 min-h-screen">
+
+  <!-- Annotation banner -->
+  <div class="bg-blue-50 border-b border-blue-200 px-4 py-3 text-sm text-blue-900">
+    <div class="mx-auto max-w-7xl flex items-center gap-3 flex-wrap">
+      <a href="index.html" class="text-blue-600 hover:underline font-medium shrink-0">← back to options</a>
+      <span class="text-blue-300">|</span>
+      <strong>Option B':</strong>
+      <span>Collapse Socials + Plan into a single <code class="bg-blue-100 px-1.5 py-0.5 rounded text-xs">/social</code> with 4 tabs (Groups · Trips · People · Recs). Top nav drops to <strong>4 items</strong>. Mobile combines this with Option C's bottom-tab bar.</span>
+    </div>
+  </div>
+
+  <!-- Desktop nav (4 items) -->
+  <nav class="bg-white border-b border-orange-200 shadow-sm" style="box-shadow: 0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06);">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="flex h-16 items-center justify-between">
+        <div class="flex items-center">
+          <a href="#" class="flex items-center gap-2 mr-2">
+            <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-lg shadow">🍽</span>
+            <span class="font-extrabold text-lg tracking-tight bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </a>
+          <div class="hidden md:block">
+            <div class="ml-10 flex items-baseline space-x-1">
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Search</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Compare</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Choose</a>
+              <a href="#social" class="bg-orange-50 text-orange-600 font-semibold rounded-md px-3 py-2 text-sm relative">
+                Social
+                <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">3</span>
+                <span class="absolute -top-1 -right-1 text-[8px] text-amber-600 whitespace-nowrap">↺ merged</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="relative p-2 text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md transition-colors">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 10-12 0v3.2a2 2 0 01-.6 1.4L4 17h5m6 0a3 3 0 11-6 0"/></svg>
+            <span class="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">4</span>
+          </button>
+          <a href="#you" class="ml-1 h-8 w-8 rounded-full overflow-hidden bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center" title="Direct link to /you">
+            <svg class="h-5 w-5 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Annotation -->
+  <div class="bg-amber-50 border-b border-amber-200 px-4 py-1.5 text-xs text-amber-900 text-center">
+    Below: the unified <strong>/social</strong> page (Groups · Trips · People · Recs — everything multi-user in one place)
+  </div>
+
+  <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap mb-5">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Social</h1>
+        <p class="text-sm text-gray-500 mt-1">Friends, groups, trips, and shared recs — everything multi-user.</p>
+      </div>
+      <button class="rounded-md bg-orange-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-400">
+        + New
+      </button>
+    </div>
+
+    <!-- 4-tab sub-nav. Default landing = Groups (most active surface) -->
+    <div class="border-b border-gray-200 mb-6">
+      <nav class="-mb-px flex gap-6 overflow-x-auto">
+        <button class="border-b-2 border-orange-500 text-orange-600 py-3 px-1 text-sm font-semibold whitespace-nowrap flex items-center gap-1.5">
+          <span>👥</span> Groups
+          <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">1</span>
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>🧳</span> Trips
+          <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">1</span>
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>🤝</span> People
+          <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">2</span>
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>⭐</span> Recs
+        </button>
+      </nav>
+    </div>
+
+    <!-- Groups list (active tab) -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+      <div class="rounded-2xl border border-orange-200 bg-white p-5 hover:shadow-md transition-shadow">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-base font-bold text-gray-900">Friday Crew</p>
+            <p class="text-xs text-gray-500 mt-0.5">4 members · hosted by you</p>
+          </div>
+          <span class="text-xs text-orange-600 font-semibold bg-orange-50 px-2 py-0.5 rounded">🗳 voting</span>
+        </div>
+        <div class="mt-3 text-sm text-gray-600 border-l-2 border-orange-300 pl-3">
+          <p class="font-medium text-gray-900">Date night picks</p>
+          <p class="text-xs text-gray-500 mt-0.5">5 candidates · 3 of 4 voted · ends in 12 min</p>
+        </div>
+        <a href="#" class="mt-3 inline-block text-xs font-semibold text-orange-600 hover:text-orange-700">Open group →</a>
+      </div>
+
+      <div class="rounded-2xl border border-orange-100 bg-white p-5 hover:shadow-md transition-shadow">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-base font-bold text-gray-900">Work Lunch Squad</p>
+            <p class="text-xs text-gray-500 mt-0.5">7 members · hosted by Alice</p>
+          </div>
+          <span class="text-xs text-gray-500 bg-gray-50 px-2 py-0.5 rounded">idle</span>
+        </div>
+        <p class="mt-3 text-xs text-gray-400 italic">No active votes — start one to pick today's spot.</p>
+        <a href="#" class="mt-3 inline-block text-xs font-semibold text-orange-600 hover:text-orange-700">Open group →</a>
+      </div>
+
+      <div class="rounded-2xl border border-dashed border-orange-200 bg-white/50 p-5 flex items-center justify-center text-orange-600 text-sm font-medium hover:bg-white transition-colors cursor-pointer">
+        + Create another group
+      </div>
+    </div>
+
+    <!-- Tab preview ribbon: show what's in the OTHER tabs at a glance -->
+    <div class="mt-10 grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div class="rounded-xl bg-white border border-gray-200 p-4">
+        <p class="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-2">🧳 Trips tab</p>
+        <p class="text-sm text-gray-700">Multi-event planning · destinations, anchors, meal lists</p>
+        <p class="text-xs text-gray-400 mt-2">2 trips · 1 pending invite</p>
+      </div>
+      <div class="rounded-xl bg-white border border-gray-200 p-4">
+        <p class="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-2">🤝 People tab</p>
+        <p class="text-sm text-gray-700">Friends + Followers in one merged view · per-row "follows you" badges</p>
+        <p class="text-xs text-gray-400 mt-2">12 friends · 5 followers · 2 friend requests</p>
+      </div>
+      <div class="rounded-xl bg-white border border-gray-200 p-4">
+        <p class="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-2">⭐ Recs tab</p>
+        <p class="text-sm text-gray-700">Incoming + outgoing recommendations · "Try this!" inbox</p>
+        <p class="text-xs text-gray-400 mt-2">3 unread from friends</p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Mobile preview: bottom-tab bar (combines with Option C's mobile) -->
+  <div class="bg-gray-100 border-t border-gray-300 px-4 py-8 mt-4">
+    <div class="mx-auto max-w-sm">
+      <p class="text-xs text-gray-500 text-center mb-3 uppercase tracking-wider font-semibold">Mobile · bottom tabs (Option C's mobile)</p>
+      <div class="mx-auto w-72 bg-white rounded-3xl shadow-2xl overflow-hidden border-8 border-gray-800">
+        <!-- Status bar -->
+        <div class="h-6 bg-gray-800 flex items-center justify-center">
+          <span class="text-white text-[10px]">9:41</span>
+        </div>
+        <!-- Top bar -->
+        <div class="bg-white px-3 h-12 flex items-center justify-between border-b border-orange-100">
+          <span class="flex items-center gap-1.5">
+            <span class="flex items-center justify-center w-6 h-6 rounded-md bg-gradient-to-br from-orange-500 to-red-500 text-xs">🍽</span>
+            <span class="font-extrabold text-sm bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </span>
+          <span class="relative text-stone-500 text-sm">🔔<span class="absolute -top-0.5 -right-1 inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[8px] font-bold">4</span></span>
+        </div>
+        <!-- Page content placeholder: /social showing Groups tab -->
+        <div class="bg-orange-50 h-72 p-3">
+          <h2 class="text-lg font-bold text-gray-900 mb-1">Social</h2>
+          <div class="border-b border-gray-200 mb-3">
+            <div class="flex gap-2.5 text-[10px] -mb-px overflow-x-auto">
+              <span class="border-b-2 border-orange-500 text-orange-600 py-1.5 font-semibold whitespace-nowrap flex items-center gap-1">
+                👥 Groups <span class="inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[7px] font-bold">1</span>
+              </span>
+              <span class="border-b-2 border-transparent text-gray-500 py-1.5 whitespace-nowrap flex items-center gap-1">🧳 Trips <span class="inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[7px] font-bold">1</span></span>
+              <span class="border-b-2 border-transparent text-gray-500 py-1.5 whitespace-nowrap flex items-center gap-1">🤝 People <span class="inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[7px] font-bold">2</span></span>
+              <span class="border-b-2 border-transparent text-gray-500 py-1.5 whitespace-nowrap">⭐ Recs</span>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <div class="bg-white rounded p-2">
+              <div class="flex items-center justify-between">
+                <p class="text-[10px] font-medium text-gray-900">Friday Crew</p>
+                <span class="text-[8px] text-orange-600 font-semibold bg-orange-50 px-1 rounded">🗳</span>
+              </div>
+              <p class="text-[9px] text-gray-500">4 members · voting open</p>
+            </div>
+            <div class="bg-white rounded p-2">
+              <p class="text-[10px] font-medium text-gray-900">Work Lunch Squad</p>
+              <p class="text-[9px] text-gray-500">7 members · idle</p>
+            </div>
+            <div class="bg-white rounded p-2 border-dashed border border-orange-200 text-center text-[9px] text-orange-600 font-medium">
+              + Create group
+            </div>
+          </div>
+        </div>
+        <!-- Bottom tab bar: 5 items (Discover · Compare · Decide · Social · You) -->
+        <div class="bg-white border-t border-orange-200 grid grid-cols-5">
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400">
+            <span class="text-base">🔍</span>
+            <span class="text-[8px] mt-0.5">Discover</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400">
+            <span class="text-base">⚖️</span>
+            <span class="text-[8px] mt-0.5">Compare</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400">
+            <span class="text-base">🎲</span>
+            <span class="text-[8px] mt-0.5">Decide</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-orange-600 bg-orange-50 border-t-2 border-orange-500 -mt-px relative">
+            <span class="text-base">👥</span>
+            <span class="text-[8px] mt-0.5 font-bold">Social</span>
+            <span class="absolute top-1 right-3 w-2.5 h-2.5 rounded-full bg-red-500 text-white text-[6px] font-bold flex items-center justify-center">4</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400">
+            <span class="text-base">📊</span>
+            <span class="text-[8px] mt-0.5">You</span>
+          </div>
+        </div>
+        <!-- Home indicator -->
+        <div class="h-1.5 bg-gray-800 flex items-center justify-center">
+          <span class="block w-20 h-0.5 bg-white rounded-full mt-0.5"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick at-a-glance comparison of nav counts -->
+  <div class="bg-white border-t border-gray-200 px-4 py-6">
+    <div class="mx-auto max-w-2xl">
+      <p class="text-xs text-gray-400 text-center uppercase tracking-wider font-semibold mb-4">Nav-count comparison</p>
+      <div class="grid grid-cols-4 gap-2 text-center text-xs">
+        <div class="rounded-lg border border-gray-200 p-3">
+          <p class="font-semibold text-gray-900">Today</p>
+          <p class="text-2xl font-bold text-gray-400 mt-1">6</p>
+          <p class="text-[10px] text-gray-500 mt-0.5">desktop items</p>
+        </div>
+        <div class="rounded-lg border border-gray-200 p-3">
+          <p class="font-semibold text-gray-900">Option A</p>
+          <p class="text-2xl font-bold text-orange-500 mt-1">5</p>
+          <p class="text-[10px] text-gray-500 mt-0.5">drops Insights</p>
+        </div>
+        <div class="rounded-lg border border-gray-200 p-3">
+          <p class="font-semibold text-gray-900">Option B</p>
+          <p class="text-2xl font-bold text-orange-500 mt-1">5</p>
+          <p class="text-[10px] text-gray-500 mt-0.5">+merges Groups+Trips</p>
+        </div>
+        <div class="rounded-lg border border-orange-300 bg-orange-50 p-3">
+          <p class="font-semibold text-orange-700">Option B'</p>
+          <p class="text-2xl font-bold text-orange-600 mt-1">4</p>
+          <p class="text-[10px] text-orange-700 mt-0.5">+merges Social+Plan</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

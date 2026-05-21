@@ -460,6 +460,13 @@ model UserAccepted {
   // /me/all + /me/accepted still return excluded rows so History can render
   // them with an "off-the-record" badge.
   excludeFromInsights Boolean @default(false) @map("exclude_from_insights")
+  // Decision-regret signal — user's one-tap answer to "would you pick this
+  // again?" after the meal. Null = unanswered (default for any row); true =
+  // would repeat; false = wouldn't. Drives the regret-rate stat on Insights
+  // and could later weight the Choose flow (down-rank historically-regretted
+  // picks). Nullable so the Insights aggregator can distinguish "user
+  // disliked this" from "user hasn't told us yet."
+  wouldPickAgain      Boolean? @map("would_pick_again")
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   restaurant Restaurant  @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -554,10 +561,16 @@ enum GroupInviteStatus {
 // Optional meal-slot label on a GroupEvent. Only meaningful when the event
 // belongs to a Trip (where multiple meals happen on the same day), so it's
 // nullable; group events don't set it. Used as the secondary sort key in the
-// trip calendar so two meals on the same date display in breakfast→lunch→
-// dinner→snack order regardless of insertion order.
+// trip calendar so two meals on the same date display in
+// breakfast→brunch→lunch→dinner→snack order regardless of insertion order.
+// BRUNCH was added after BREAKFAST/LUNCH/DINNER/SNACK shipped; existing
+// rows keep their original slot, new rows can opt into the in-between
+// slot. Postgres orders enum values by declaration order — the ordinal
+// position here defines the calendar sort key, so the additive ordering
+// here (after BREAKFAST, before LUNCH) is intentional.
 enum MealSlot {
   BREAKFAST
+  BRUNCH
   LUNCH
   DINNER
   SNACK

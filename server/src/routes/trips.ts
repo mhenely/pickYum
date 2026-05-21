@@ -48,8 +48,37 @@ const MAX_ANCHORS_PER_TRIP     = 10;
 // Meal-event name cap mirrors the GroupEvent name cap in groups.ts so the UI
 // can use a single shared "max 80 chars" hint across both contexts.
 const MAX_EVENT_NAME_LEN       = 80;
-const VALID_MEAL_SLOTS = ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK'] as const;
+const VALID_MEAL_SLOTS = ['BREAKFAST', 'BRUNCH', 'LUNCH', 'DINNER', 'SNACK'] as const;
 type MealSlotInput = typeof VALID_MEAL_SLOTS[number];
+
+// Trips auto-archive this many days after their endDate. Active trips
+// without an endDate (open-ended) are never auto-archived; the host can
+// still manually archive via the dedicated endpoint. 14 days is the
+// breakeven point where a wrapped-up trip stops being "recent" and
+// starts feeling like clutter on the active list.
+const TRIP_AUTO_ARCHIVE_DAYS = 14;
+
+// Lazy archival sweep — runs at the top of the trips-list read for the
+// caller's hosted trips only. Member-only trips get archived when their
+// host's list is loaded. Bounded by the 60s cacheRead TTL so this is at
+// most one update per minute per user even on a hot reload loop.
+//
+// Scoped to host's own trips because:
+//   - Archive is reversible (host can unarchive) and only the host can
+//     archive a trip, so writes here mirror the existing permission model.
+//   - Members loading the list shouldn't be able to archive other
+//     people's trips, even passively.
+async function autoArchiveStaleHostedTrips(userId: number): Promise<void> {
+  const cutoff = new Date(Date.now() - TRIP_AUTO_ARCHIVE_DAYS * 24 * 60 * 60 * 1000);
+  await prisma.trip.updateMany({
+    where: {
+      hostId:     userId,
+      archivedAt: null,
+      endDate:    { not: null, lt: cutoff },
+    },
+    data: { archivedAt: new Date() },
+  });
+}
 
 // ── Auth helper ───────────────────────────────────────────────
 // Returns the trip with membership info for the requesting user in ONE
@@ -198,6 +227,10 @@ router.get('/', async (req: Request, res: Response) => {
   const userId = req.userId as number;
   const key = cacheKeyForUser('trips-list', userId);
   const payload = await cacheRead(key, TRIPS_LIST_TTL_S, async () => {
+    // Lazy auto-archive sweep on cache miss. Tucked inside cacheRead so
+    // tight reload loops don't re-run it more than once per TTL window.
+    await autoArchiveStaleHostedTrips(userId);
+
     const [hosted, member] = await Promise.all([
       prisma.trip.findMany({
         where: { hostId: userId },
@@ -213,7 +246,37 @@ router.get('/', async (req: Request, res: Response) => {
         orderBy: { createdAt: 'desc' },
       }),
     ]);
-    return { trips: [...hosted, ...member] };
+
+    // Parallel aggregate for the "X of Y meals decided" progress badge on
+    // each trip card. Done as a separate query because Prisma's _count
+    // select can't carry both a filtered and unfiltered count for the
+    // same relation in one block — the unfiltered total is already in
+    // _count.events; this groupBy gives the CLOSED subset.
+    const allTrips = [...hosted, ...member];
+    const decidedByTrip = new Map<number, number>();
+    if (allTrips.length > 0) {
+      const rows = await prisma.groupEvent.groupBy({
+        by: ['tripId'],
+        where: { tripId: { in: allTrips.map((t) => t.id) }, status: 'DONE' },
+        _count: { _all: true },
+      });
+      // Defensive: jest mocks for groupBy can return undefined in tests
+      // that don't bother stubbing this aggregate; treat as zero decided.
+      for (const row of rows ?? []) {
+        // _count typing is a union when groupBy includes _all — narrow
+        // by reading the count field through a known-shape cast. We
+        // requested `_count: { _all: true }`, so the returned shape is
+        // always `{ _all: number }`.
+        const count = (row._count as { _all: number })._all;
+        if (row.tripId != null) decidedByTrip.set(row.tripId, count);
+      }
+    }
+
+    const trips = allTrips.map((t) => ({
+      ...t,
+      _count: { ...t._count, decidedEvents: decidedByTrip.get(t.id) ?? 0 },
+    }));
+    return { trips };
   });
   res.json(payload);
 });

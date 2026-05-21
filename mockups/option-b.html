@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Option B — pickYum nav mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }</style>
+</head>
+<body class="bg-orange-50 min-h-screen">
+
+  <!-- Annotation banner -->
+  <div class="bg-blue-50 border-b border-blue-200 px-4 py-3 text-sm text-blue-900">
+    <div class="mx-auto max-w-7xl flex items-center gap-3 flex-wrap">
+      <a href="index.html" class="text-blue-600 hover:underline font-medium shrink-0">← back to options</a>
+      <span class="text-blue-300">|</span>
+      <strong>Option B:</strong>
+      <span>Everything from A, plus: rename Trips → <code class="bg-blue-100 px-1.5 py-0.5 rounded text-xs">/plan</code> and fold the Groups tab from Socials into it. Socials narrows to People + Recommendations.</span>
+    </div>
+  </div>
+
+  <!-- Desktop nav -->
+  <nav class="bg-white border-b border-orange-200 shadow-sm" style="box-shadow: 0 1px 0 #fed7aa, 0 4px 12px rgba(234,88,12,0.06);">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="flex h-16 items-center justify-between">
+        <div class="flex items-center">
+          <a href="#" class="flex items-center gap-2 mr-2">
+            <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-lg shadow">🍽</span>
+            <span class="font-extrabold text-lg tracking-tight bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </a>
+          <div class="hidden md:block">
+            <div class="ml-10 flex items-baseline space-x-1">
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Search</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Compare</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors">Choose</a>
+              <a href="#" class="text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md px-3 py-2 text-sm font-medium transition-colors relative">
+                Socials
+                <span class="absolute -top-1 -right-1 text-[8px] text-amber-600">↺ narrowed</span>
+              </a>
+              <a href="#plan" class="bg-orange-50 text-orange-600 font-semibold rounded-md px-3 py-2 text-sm relative">
+                Plan
+                <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">2</span>
+                <span class="absolute -top-1 -right-1 text-[8px] text-amber-600 whitespace-nowrap">↺ renamed</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="relative p-2 text-stone-500 hover:bg-orange-50 hover:text-orange-600 rounded-md transition-colors">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 10-12 0v3.2a2 2 0 01-.6 1.4L4 17h5m6 0a3 3 0 11-6 0"/></svg>
+            <span class="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">3</span>
+          </button>
+          <a href="#you" class="ml-1 h-8 w-8 rounded-full overflow-hidden bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center" title="Direct link to /you">
+            <svg class="h-5 w-5 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Annotation -->
+  <div class="bg-amber-50 border-b border-amber-200 px-4 py-1.5 text-xs text-amber-900 text-center">
+    Below: the new <strong>/plan</strong> page (Groups + Trips share one home — both are about deciding with others)
+  </div>
+
+  <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+    <div class="flex items-start justify-between gap-4 flex-wrap mb-5">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Plan</h1>
+        <p class="text-sm text-gray-500 mt-1">Group votes + trips. Decide together.</p>
+      </div>
+      <button class="rounded-md bg-orange-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-400">
+        + New group / trip
+      </button>
+    </div>
+
+    <!-- Sub-tabs: Groups vs Trips -->
+    <div class="border-b border-gray-200 mb-6">
+      <nav class="-mb-px flex gap-6">
+        <button class="border-b-2 border-orange-500 text-orange-600 py-3 px-1 text-sm font-semibold flex items-center gap-1.5">
+          <span>👥</span> Groups
+          <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">1</span>
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium flex items-center gap-1.5">
+          <span>🧳</span> Trips
+          <span class="ml-1 inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">1</span>
+        </button>
+      </nav>
+    </div>
+
+    <!-- Groups list (currently active tab) -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+      <div class="rounded-2xl border border-orange-200 bg-white p-5 hover:shadow-md transition-shadow">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-base font-bold text-gray-900">Friday Crew</p>
+            <p class="text-xs text-gray-500 mt-0.5">4 members · hosted by you</p>
+          </div>
+          <span class="text-xs text-orange-600 font-semibold bg-orange-50 px-2 py-0.5 rounded">🗳 voting</span>
+        </div>
+        <div class="mt-3 text-sm text-gray-600 border-l-2 border-orange-300 pl-3">
+          <p class="font-medium text-gray-900">Date night picks</p>
+          <p class="text-xs text-gray-500 mt-0.5">5 candidates · 3 of 4 voted · ends in 12 min</p>
+        </div>
+        <a href="#" class="mt-3 inline-block text-xs font-semibold text-orange-600 hover:text-orange-700">Open group →</a>
+      </div>
+
+      <div class="rounded-2xl border border-orange-100 bg-white p-5 hover:shadow-md transition-shadow">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-base font-bold text-gray-900">Work Lunch Squad</p>
+            <p class="text-xs text-gray-500 mt-0.5">7 members · hosted by Alice</p>
+          </div>
+          <span class="text-xs text-gray-500 bg-gray-50 px-2 py-0.5 rounded">idle</span>
+        </div>
+        <p class="mt-3 text-xs text-gray-400 italic">No active votes — start one to pick today's spot.</p>
+        <a href="#" class="mt-3 inline-block text-xs font-semibold text-orange-600 hover:text-orange-700">Open group →</a>
+      </div>
+
+      <div class="rounded-2xl border border-dashed border-orange-200 bg-white/50 p-5 flex items-center justify-center text-orange-600 text-sm font-medium hover:bg-white transition-colors cursor-pointer">
+        + Create another group
+      </div>
+    </div>
+  </main>
+
+  <!-- Annotation: also showing the narrowed Socials -->
+  <div class="bg-amber-50 border-b border-t border-amber-200 px-4 py-1.5 text-xs text-amber-900 text-center mt-8">
+    Below: the narrowed <strong>/socials</strong> page (no more Groups tab — that's in /plan now)
+  </div>
+
+  <section class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">Socials</h1>
+    <p class="text-sm text-gray-500 mb-5">Your friends, followers, and shared recs.</p>
+
+    <div class="border-b border-gray-200 mb-6">
+      <nav class="-mb-px flex gap-6 overflow-x-auto">
+        <button class="border-b-2 border-orange-500 text-orange-600 py-3 px-1 text-sm font-semibold whitespace-nowrap flex items-center gap-1.5">
+          <span>🤝</span> Friends
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>📡</span> Followers
+        </button>
+        <button class="border-b-2 border-transparent text-gray-500 hover:text-gray-700 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+          <span>⭐</span> Recommendations
+        </button>
+        <span class="border-b-2 border-transparent text-red-400 italic py-3 px-1 text-sm whitespace-nowrap flex items-center gap-1.5" title="Removed from Socials — lives in /plan now">
+          ∅ Groups (moved to /plan)
+        </span>
+      </nav>
+    </div>
+    <p class="text-sm text-gray-400 italic">[Friends list would render here]</p>
+  </section>
+
+  <!-- Mobile preview -->
+  <div class="bg-gray-100 border-t border-gray-300 px-4 py-8 mt-4">
+    <div class="mx-auto max-w-sm">
+      <p class="text-xs text-gray-500 text-center mb-3 uppercase tracking-wider font-semibold">Mobile · hamburger expanded</p>
+      <div class="bg-white rounded-2xl shadow-lg overflow-hidden border border-gray-200">
+        <div class="flex items-center justify-between px-4 h-14 border-b border-orange-100">
+          <span class="flex items-center gap-2">
+            <span class="flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-sm">🍽</span>
+            <span class="font-extrabold text-base bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </span>
+          <div class="flex items-center gap-3">
+            <span class="relative text-stone-500 text-base">🔔<span class="absolute -top-0.5 -right-1 inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[8px] font-bold">3</span></span>
+            <span class="text-stone-500 text-lg">✕</span>
+          </div>
+        </div>
+        <div class="px-3 py-3 space-y-0.5 border-b border-orange-100">
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Search</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Compare</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Choose</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Socials</a>
+          <a href="#plan" class="block bg-orange-50 text-orange-600 font-semibold rounded-md px-3 py-2 text-sm flex items-center justify-between">
+            <span>Plan</span>
+            <span class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold">2</span>
+          </a>
+        </div>
+        <div class="px-3 py-3 space-y-0.5">
+          <a href="#you" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">You</a>
+          <a href="#" class="block text-stone-500 rounded-md px-3 py-2 text-sm font-medium">Log out</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -146,7 +146,12 @@ router.post('/me/accepted', async (req: Request, res: Response) => {
 
 // PATCH /api/users/me/accepted/:id
 //
-// Per-entry toggle for the InsightsPage opt-out. Body: `{ excludeFromInsights: boolean }`.
+// Per-entry mutations on an acceptance row. Supports two independent fields:
+//   - excludeFromInsights: boolean      — opt this row out of Insights aggregation
+//   - wouldPickAgain:      boolean|null — decision-regret signal (null = unanswered)
+// Pass either or both; missing fields are left unchanged. At least one
+// must be supplied.
+//
 // Ownership is enforced via `updateMany` with a `userId` filter — using
 // `update({ where: { id } })` alone would either succeed (wrong owner)
 // or throw P2025 on missing; updateMany returns `{ count }` which we
@@ -159,15 +164,31 @@ router.patch('/me/accepted/:id', async (req: Request, res: Response) => {
     return;
   }
 
-  const { excludeFromInsights } = req.body as { excludeFromInsights?: unknown };
-  if (typeof excludeFromInsights !== 'boolean') {
-    res.status(400).json({ error: 'excludeFromInsights must be a boolean' });
+  const body = req.body as { excludeFromInsights?: unknown; wouldPickAgain?: unknown };
+  const data: { excludeFromInsights?: boolean; wouldPickAgain?: boolean | null } = {};
+
+  if (body.excludeFromInsights !== undefined) {
+    if (typeof body.excludeFromInsights !== 'boolean') {
+      res.status(400).json({ error: 'excludeFromInsights must be a boolean' });
+      return;
+    }
+    data.excludeFromInsights = body.excludeFromInsights;
+  }
+  if (body.wouldPickAgain !== undefined) {
+    if (body.wouldPickAgain !== null && typeof body.wouldPickAgain !== 'boolean') {
+      res.status(400).json({ error: 'wouldPickAgain must be a boolean or null' });
+      return;
+    }
+    data.wouldPickAgain = body.wouldPickAgain;
+  }
+  if (Object.keys(data).length === 0) {
+    res.status(400).json({ error: 'At least one of excludeFromInsights or wouldPickAgain must be supplied' });
     return;
   }
 
   const { count } = await prisma.userAccepted.updateMany({
     where: { id: acceptedId, userId: req.userId },
-    data: { excludeFromInsights },
+    data,
   });
   if (count === 0) {
     res.status(404).json({ error: 'Accepted entry not found' });

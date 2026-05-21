@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Option C — pickYum nav mockup</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }</style>
+</head>
+<body class="bg-orange-50 min-h-screen">
+
+  <!-- Annotation banner -->
+  <div class="bg-blue-50 border-b border-blue-200 px-4 py-3 text-sm text-blue-900">
+    <div class="mx-auto max-w-7xl flex items-center gap-3 flex-wrap">
+      <a href="index.html" class="text-blue-600 hover:underline font-medium shrink-0">← back to options</a>
+      <span class="text-blue-300">|</span>
+      <strong>Option C:</strong>
+      <span>Mobile-first rebuild. Bottom tab bar on phones, left rail on desktop. 5 destinations: 🔍 Discover · 🎲 Decide · 👥 Plan · 📊 You · 🤝 People. The top bar shrinks to just logo + bell + avatar.</span>
+    </div>
+  </div>
+
+  <!-- Layout: left rail + main on desktop -->
+  <div class="flex min-h-[calc(100vh-3.5rem)]">
+
+    <!-- DESKTOP: left rail (hidden on mobile) -->
+    <aside class="hidden lg:flex flex-col w-56 bg-white border-r border-orange-200 px-3 py-5 shrink-0">
+      <a href="#" class="flex items-center gap-2 mb-8 px-2">
+        <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-lg shadow">🍽</span>
+        <span class="font-extrabold text-lg tracking-tight bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+      </a>
+      <nav class="flex flex-col gap-1">
+        <a href="#" class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-stone-500 hover:bg-orange-50 hover:text-orange-600 text-sm font-medium transition-colors">
+          <span class="text-lg">🔍</span> Discover
+        </a>
+        <a href="#" class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-stone-500 hover:bg-orange-50 hover:text-orange-600 text-sm font-medium transition-colors">
+          <span class="text-lg">🎲</span> Decide
+        </a>
+        <a href="#" class="flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-stone-500 hover:bg-orange-50 hover:text-orange-600 text-sm font-medium transition-colors">
+          <span class="flex items-center gap-3"><span class="text-lg">👥</span> Plan</span>
+          <span class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold">2</span>
+        </a>
+        <a href="#you" class="flex items-center gap-3 rounded-lg px-3 py-2.5 bg-orange-50 text-orange-600 text-sm font-semibold">
+          <span class="text-lg">📊</span> You
+        </a>
+        <a href="#" class="flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-stone-500 hover:bg-orange-50 hover:text-orange-600 text-sm font-medium transition-colors">
+          <span class="flex items-center gap-3"><span class="text-lg">🤝</span> People</span>
+          <span class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold">1</span>
+        </a>
+      </nav>
+
+      <!-- Bottom of rail: avatar + bell -->
+      <div class="mt-auto flex flex-col gap-1 pt-4 border-t border-orange-100">
+        <button class="flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-stone-500 hover:bg-orange-50 hover:text-orange-600 text-sm font-medium transition-colors">
+          <span class="flex items-center gap-3"><span class="text-lg">🔔</span> Notifications</span>
+          <span class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold">3</span>
+        </button>
+        <a href="#" class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-stone-500 hover:bg-orange-50 hover:text-orange-600 text-sm font-medium transition-colors">
+          <div class="h-6 w-6 rounded-full bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center">
+            <svg class="h-3.5 w-3.5 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>
+          </div>
+          You
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main column -->
+    <div class="flex-1 min-w-0 flex flex-col">
+
+      <!-- MOBILE: top bar (logo + bell only, no nav links) -->
+      <div class="lg:hidden bg-white border-b border-orange-200 px-4 h-14 flex items-center justify-between shrink-0">
+        <span class="flex items-center gap-2">
+          <span class="flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 text-sm">🍽</span>
+          <span class="font-extrabold text-base bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+        </span>
+        <button class="relative p-1.5 text-stone-500">
+          <span class="text-lg">🔔</span>
+          <span class="absolute top-0 right-0 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[8px] font-bold">3</span>
+        </button>
+      </div>
+
+      <!-- Annotation -->
+      <div class="bg-amber-50 border-b border-amber-200 px-4 py-1.5 text-xs text-amber-900 text-center">
+        Below: a representative <strong>/you</strong> page; same shape as Options A and B
+      </div>
+
+      <main class="flex-1 p-4 sm:p-6 lg:p-8 pb-24 lg:pb-8">
+        <h1 class="text-2xl font-bold text-gray-900 mb-1">You</h1>
+        <p class="text-sm text-gray-500 mb-5">Your activity, your preferences.</p>
+
+        <div class="border-b border-gray-200 mb-6">
+          <nav class="-mb-px flex gap-6 overflow-x-auto">
+            <button class="border-b-2 border-orange-500 text-orange-600 py-3 px-1 text-sm font-semibold whitespace-nowrap flex items-center gap-1.5">
+              <span>📊</span> Timeline
+            </button>
+            <button class="border-b-2 border-transparent text-gray-500 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+              <span>📈</span> Insights
+            </button>
+            <button class="border-b-2 border-transparent text-gray-500 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+              <span>⭐</span> Top picks
+            </button>
+            <button class="border-b-2 border-transparent text-gray-500 py-3 px-1 text-sm font-medium whitespace-nowrap flex items-center gap-1.5">
+              <span>⚙️</span> Settings
+            </button>
+          </nav>
+        </div>
+
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-2xl font-bold text-orange-600">28</p>
+            <p class="text-xs text-gray-500">decisions this month</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-2xl font-bold text-orange-600">9</p>
+            <p class="text-xs text-gray-500">Italian picks</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-2xl font-bold text-orange-600">Thu</p>
+            <p class="text-xs text-gray-500">top day</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-2xl font-bold text-orange-600">156</p>
+            <p class="text-xs text-gray-500">all-time picks</p>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-sm font-medium text-gray-900">Tasty Slice Pizza</p>
+            <p class="text-xs text-gray-500">2 days ago · 🪙 coin flip · Italian</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-sm font-medium text-gray-900">Sushi Roll House</p>
+            <p class="text-xs text-gray-500">5 days ago · 🎡 roulette · Japanese</p>
+          </div>
+          <div class="rounded-lg border border-orange-100 bg-white p-4">
+            <p class="text-sm font-medium text-gray-900">Burger Joint</p>
+            <p class="text-xs text-gray-500">1 week ago · ⚡ quick pick · American</p>
+          </div>
+        </div>
+      </main>
+
+      <!-- MOBILE: bottom tab bar -->
+      <nav class="lg:hidden fixed bottom-0 inset-x-0 bg-white border-t border-orange-200 grid grid-cols-5 z-40" style="box-shadow: 0 -2px 12px rgba(234,88,12,0.08);">
+        <a href="#" class="flex flex-col items-center justify-center py-2 text-stone-400 hover:text-orange-600">
+          <span class="text-xl leading-none">🔍</span>
+          <span class="text-[10px] mt-0.5 font-medium">Discover</span>
+        </a>
+        <a href="#" class="flex flex-col items-center justify-center py-2 text-stone-400 hover:text-orange-600">
+          <span class="text-xl leading-none">🎲</span>
+          <span class="text-[10px] mt-0.5 font-medium">Decide</span>
+        </a>
+        <a href="#" class="flex flex-col items-center justify-center py-2 text-stone-400 hover:text-orange-600 relative">
+          <span class="text-xl leading-none">👥</span>
+          <span class="text-[10px] mt-0.5 font-medium">Plan</span>
+          <span class="absolute top-1 right-3 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[8px] font-bold">2</span>
+        </a>
+        <a href="#you" class="flex flex-col items-center justify-center py-2 text-orange-600 font-bold border-t-2 border-orange-500 -mt-px bg-orange-50">
+          <span class="text-xl leading-none">📊</span>
+          <span class="text-[10px] mt-0.5 font-semibold">You</span>
+        </a>
+        <a href="#" class="flex flex-col items-center justify-center py-2 text-stone-400 hover:text-orange-600 relative">
+          <span class="text-xl leading-none">🤝</span>
+          <span class="text-[10px] mt-0.5 font-medium">People</span>
+          <span class="absolute top-1 right-3 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-red-500 text-white text-[8px] font-bold">1</span>
+        </a>
+      </nav>
+
+    </div>
+  </div>
+
+  <!-- Phone-frame preview for context -->
+  <div class="bg-gray-100 border-t border-gray-300 px-4 py-8">
+    <div class="mx-auto max-w-sm">
+      <p class="text-xs text-gray-500 text-center mb-3 uppercase tracking-wider font-semibold">Phone frame · how the bottom tabs feel</p>
+      <div class="mx-auto w-72 bg-white rounded-3xl shadow-2xl overflow-hidden border-8 border-gray-800">
+        <!-- Status bar -->
+        <div class="h-6 bg-gray-800 flex items-center justify-center">
+          <span class="text-white text-[10px]">9:41</span>
+        </div>
+        <!-- Top bar -->
+        <div class="bg-white px-3 h-12 flex items-center justify-between border-b border-orange-100">
+          <span class="flex items-center gap-1.5">
+            <span class="flex items-center justify-center w-6 h-6 rounded-md bg-gradient-to-br from-orange-500 to-red-500 text-xs">🍽</span>
+            <span class="font-extrabold text-sm bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </span>
+          <span class="relative text-stone-500 text-sm">🔔<span class="absolute -top-0.5 -right-1 inline-flex items-center justify-center w-3 h-3 rounded-full bg-red-500 text-white text-[8px] font-bold">3</span></span>
+        </div>
+        <!-- Page content placeholder -->
+        <div class="bg-orange-50 h-72 p-3">
+          <h2 class="text-lg font-bold text-gray-900 mb-1">You</h2>
+          <div class="border-b border-gray-200 mb-3">
+            <div class="flex gap-3 text-[10px] -mb-px overflow-x-auto">
+              <span class="border-b-2 border-orange-500 text-orange-600 py-1.5 font-semibold whitespace-nowrap">📊 Timeline</span>
+              <span class="border-b-2 border-transparent text-gray-500 py-1.5 whitespace-nowrap">📈 Insights</span>
+              <span class="border-b-2 border-transparent text-gray-500 py-1.5 whitespace-nowrap">⭐ Top</span>
+              <span class="border-b-2 border-transparent text-gray-500 py-1.5 whitespace-nowrap">⚙️ Set</span>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <div class="bg-white rounded p-2">
+              <p class="text-[10px] font-medium text-gray-900">Tasty Slice Pizza</p>
+              <p class="text-[9px] text-gray-500">2d · coin flip</p>
+            </div>
+            <div class="bg-white rounded p-2">
+              <p class="text-[10px] font-medium text-gray-900">Sushi Roll House</p>
+              <p class="text-[9px] text-gray-500">5d · roulette</p>
+            </div>
+            <div class="bg-white rounded p-2">
+              <p class="text-[10px] font-medium text-gray-900">Burger Joint</p>
+              <p class="text-[9px] text-gray-500">1w · quick pick</p>
+            </div>
+          </div>
+        </div>
+        <!-- Bottom tab bar -->
+        <div class="bg-white border-t border-orange-200 grid grid-cols-5">
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400">
+            <span class="text-base">🔍</span>
+            <span class="text-[8px] mt-0.5">Discover</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400">
+            <span class="text-base">🎲</span>
+            <span class="text-[8px] mt-0.5">Decide</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400 relative">
+            <span class="text-base">👥</span>
+            <span class="text-[8px] mt-0.5">Plan</span>
+            <span class="absolute top-1 right-3 w-2.5 h-2.5 rounded-full bg-red-500 text-white text-[6px] font-bold flex items-center justify-center">2</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-orange-600 bg-orange-50 border-t-2 border-orange-500 -mt-px">
+            <span class="text-base">📊</span>
+            <span class="text-[8px] mt-0.5 font-bold">You</span>
+          </div>
+          <div class="flex flex-col items-center justify-center py-1.5 text-stone-400 relative">
+            <span class="text-base">🤝</span>
+            <span class="text-[8px] mt-0.5">People</span>
+            <span class="absolute top-1 right-3 w-2.5 h-2.5 rounded-full bg-red-500 text-white text-[6px] font-bold flex items-center justify-center">1</span>
+          </div>
+        </div>
+        <!-- Home indicator -->
+        <div class="h-1.5 bg-gray-800 flex items-center justify-center">
+          <span class="block w-20 h-0.5 bg-white rounded-full mt-0.5"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

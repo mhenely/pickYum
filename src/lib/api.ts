@@ -453,10 +453,16 @@ export interface DecisionInsights {
     lastChosenAt: string | null; // null = never chosen
   }>;
   recent: Array<{
+    // UserAccepted row id — needed to pin the regret toggle to the right
+    // entry via PATCH /me/accepted/:id.
+    id: number;
     restaurantId: string;
     name: string;
     acceptedAt: string;
     chooseMethod: ChooseMethod | null;
+    // Decision-regret signal: null = unanswered, true = would pick again,
+    // false = wouldn't. Set via the thumbs-up/down toggle on the row.
+    wouldPickAgain: boolean | null;
     // Present for acceptances created by a group's accept-result flow
     // (post-rollout). Solo acceptances and pre-rollout group acceptances
     // have null for both — UI uses these together to deep-link the row into
@@ -464,6 +470,26 @@ export interface DecisionInsights {
     eventId: number | null;
     groupId: number | null;
     competing: string[];
+  }>;
+  // Regret-rate stat: percentage of answered acceptances marked
+  // "would NOT pick again." null when fewer than 3 acceptances have been
+  // answered (too small a sample to meaningfully surface).
+  regretRate:     number | null;
+  regretAnswered: number;
+}
+
+// Friend-by-friend cuisine comparison. Backs the "Friend comparison"
+// panel on the Insights tab. Each entry has either a topShared cuisine,
+// a theirFavorite cuisine (where they over-index vs you), or both, or
+// neither (when no overlap exists in the past year).
+export interface FriendInsightsResponse {
+  friends: Array<{
+    id: number;
+    username: string;
+    avatarUrl: string | null;
+    sharedCuisineCount: number;
+    topShared:     { cuisine: string; mineCount: number; theirCount: number; alignment: number } | null;
+    theirFavorite: { cuisine: string; theirCount: number; mineCount: number } | null;
   }>;
 }
 
@@ -608,11 +634,29 @@ export const api = {
       invalidateInsightsCache();
       return result;
     },
+    // Decision-regret toggle. `null` clears the answer (back to unanswered);
+    // `true`/`false` records "would pick again" / "wouldn't." Same endpoint
+    // as the exclude toggle above — server accepts either field
+    // independently. Insights cache invalidated because the regret-rate
+    // stat moves with this answer.
+    setAcceptedRegret: async (acceptedId: number, wouldPickAgain: boolean | null) => {
+      const result = await request<{ accepted: unknown }>(
+        `/api/users/me/accepted/${acceptedId}`,
+        { method: 'PATCH', body: JSON.stringify({ wouldPickAgain }) },
+      );
+      invalidateInsightsCache();
+      return result;
+    },
     // `since` filters acceptances to a sliding window. Defaults to all-time.
     // The 5-second GET cache is keyed on the full path, so each window picks
     // up its own cache entry — no extra invalidation logic needed.
     getInsights: (since: InsightsWindow = 'all') =>
       request<DecisionInsights>(`/api/users/me/insights?since=${encodeURIComponent(since)}`),
+    // Friend-by-friend comparison metrics over the past year. Server-side
+    // cached (60s) — the rollup is across friends × cuisines so worth
+    // reusing across rapid re-renders. See computeFriendComparison.
+    getFriendInsights: () =>
+      request<FriendInsightsResponse>('/api/users/me/insights/friends'),
     getArchived: () =>
       request<{ archived: ApiRestaurant[] }>('/api/users/me/archived'),
     archiveRestaurant: (id: number) =>
@@ -1030,7 +1074,7 @@ export interface ApiTripIncomingInvite {
   invitedBy: { id: number; username: string; avatarUrl: string | null };
 }
 
-export type TripMealSlot = 'BREAKFAST' | 'LUNCH' | 'DINNER' | 'SNACK';
+export type TripMealSlot = 'BREAKFAST' | 'BRUNCH' | 'LUNCH' | 'DINNER' | 'SNACK';
 
 // A restaurant pinned as a candidate on a trip meal event. Matches the
 // shape returned by the backend's mealEventInclude — denormalized restaurant
@@ -1145,7 +1189,7 @@ export interface ApiTripListEntry {
     status: 'OPEN' | 'VOTING' | 'DONE';
     mealSlot: string | null;
   }>;
-  _count: { members: number; events: number; anchors: number };
+  _count: { members: number; events: number; anchors: number; decidedEvents: number };
 }
 
 export interface ApiTrip {

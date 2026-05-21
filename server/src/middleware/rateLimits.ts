@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 // Skip rate limiting under test so supertest spam doesn't trip the limiter
 // across the suite. Real traffic still limits normally.
@@ -89,7 +89,16 @@ export const avatarUpdateLimiter = rateLimit({
   // can always key on it. Fallback to IP for the should-never-happen case
   // where requireAuth hasn't run (defensive — wouldn't matter functionally
   // because requireAuth would 401 first).
-  keyGenerator: (req) =>
-    String((req as unknown as { userId?: number }).userId ?? req.ip ?? 'unknown'),
+  //
+  // The IP fallback runs through express-rate-limit's `ipKeyGenerator`
+  // helper, which normalizes IPv6 addresses to their /64 prefix.
+  // Without it, an IPv6 user could trivially bypass the limiter by
+  // varying the last 64 bits of their address; express-rate-limit v8
+  // refuses to load a custom keyGenerator that uses req.ip directly.
+  keyGenerator: (req) => {
+    const userId = (req as unknown as { userId?: number }).userId;
+    if (userId != null) return String(userId);
+    return ipKeyGenerator(req.ip ?? 'unknown');
+  },
   message: { error: 'Too many avatar updates, please try again later' },
 });
