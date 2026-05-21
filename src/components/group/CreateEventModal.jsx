@@ -8,6 +8,7 @@
 import { useState, useEffect } from 'react';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { groupsApi } from '../../lib/groupsApi';
+import Button from '../ui/Button';
 
 export default function CreateEventModal({ groupId, onClose, onCreate }) {
   const [name, setName]       = useState('');
@@ -135,14 +136,14 @@ export default function CreateEventModal({ groupId, onClose, onCreate }) {
               className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
               Cancel
             </button>
-            <button type="submit" disabled={loading || !name.trim()}
-              className="flex-1 rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all shadow-brand-sm">
-              {loading
-                ? 'Creating…'
-                : selectedCount > 0
-                  ? `Create + add ${selectedCount}`
-                  : 'Create'}
-            </button>
+            <Button
+              type="submit"
+              loading={loading}
+              disabled={!name.trim()}
+              className="flex-1"
+            >
+              {selectedCount > 0 ? `Create + add ${selectedCount}` : 'Create'}
+            </Button>
           </div>
         </form>
         </DialogPanel>

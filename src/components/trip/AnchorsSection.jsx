@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import { api } from '../../lib/api';
+import Button from '../ui/Button';
 
 export default function AnchorsSection({ trip, canHostAct, onRefresh }) {
   const [showAdd,    setShowAdd]    = useState(false);
@@ -138,13 +139,14 @@ export default function AnchorsSection({ trip, canHostAct, onRefresh }) {
               />
               {addError && <p className="text-xs text-red-500">{addError}</p>}
               <div className="flex items-center gap-2">
-                <button
+                <Button
                   type="submit"
-                  disabled={!newLabel.trim() || !newAddress.trim() || saving}
-                  className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-40"
+                  size="sm"
+                  loading={saving}
+                  disabled={!newLabel.trim() || !newAddress.trim()}
                 >
-                  {saving ? 'Saving…' : 'Add anchor'}
-                </button>
+                  Add anchor
+                </Button>
                 <button
                   type="button"
                   onClick={() => { setShowAdd(false); setAddError(''); setNewLabel(''); setNewAddress(''); }}

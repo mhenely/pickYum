@@ -26,7 +26,13 @@ export type UserNotificationReason =
   // request they made. Group events notify all group members; trip
   // meal events notify the meal's participantUserIds (or all trip
   // members when participantUserIds is empty = "everyone").
-  | 'vote-result';
+  | 'vote-result'
+  // Fired when a friend explicitly shares one of their recommendation
+  // lists with this user. The list itself may already be visible to the
+  // recipient via the owner's NETWORK visibility — the share action is
+  // a one-tap push to the recipient's bell so it doesn't get missed in
+  // a long list of recs.
+  | 'list-shared';
 
 // Map<userId, Set<Response>> — per-instance registry of open SSE
 // connections. A user can hold multiple connections (two tabs open).
@@ -97,6 +103,8 @@ function buildPushPayload(reason: UserNotificationReason): PushPayload {
       return { title: 'New friend request', body: 'Someone sent you a friend request.',       url: '/socials', tag: 'friend-request' };
     case 'vote-result':
       return { title: 'Vote concluded',   body: 'A group decided on tonight\'s pick.',        url: '/socials', tag: 'vote-result' };
+    case 'list-shared':
+      return { title: 'A list was shared with you', body: 'A friend shared a recommendation list.', url: '/socials?tab=recommendations', tag: 'list-shared' };
   }
 }
 

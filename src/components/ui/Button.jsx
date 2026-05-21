@@ -39,6 +39,22 @@ const SIZES = {
   lg: 'px-5 py-2.5 text-sm',
 };
 
+// Inline spinner used by the `loading` state. Sized to track the
+// button's text height so it doesn't shift surrounding layout. Inherits
+// `currentColor` so it matches the button's text on every variant
+// without extra styling.
+const Spinner = ({ className = 'h-3.5 w-3.5' }) => (
+  <svg
+    className={`animate-spin ${className}`}
+    fill="none"
+    viewBox="0 0 24 24"
+    aria-hidden="true"
+  >
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+  </svg>
+);
+
 // forwardRef so callers (eg ConfirmDialog) can pass initialFocus refs
 // through to the underlying <button>. Without this, Headless UI's
 // initialFocus mechanism would receive a ref to nothing.
@@ -47,18 +63,25 @@ const Button = forwardRef(function Button({
   size = 'md',
   type = 'button',
   fullWidth = false,
+  loading = false,          // Show inline spinner alongside children
+  disabled = false,         // Caller-provided; combined with loading below
   className = '',
   children,
   ...rest
 }, ref) {
   const v = VARIANTS[variant] ?? VARIANTS.primary;
   const s = SIZES[size] ?? SIZES.md;
+  // `loading` implies `disabled` — a button mid-request should never
+  // accept further clicks. Combined here so callers can pass either.
+  const isDisabled = disabled || loading;
   return (
     <button
       ref={ref}
       type={type}
+      disabled={isDisabled}
+      aria-busy={loading || undefined}
       className={[
-        'rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-1',
+        'inline-flex items-center justify-center gap-1.5 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-1',
         v,
         s,
         fullWidth ? 'w-full' : '',
@@ -66,6 +89,7 @@ const Button = forwardRef(function Button({
       ].filter(Boolean).join(' ')}
       {...rest}
     >
+      {loading && <Spinner />}
       {children}
     </button>
   );

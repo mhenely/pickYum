@@ -142,7 +142,7 @@ const GroupDetailPage = () => {
   const doneEvents   = (group.events ?? []).filter((e) => e.status === 'DONE');
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-8">
+    <div className="mx-auto max-w-3xl px-4 py-8">
 
       <Link to="/socials" className="text-xs text-orange-500 hover:text-orange-400 transition-colors mb-4 inline-block">
         ← Back to socials

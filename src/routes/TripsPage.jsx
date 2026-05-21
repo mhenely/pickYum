@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { pushToast } from '../redux/slices/toastSlice';
 import { SkeletonList } from '../components/Skeleton';
 import Button from '../components/ui/Button';
+import SectionEmpty from '../components/SectionEmpty';
 
 // Trips list — every trip the user hosts OR is a member of, plus an
 // inline form to create a new one. Mirrors the SocialsPage / Groups
@@ -234,13 +235,14 @@ export function TripsTab({ showHeader = true } = {}) {
             </div>
             {createError && <p className="text-xs text-red-500">{createError}</p>}
             <div className="flex items-center gap-2 mt-1">
-              <button
+              <Button
                 type="submit"
-                disabled={!newName.trim() || !newDest.trim() || creating}
-                className="rounded-md bg-orange-500 px-4 py-1.5 text-sm font-semibold text-white hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                size="sm"
+                loading={creating}
+                disabled={!newName.trim() || !newDest.trim()}
               >
-                {creating ? 'Creating…' : 'Create trip'}
-              </button>
+                Create trip
+              </Button>
               <button
                 type="button"
                 onClick={() => {
@@ -263,13 +265,11 @@ export function TripsTab({ showHeader = true } = {}) {
       {!loading && !error && (
         <>
           {active.length === 0 && archived.length === 0 ? (
-            <div className="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50/40 p-10 text-center">
-              <p className="text-4xl mb-3" aria-hidden="true">✈️</p>
-              <p className="text-sm font-medium text-gray-700 mb-1">No trips yet</p>
-              <p className="text-xs text-gray-500">
-                Create your first trip to plan meals at a destination with friends.
-              </p>
-            </div>
+            <SectionEmpty
+              icon="✈️"
+              title="No trips yet"
+              subtitle="Create your first trip to plan meals at a destination with friends."
+            />
           ) : (
             <>
               {active.length > 0 && (

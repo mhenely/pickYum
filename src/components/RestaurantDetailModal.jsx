@@ -8,6 +8,7 @@ import { pushToast } from '../redux/slices/toastSlice';
 import useCurrentUser from '../hooks/useCurrentUser';
 import { useFetchData } from '../hooks/useFetchData';
 import InfoRow from './InfoRow';
+import Button from './ui/Button';
 import HeartWithKebab from './HeartWithKebab';
 import RestaurantPhotoGallery from './RestaurantPhotoGallery';
 import ExternalActions from './ExternalActions';
@@ -961,13 +962,9 @@ const RestaurantDetailModal = ({
                       >
                         Cancel
                       </button>
-                      <button
-                        onClick={handleRecommend}
-                        disabled={recLoading}
-                        className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors"
-                      >
-                        {recLoading ? 'Saving…' : myRec ? 'Update' : 'Recommend'}
-                      </button>
+                      <Button onClick={handleRecommend} size="sm" loading={recLoading}>
+                        {myRec ? 'Update' : 'Recommend'}
+                      </Button>
                     </div>
                   </div>
                 ) : (
@@ -1097,13 +1094,14 @@ const RestaurantDetailModal = ({
                         >
                           Cancel
                         </button>
-                        <button
+                        <Button
                           onClick={handleSubmitReview}
-                          disabled={reviewSubmitting || !reviewContent.trim()}
-                          className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50 transition-colors"
+                          size="sm"
+                          loading={reviewSubmitting}
+                          disabled={!reviewContent.trim()}
                         >
-                          {reviewSubmitting ? 'Saving…' : 'Submit'}
-                        </button>
+                          Submit
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -1145,7 +1143,7 @@ const RestaurantDetailModal = ({
                                   >
                                     Cancel
                                   </button>
-                                  <button
+                                  <Button
                                     onClick={async () => {
                                       const trimmed = editContent.trim();
                                       if (!trimmed) { setEditError('Content is required'); return; }
@@ -1168,11 +1166,12 @@ const RestaurantDetailModal = ({
                                         setEditSubmitting(false);
                                       }
                                     }}
-                                    disabled={editSubmitting || !editContent.trim()}
-                                    className="rounded-md bg-orange-500 px-2.5 py-1 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-40"
+                                    size="sm"
+                                    loading={editSubmitting}
+                                    disabled={!editContent.trim()}
                                   >
-                                    {editSubmitting ? 'Saving…' : 'Save'}
-                                  </button>
+                                    Save
+                                  </Button>
                                 </div>
                               </div>
                             ) : (

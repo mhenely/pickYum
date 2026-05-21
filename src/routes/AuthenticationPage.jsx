@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { SparklesIcon, UserGroupIcon, ChartBarIcon } from '@heroicons/react/24/outline';
 import { loginUser, registerUser } from '../redux/slices/authSlice';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import Button from '../components/ui/Button';
@@ -125,9 +126,62 @@ const AuthenticationPage = () => {
   };
 
   return (
-    <div className="min-h-screen bg-orange-50 flex items-center justify-center px-4 py-12">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-2xl shadow-lg border border-orange-100 px-8 py-10">
+    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-orange-50 to-amber-50 px-4 py-8 sm:py-12">
+      {/* Split layout — value/positioning column left, auth form right
+          on desktop. On mobile the form stays first because that's why
+          most users opened the page; the value column drops below as a
+          quick "here's what you're signing up for" reassurance. */}
+      <div className="mx-auto max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
+
+        {/* Value column — desktop-only ordering (lg:order-1) puts it on
+            the left; on mobile it ships below the form via the default
+            DOM order. */}
+        <div className="hidden lg:flex flex-col justify-center lg:order-1 px-4">
+          <Link to="/" className="inline-flex items-center gap-2.5 mb-6">
+            <span className="flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-red-500 text-2xl shadow-brand-sm select-none">🍽</span>
+            <span className="font-display font-extrabold text-3xl tracking-tight bg-gradient-to-br from-orange-600 to-red-600 bg-clip-text text-transparent">pickYum</span>
+          </Link>
+          <h1 className="text-3xl xl:text-4xl font-extrabold text-gray-900 tracking-tight mb-3">
+            End the "where should we eat?" loop.
+          </h1>
+          <p className="text-base text-gray-600 leading-relaxed mb-8">
+            Save the spots you'd actually go to, then let pickYum decide. Solo or with the group.
+          </p>
+          <ul className="flex flex-col gap-4">
+            <li className="flex items-start gap-3">
+              <span className="shrink-0 mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-orange-100 text-orange-600">
+                <SparklesIcon className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-gray-900">Decide instantly</p>
+                <p className="text-sm text-gray-600">Coin flip or roulette spin — chosen from your current options.</p>
+              </div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="shrink-0 mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-orange-100 text-orange-600">
+                <UserGroupIcon className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-gray-900">Vote together</p>
+                <p className="text-sm text-gray-600">Spin up a group vote in seconds — guests join via a link, no account required.</p>
+              </div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="shrink-0 mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-orange-100 text-orange-600">
+                <ChartBarIcon className="h-5 w-5" aria-hidden="true" />
+              </span>
+              <div>
+                <p className="text-sm font-semibold text-gray-900">See your patterns</p>
+                <p className="text-sm text-gray-600">Track what you actually pick, when, and with whom — surprise yourself.</p>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        {/* Auth card — same width as before for visual stability;
+            centered on desktop within its column. */}
+        <div className="w-full max-w-md mx-auto lg:order-2">
+          <div className="bg-white rounded-2xl shadow-lg border border-orange-100 px-8 py-10">
 
           {/* Header */}
           <div className="text-center mb-8">
@@ -293,10 +347,8 @@ const AuthenticationPage = () => {
                   </div>
                 )}
 
-                <Button type="submit" size="lg" fullWidth disabled={formLoading} className="mt-1">
-                  {formLoading
-                    ? (isSignUp ? 'Creating account…' : 'Signing in…')
-                    : (isSignUp ? 'Create account' : 'Sign in')}
+                <Button type="submit" size="lg" fullWidth loading={formLoading} className="mt-1">
+                  {isSignUp ? 'Create account' : 'Sign in'}
                 </Button>
 
                 {!isSignUp && (
@@ -310,15 +362,16 @@ const AuthenticationPage = () => {
             </>
           )}
 
-        </div>
+          </div>
 
-        <p className="mt-6 text-center text-xs text-gray-400">
-          By continuing you agree to our{' '}
-          <Link to="/terms" className="hover:text-orange-600 hover:underline">Terms</Link>
-          {' '}and{' '}
-          <Link to="/privacy" className="hover:text-orange-600 hover:underline">Privacy Policy</Link>.
-        </p>
-      </div>
+          <p className="mt-6 text-center text-xs text-gray-400">
+            By continuing you agree to our{' '}
+            <Link to="/terms" className="hover:text-orange-600 hover:underline">Terms</Link>
+            {' '}and{' '}
+            <Link to="/privacy" className="hover:text-orange-600 hover:underline">Privacy Policy</Link>.
+          </p>
+        </div>{/* /auth card column */}
+      </div>{/* /split grid */}
     </div>
   );
 };

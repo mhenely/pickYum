@@ -6,6 +6,7 @@
 
 import { useState } from 'react';
 import { groupsApi } from '../../lib/groupsApi';
+import Button from '../ui/Button';
 
 export default function EventDatePicker({ groupId, event, isHost, onUpdated }) {
   const [value, setValue] = useState(
@@ -40,10 +41,9 @@ export default function EventDatePicker({ groupId, event, isHost, onUpdated }) {
           <input type="datetime-local" value={value} onChange={(e) => setValue(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
           />
-          <button onClick={handleSave} disabled={saving || !value}
-            className="rounded-lg bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-400 disabled:opacity-50 transition-colors">
-            {saving ? 'Saving…' : 'Set'}
-          </button>
+          <Button onClick={handleSave} size="sm" loading={saving} disabled={!value}>
+            Set
+          </Button>
           {event.scheduledFor && (
             <button onClick={handleClear} disabled={saving}
               className="text-xs text-gray-500 hover:text-red-500 transition-colors">

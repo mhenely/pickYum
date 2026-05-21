@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { sessionApi } from '../lib/sessionApi';
+import Button from './ui/Button';
 
 const CreateSessionModal = ({ flipPool, restaurantMap, defaultHostName = '', onClose }) => {
   const navigate = useNavigate();
@@ -109,13 +110,15 @@ const CreateSessionModal = ({ flipPool, restaurantMap, defaultHostName = '', onC
 
             {error && <p className="text-sm text-red-500">{error}</p>}
 
-            <button
+            <Button
               type="submit"
-              disabled={loading || candidates.length < 2}
-              className="w-full rounded-lg bg-orange-500 py-2.5 text-sm font-semibold text-white hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              size="lg"
+              fullWidth
+              loading={loading}
+              disabled={candidates.length < 2}
             >
-              {loading ? 'Creating…' : 'Create session & get invite link'}
-            </button>
+              Create session & get invite link
+            </Button>
           </form>
         </DialogPanel>
       </div>

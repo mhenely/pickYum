@@ -16,6 +16,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { api } from '../../lib/api';
 import ConfirmDialog from '../ConfirmDialog';
+import Button from '../ui/Button';
 
 // Module-level empty sentinels for useSelector fallbacks. Without this,
 // each `?? []` would return a fresh array reference per call and trigger
@@ -1193,13 +1194,14 @@ export default function MealEventsSection({ trip, currentUserId, isHost, isArchi
             </p>
           )}
           <div className="flex items-center gap-2 mt-1">
-            <button
+            <Button
               type="submit"
-              disabled={bulking || bulkSlots.size === 0 || !bulkFrom || !bulkTo}
-              className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+              size="sm"
+              loading={bulking}
+              disabled={bulkSlots.size === 0 || !bulkFrom || !bulkTo}
             >
-              {bulking ? 'Creating…' : 'Create meals'}
-            </button>
+              Create meals
+            </Button>
             <button
               type="button"
               onClick={() => { setShowBulk(false); setBulkError(''); }}
@@ -1293,13 +1295,14 @@ export default function MealEventsSection({ trip, currentUserId, isHost, isArchi
             {createError && <p className="text-xs text-red-500">{createError}</p>}
 
             <div className="flex items-center gap-2">
-              <button
+              <Button
                 type="submit"
-                disabled={!newName.trim() || creating}
-                className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-400 disabled:opacity-40"
+                size="sm"
+                loading={creating}
+                disabled={!newName.trim()}
               >
-                {creating ? 'Saving…' : 'Add meal'}
-              </button>
+                Add meal
+              </Button>
               <button
                 type="button"
                 onClick={() => {

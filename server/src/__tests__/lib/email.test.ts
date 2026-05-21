@@ -177,4 +177,26 @@ describe('templates', () => {
     expect(t.text).toMatch(/safely ignore/i);
     expect(t.text).toMatch(/1 hour/i);
   });
+
+  it('passwordChangedTemplate embeds the reset URL and the "if this wasn\'t you" copy', () => {
+    // This template goes to the OLD email after an in-app password change
+    // so a session hijacker can't quietly rotate credentials. The escape
+    // hatch — "if this wasn't you, reset immediately" + the reset link —
+    // is the whole point of the email; tests guard against a future
+    // tidy-up dropping it.
+    const email = loadEmail({});
+    const url = 'https://app.example.com/reset-password?token=xyz';
+    const t = email.passwordChangedTemplate(url);
+
+    expect(t.subject).toMatch(/changed/i);
+    expect(t.html).toContain(url);
+    expect(t.text).toContain(url);
+    expect(t.text).toMatch(/was just changed/i);
+    expect(t.text).toMatch(/wasn't you/i);
+    // The HTML escape-hatch button label must be visibly distinct from
+    // "Verify email" / "Reset password (you asked)" so the recipient
+    // doesn't ignore it on a quick scan. We assert the literal label
+    // text since the user-experience of the email hinges on it.
+    expect(t.html).toMatch(/Reset password/i);
+  });
 });

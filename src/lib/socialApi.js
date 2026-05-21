@@ -85,4 +85,19 @@ export const socialApi = {
   getSocialRecs:         (restaurantId)      => req(`/api/social/recommendations/${restaurantId}/social`),
   recommend:             (restaurantId, tip) => post(`/api/social/recommendations/${restaurantId}`, { tip }),
   unrecommend:           (restaurantId)      => del(`/api/social/recommendations/${restaurantId}`),
+
+  // Recommendation lists — owner-side CRUD and entry management.
+  // `list` shape: { id, userId, name, description, color, visibility,
+  // position, createdAt, entries: [{ recommendation: {...} }] }.
+  getMyLists:    ()                                   => req('/api/social/lists/mine'),
+  createList:    (body)                               => post('/api/social/lists', body),
+  updateList:    (listId, patchBody)                  => patch(`/api/social/lists/${listId}`, patchBody),
+  deleteList:    (listId)                             => del(`/api/social/lists/${listId}`),
+  addToList:     (listId, restaurantId, tip)          => post(`/api/social/lists/${listId}/entries/${restaurantId}`, tip != null ? { tip } : {}),
+  removeFromList:(listId, restaurantId)               => del(`/api/social/lists/${listId}/entries/${restaurantId}`),
+  // Visibility-gated view of another user's lists.
+  getUserLists:  (userId)                             => req(`/api/social/users/${userId}/lists`),
+  // Explicit share — sends a list-shared notification to a friend who
+  // already has visibility access (server enforces the precondition).
+  shareList:     (listId, friendUserId)               => post(`/api/social/lists/${listId}/share`, { friendUserId }),
 };

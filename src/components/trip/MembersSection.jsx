@@ -10,6 +10,7 @@ import { pushToast } from '../../redux/slices/toastSlice';
 import { api } from '../../lib/api';
 import { groupsApi } from '../../lib/groupsApi';
 import DietaryTagChips from '../DietaryTagChips';
+import Button from '../ui/Button';
 
 export default function MembersSection({ trip, canHostAct, currentUserId, onRefresh }) {
   const navigate = useNavigate();
@@ -187,13 +188,14 @@ export default function MembersSection({ trip, canHostAct, currentUserId, onRefr
               placeholder="Invite by username"
               className="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
             />
-            <button
+            <Button
               type="submit"
-              disabled={!username.trim() || inviting}
-              className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-orange-400 disabled:opacity-40"
+              size="sm"
+              loading={inviting}
+              disabled={!username.trim()}
             >
-              {inviting ? 'Sending…' : 'Invite'}
-            </button>
+              Invite
+            </Button>
           </form>
           {inviteError && <p className="text-xs text-red-500 mb-2">{inviteError}</p>}
 

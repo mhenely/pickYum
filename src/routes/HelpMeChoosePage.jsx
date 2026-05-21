@@ -247,6 +247,13 @@ const HelpMeChoosePage = () => {
 
   const flipPoolSet = useMemo(() => new Set(flipPool.map(sid)), [flipPool]);
 
+  // O(1) lookup used by the favorites strip's "Add to Options" button to
+  // tell whether each row is already queued. Was previously not computed
+  // at all — the button always rendered as active even after a click had
+  // already put the restaurant in Options, so users would tap it again
+  // and get no feedback (no error, no visible change).
+  const optionsSet = useMemo(() => new Set(options.map(sid)), [options]);
+
   const filtersActive =
     priceFilter.size > 0 || cuisineFilter || openNowOnly || avoidDays > 0;
 
@@ -503,10 +510,19 @@ const HelpMeChoosePage = () => {
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <div className="flex flex-col lg:flex-row gap-8 items-start">
 
-        {/* ── LEFT: Favorites + mode toggle ────────────────── */}
+        {/* ── LEFT: Favorites + mode toggle ──────────────────
+            Mode toggle + Group Vote render above the favorites strip
+            on every viewport. The favorites list can be up to 80vh
+            tall (~700px on a 1080p monitor, ~500px on a phone), which
+            previously buried both action buttons below the fold on
+            mobile AND desktop. Moving them above ensures the user can
+            always see and reach them without scrolling. We use `order-
+            last` on the Favorites div so the source order can stay
+            naturally readable while the visual order puts actions
+            first. */}
         <div className="w-full lg:w-64 lg:shrink-0 flex flex-col gap-5">
 
-          <div>
+          <div className="order-last">
             {/* Position-in-list indicator next to the label,
                 driven by useScrollListIndex. Hidden when empty so
                 we don't render "0 / 0". */}
@@ -564,6 +580,7 @@ const HelpMeChoosePage = () => {
               <div className="flex flex-col gap-3 pl-2 [direction:ltr]">
               {favorites.map((id) => {
                 const rating = getUserRating(reviews, id);
+                const inOptions = optionsSet.has(sid(id));
                 return (
                   <RestaurantCard
                     key={id}
@@ -577,9 +594,15 @@ const HelpMeChoosePage = () => {
                   >
                     <button
                       onClick={() => dispatch(addUserOption(id))}
-                      className="mt-2 w-full rounded-lg text-xs bg-gradient-to-br from-orange-500 to-red-500 text-white py-1 hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
+                      disabled={inOptions}
+                      aria-label={inOptions ? 'Already in options' : 'Add to options'}
+                      className={
+                        inOptions
+                          ? 'mt-2 w-full rounded-lg text-xs bg-gray-100 text-gray-500 py-1 cursor-not-allowed border border-gray-200'
+                          : 'mt-2 w-full rounded-lg text-xs bg-gradient-to-br from-orange-500 to-red-500 text-white py-1 hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm'
+                      }
                     >
-                      + Add to Options
+                      {inOptions ? '✓ In Options' : '+ Add to Options'}
                     </button>
                   </RestaurantCard>
                 );
@@ -828,8 +851,16 @@ const HelpMeChoosePage = () => {
                 because Tailwind's arbitrary-value syntax for calc()
                 with a `100%` operand needs escaping that's noisier
                 than a 1-line style prop. */}
+            {/* pt-3 + pl-3 make room for the H/T badges to overhang
+                outside the cards without being clipped: `overflow-x-auto`
+                implicitly forces `overflow-y` to auto too (per CSS
+                spec), so the badge's `-top-2.5 -left-2.5` (-10px) would
+                otherwise be cut off by the scroll box. 12px of padding
+                gives the 24px badge 2px of breathing room past its
+                overhang. -mt-3 -ml-3 cancels the visual offset so the
+                scroller still aligns with the section heading. */}
             <div
-              className="flex flex-row gap-3 overflow-x-auto overscroll-x-contain pb-2"
+              className="flex flex-row gap-3 overflow-x-auto overscroll-x-contain pt-3 pl-3 -mt-3 -ml-3 pb-2"
               style={{ scrollSnapType: 'x proximity' }}
             >
               {options.map((id) => {
@@ -868,7 +899,15 @@ const HelpMeChoosePage = () => {
                       flex: '0 0 max(220px, calc((100% - 1.5rem) / 3))',
                       scrollSnapAlign: 'start',
                     }}
-                    className="flex flex-col"
+                    // min-w-0 overrides the flex default (`min-width: auto`,
+                    // which sticks to content min-content size). Without it,
+                    // a card containing a long unbreakable restaurant name
+                    // forced the wrapper wider than the `0 0 …` basis, so
+                    // cards in the same row rendered at different widths.
+                    // min-w-0 locks the wrapper to the calculated basis and
+                    // lets the card's own min-w-0 + `truncate` on the name
+                    // ellipsize cleanly.
+                    className="flex flex-col min-w-0"
                     onDragOver={!isTouchDevice ? (e) => handleDragOver(e, id) : undefined}
                     onDragLeave={!isTouchDevice ? handleDragLeave : undefined}
                     onDrop={!isTouchDevice ? (e) => handleDrop(e, id) : undefined}

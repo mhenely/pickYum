@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import Footer from "./Footer";
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react'
-import { BellIcon } from '@heroicons/react/24/outline'
+import { BellIcon, MagnifyingGlassIcon, ScaleIcon, SparklesIcon, UserGroupIcon, ChartBarIcon } from '@heroicons/react/24/outline'
 import { useDispatch, useSelector } from "react-redux";
 import { removeUserOption } from "../redux/slices/userInfoSlice";
 import { logoutUser } from "../redux/slices/authSlice";
@@ -798,12 +798,16 @@ const NavBar = () => {
                   : 'text-stone-500 hover:text-orange-600 border-t-2 border-transparent -mt-px'
               )}
             >
-              <span className="text-lg leading-none mb-0.5" aria-hidden="true">
-                {item.name === 'Search' && '🔍'}
-                {item.name === 'Compare' && '⚖️'}
-                {item.name === 'Choose' && '🎲'}
-                {item.name === 'Social' && '👥'}
-                {item.name === 'You' && '📊'}
+              {/* Heroicons (line) for consistent rendering across
+                  iOS/Android/Windows where emoji renderings drift wildly.
+                  Each icon is sized to the bottom-tab text scale (h-5) so
+                  the active-state pill above tracks comfortably. */}
+              <span className="mb-0.5" aria-hidden="true">
+                {item.name === 'Search'  && <MagnifyingGlassIcon className="h-5 w-5" />}
+                {item.name === 'Compare' && <ScaleIcon            className="h-5 w-5" />}
+                {item.name === 'Choose'  && <SparklesIcon         className="h-5 w-5" />}
+                {item.name === 'Social'  && <UserGroupIcon        className="h-5 w-5" />}
+                {item.name === 'You'     && <ChartBarIcon         className="h-5 w-5" />}
               </span>
               <span>{item.name}</span>
               {item.badge > 0 && (

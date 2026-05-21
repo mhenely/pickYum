@@ -20,6 +20,16 @@ import { SkeletonDetailPage } from '../components/Skeleton';
 const LandingPage = lazy(() => import('./LandingPage'));
 const SearchPage  = lazy(() => import('./SearchPage.jsx'));
 
+// localStorage flag set by LandingPage's "Try as a guest" CTA. Once
+// the user explicitly opts out of the marketing surface, return visits
+// (even after a hard refresh) drop them straight into SearchPage in
+// guest mode. Cleared on logout via the auth slice's listener so a
+// user who signs up + signs out + revisits sees the landing again.
+const SKIP_LANDING_KEY = 'pickyum_skip_landing';
+const userSkippedLanding = () => {
+  try { return localStorage.getItem(SKIP_LANDING_KEY) === '1'; } catch { return false; }
+};
+
 export default function HomePage() {
   // Treat 'idle' / 'loading' as "not yet decided" — show the skeleton
   // instead of flashing the landing page before swapping to SearchPage
@@ -30,9 +40,11 @@ export default function HomePage() {
     return <SkeletonDetailPage />;
   }
 
+  const showSearch = status === 'authenticated' || userSkippedLanding();
+
   return (
     <Suspense fallback={<SkeletonDetailPage />}>
-      {status === 'authenticated' ? <SearchPage /> : <LandingPage />}
+      {showSearch ? <SearchPage /> : <LandingPage />}
     </Suspense>
   );
 }

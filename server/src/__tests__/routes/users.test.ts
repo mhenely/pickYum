@@ -1359,6 +1359,107 @@ describe('PATCH /api/users/me/accepted/:id', () => {
       }),
     );
   });
+
+  // ── wouldPickAgain regret-toggle support ────────────────────
+  //
+  // The PATCH endpoint accepts a `wouldPickAgain` boolean (or null to
+  // clear) in addition to (or instead of) excludeFromInsights. Tests
+  // assert each value round-trips, that the field type is validated,
+  // and that supplying both fields in one request works.
+
+  it('accepts wouldPickAgain: true', async () => {
+    (mockPrisma.userAccepted.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (mockPrisma.userAccepted.findUnique as jest.Mock).mockResolvedValue({
+      id: 42, userId: 1, restaurantId: 7, acceptedAt: new Date(),
+      excludeFromInsights: false, wouldPickAgain: true,
+      restaurant: { id: 7, name: 'A spot' },
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ wouldPickAgain: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accepted.wouldPickAgain).toBe(true);
+    expect(mockPrisma.userAccepted.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { wouldPickAgain: true } }),
+    );
+  });
+
+  it('accepts wouldPickAgain: false (regret signal)', async () => {
+    (mockPrisma.userAccepted.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (mockPrisma.userAccepted.findUnique as jest.Mock).mockResolvedValue({
+      id: 42, userId: 1, restaurantId: 7, acceptedAt: new Date(),
+      excludeFromInsights: false, wouldPickAgain: false,
+      restaurant: { id: 7, name: 'A spot' },
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ wouldPickAgain: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accepted.wouldPickAgain).toBe(false);
+  });
+
+  it('accepts wouldPickAgain: null (user undoes their answer)', async () => {
+    // Null is the explicit "no answer yet" state — the UI sends it when
+    // the user un-toggles their thumb. The route must accept null
+    // distinctly from omitting the field (which would no-op the column).
+    (mockPrisma.userAccepted.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (mockPrisma.userAccepted.findUnique as jest.Mock).mockResolvedValue({
+      id: 42, userId: 1, restaurantId: 7, acceptedAt: new Date(),
+      excludeFromInsights: false, wouldPickAgain: null,
+      restaurant: { id: 7, name: 'A spot' },
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ wouldPickAgain: null });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accepted.wouldPickAgain).toBeNull();
+    expect(mockPrisma.userAccepted.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { wouldPickAgain: null } }),
+    );
+  });
+
+  it('returns 400 when wouldPickAgain is the wrong type (string)', async () => {
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ wouldPickAgain: 'yes' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/wouldPickAgain/i);
+  });
+
+  it('accepts both fields in a single request', async () => {
+    // Combined updates must merge into one Prisma data object — splitting
+    // into two updateMany calls would risk a partial write if the second
+    // one fails.
+    (mockPrisma.userAccepted.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (mockPrisma.userAccepted.findUnique as jest.Mock).mockResolvedValue({
+      id: 42, userId: 1, restaurantId: 7, acceptedAt: new Date(),
+      excludeFromInsights: true, wouldPickAgain: true,
+      restaurant: { id: 7, name: 'A spot' },
+    });
+
+    const res = await request(buildApp())
+      .patch('/api/users/me/accepted/42')
+      .set('Cookie', authCookie())
+      .send({ excludeFromInsights: true, wouldPickAgain: true });
+
+    expect(res.status).toBe(200);
+    expect(mockPrisma.userAccepted.updateMany).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.userAccepted.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { excludeFromInsights: true, wouldPickAgain: true },
+      }),
+    );
+  });
 });
 
 describe('GET /api/users/me/insights', () => {
@@ -1655,6 +1756,186 @@ describe('GET /api/users/me/insights', () => {
     expect(res.body.recent).toHaveLength(2);
     expect(res.body.recent[0]).toMatchObject({ name: 'Solo',       eventId: null, groupId: null });
     expect(res.body.recent[1]).toMatchObject({ name: 'Group Pick', eventId: 42,   groupId: 7    });
+  });
+
+  // ── Regret toggle (wouldPickAgain) aggregation ──────────────
+  //
+  // The /me/insights response surfaces two regret-related fields:
+  //   - regretAnswered: count of acceptances where wouldPickAgain !== null
+  //   - regretRate:     percentage of answered rows marked false (regret).
+  //                     Null when fewer than 3 rows have been answered so
+  //                     a single thumbs-down doesn't headline "50% regret".
+  // Tests below check both branches (suppressed-below-threshold + active).
+
+  it('returns regretRate=null and regretAnswered count when below the 3-answer floor', async () => {
+    // 2 answered (1 yes, 1 no), 1 unanswered. Below the 3-row floor →
+    // regretRate stays null so the UI hides the stat.
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      { id: 1, restaurantId: 1, acceptedAt: new Date('2026-05-01'),
+        optionsSnapshot: null, chooseMethod: 'flip', wouldPickAgain: true,
+        eventId: null, event: null, restaurant: { id: 1, name: 'A', cuisineType: 'Italian' } },
+      { id: 2, restaurantId: 2, acceptedAt: new Date('2026-05-02'),
+        optionsSnapshot: null, chooseMethod: 'flip', wouldPickAgain: false,
+        eventId: null, event: null, restaurant: { id: 2, name: 'B', cuisineType: 'Thai' } },
+      { id: 3, restaurantId: 3, acceptedAt: new Date('2026-05-03'),
+        optionsSnapshot: null, chooseMethod: 'flip', wouldPickAgain: null,
+        eventId: null, event: null, restaurant: { id: 3, name: 'C', cuisineType: 'Mexican' } },
+    ]);
+
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+
+    expect(res.body.regretAnswered).toBe(2);
+    expect(res.body.regretRate).toBeNull();
+  });
+
+  it('computes regretRate as an integer percentage once 3+ rows are answered', async () => {
+    // 4 answered: 1 true, 3 false → 75% regret rate. Crosses the 3-row floor
+    // and the route should return the integer percentage (no decimals).
+    const rows = [
+      { id: 1, wouldPickAgain: true  },
+      { id: 2, wouldPickAgain: false },
+      { id: 3, wouldPickAgain: false },
+      { id: 4, wouldPickAgain: false },
+    ].map((r, i) => ({
+      ...r,
+      restaurantId: i + 1,
+      acceptedAt: new Date('2026-05-01'),
+      optionsSnapshot: null,
+      chooseMethod: 'flip',
+      eventId: null,
+      event: null,
+      restaurant: { id: i + 1, name: `R${i}`, cuisineType: null },
+    }));
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue(rows);
+
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+
+    expect(res.body.regretAnswered).toBe(4);
+    expect(res.body.regretRate).toBe(75);
+  });
+
+  it('surfaces wouldPickAgain on recent rows alongside the id', async () => {
+    // The UI wires the regret toggle by the acceptance row's id, so the
+    // /insights response must include both `id` and the current answer.
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      { id: 99, restaurantId: 1, acceptedAt: new Date(),
+        optionsSnapshot: null, chooseMethod: 'flip', wouldPickAgain: true,
+        eventId: null, event: null, restaurant: { id: 1, name: 'A', cuisineType: null } },
+      { id: 100, restaurantId: 2, acceptedAt: new Date(),
+        optionsSnapshot: null, chooseMethod: 'flip', wouldPickAgain: null,
+        eventId: null, event: null, restaurant: { id: 2, name: 'B', cuisineType: null } },
+    ]);
+
+    const res = await request(buildApp()).get('/api/users/me/insights').set('Cookie', authCookie());
+
+    expect(res.body.recent[0]).toMatchObject({ id: 99,  wouldPickAgain: true });
+    expect(res.body.recent[1]).toMatchObject({ id: 100, wouldPickAgain: null });
+  });
+});
+
+// ── GET /api/users/me/insights/friends ────────────────────────
+//
+// Friend-by-friend cuisine comparison over the past year. The endpoint
+// makes two Prisma calls:
+//   1. friendRequest.findMany → discovers accepted friends (either direction)
+//   2. userAccepted.findMany  → fetches viewer + friends' acceptances
+//
+// The compute then buckets by user → cuisine → count and surfaces:
+//   - topShared:     cuisine you and they both pick, ranked by alignment
+//   - theirFavorite: a cuisine they over-index on vs. you (≥ 3 picks, ≥ 2× yours)
+
+describe('GET /api/users/me/insights/friends', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns 401 without auth', async () => {
+    const res = await request(buildApp()).get('/api/users/me/insights/friends');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns an empty array when the user has no friends (short-circuits the second query)', async () => {
+    (mockPrisma.friendRequest.findMany as jest.Mock).mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights/friends').set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body.friends).toEqual([]);
+    // No friends → no point fetching acceptances. Regression guard
+    // against a refactor that drops the early return.
+    expect(mockPrisma.userAccepted.findMany).not.toHaveBeenCalled();
+  });
+
+  it('computes topShared and theirFavorite over a one-year cuisine history', async () => {
+    // Viewer is user 1; friend is user 2. Both have a one-year picture
+    // populated below — Italian is the shared favorite; Thai is the
+    // friend's strong over-index (3 picks vs the viewer's 0).
+    (mockPrisma.friendRequest.findMany as jest.Mock).mockResolvedValue([
+      {
+        senderId: 1, receiverId: 2,
+        sender:   { id: 1, username: 'me',  avatarUrl: null },
+        receiver: { id: 2, username: 'bob', avatarUrl: null },
+      },
+    ]);
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      // Viewer's history — 3 Italian, 1 Mexican
+      { userId: 1, restaurant: { cuisineType: 'Italian' } },
+      { userId: 1, restaurant: { cuisineType: 'Italian' } },
+      { userId: 1, restaurant: { cuisineType: 'Italian' } },
+      { userId: 1, restaurant: { cuisineType: 'Mexican' } },
+      // Bob's history — 2 Italian, 3 Thai
+      { userId: 2, restaurant: { cuisineType: 'Italian' } },
+      { userId: 2, restaurant: { cuisineType: 'Italian' } },
+      { userId: 2, restaurant: { cuisineType: 'Thai' } },
+      { userId: 2, restaurant: { cuisineType: 'Thai' } },
+      { userId: 2, restaurant: { cuisineType: 'Thai' } },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights/friends').set('Cookie', authCookie(1));
+
+    expect(res.status).toBe(200);
+    expect(res.body.friends).toHaveLength(1);
+    const bob = res.body.friends[0];
+
+    expect(bob.username).toBe('bob');
+    // Shared cuisine: Italian (3 mine vs 2 theirs). Alignment is min/max =
+    // 2/3 ≈ 0.667; the only shared cuisine so it leads topShared.
+    expect(bob.topShared).toMatchObject({
+      cuisine:    'Italian',
+      mineCount:  3,
+      theirCount: 2,
+    });
+    // Thai: 3 of theirs vs 0 of mine → ratio infinity (treated as max), and
+    // it clears the 3-pick floor. theirFavorite surfaces it.
+    expect(bob.theirFavorite).toMatchObject({
+      cuisine: 'Thai', theirCount: 3, mineCount: 0,
+    });
+  });
+
+  it('returns the friend with theirFavorite=null when no cuisine over-indexes by 2×', async () => {
+    // Bob and viewer both eat Italian 3 times — equal counts. theirFavorite
+    // requires 2× viewer's count, so it should be null here. Catches a
+    // regression where the threshold check accidentally allows ratio=1.
+    (mockPrisma.friendRequest.findMany as jest.Mock).mockResolvedValue([
+      {
+        senderId: 1, receiverId: 2,
+        sender:   { id: 1, username: 'me',  avatarUrl: null },
+        receiver: { id: 2, username: 'bob', avatarUrl: null },
+      },
+    ]);
+    (mockPrisma.userAccepted.findMany as jest.Mock).mockResolvedValue([
+      { userId: 1, restaurant: { cuisineType: 'Italian' } },
+      { userId: 1, restaurant: { cuisineType: 'Italian' } },
+      { userId: 1, restaurant: { cuisineType: 'Italian' } },
+      { userId: 2, restaurant: { cuisineType: 'Italian' } },
+      { userId: 2, restaurant: { cuisineType: 'Italian' } },
+      { userId: 2, restaurant: { cuisineType: 'Italian' } },
+    ]);
+
+    const res = await request(buildApp())
+      .get('/api/users/me/insights/friends').set('Cookie', authCookie(1));
+
+    expect(res.body.friends[0].theirFavorite).toBeNull();
   });
 });
 

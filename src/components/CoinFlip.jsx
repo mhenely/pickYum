@@ -3,7 +3,7 @@
 // parents trigger flips imperatively via the ref handle and read results
 // through callbacks. See CoinFlip.css for the visual treatment.
 
-import { forwardRef, useImperativeHandle, useRef, useState, useCallback } from 'react';
+import { forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from 'react';
 import { placePhotoUrl } from '../lib/api';
 import './CoinFlip.css';
 
@@ -22,7 +22,12 @@ const generateSparkles = (count = 10) =>
     };
   });
 
+// `photoUrl` short-circuits the Google Places proxy — useful for the
+// landing-page demo and any other caller that already has an absolute
+// image URL. Falls back to the photos[] array (Places refs) when not
+// supplied.
 const restaurantPhotoUrl = (r) => {
+  if (r?.photoUrl) return r.photoUrl;
   const first = r?.photos?.[0];
   if (!first) return null;
   return placePhotoUrl(first, 400);
@@ -30,14 +35,25 @@ const restaurantPhotoUrl = (r) => {
 
 // One face of the coin — restaurant photo full-bleed, name + side label
 // overlaid at the bottom with a gradient fade. Gracefully falls back to
-// a gradient placeholder when no photo is available.
+// the gradient name placeholder when no photo is available OR when the
+// supplied URL fails to load (broken hot-link, CDN outage, etc).
 const CoinFace = ({ restaurant, side, faceClass }) => {
   const photo = restaurantPhotoUrl(restaurant);
   const name = restaurant?.name ?? '—';
+  const [imgFailed, setImgFailed] = useState(false);
+  // Reset the error state when the restaurant changes — same coin face
+  // may swap restaurants between flips (demo "Try different" button).
+  useEffect(() => { setImgFailed(false); }, [photo]);
   return (
     <div className={`cf-face ${faceClass}`}>
-      {photo ? (
-        <img src={photo} alt="" className="cf-photo" loading="eager" />
+      {photo && !imgFailed ? (
+        <img
+          src={photo}
+          alt=""
+          className="cf-photo"
+          loading="eager"
+          onError={() => setImgFailed(true)}
+        />
       ) : (
         <div className="cf-photo-fallback">
           <span className="cf-photo-fallback-text">{name}</span>

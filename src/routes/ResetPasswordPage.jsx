@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { useAppDispatch } from '../redux/hooks';
 import { checkAuth } from '../redux/slices/authSlice';
+import Button from '../components/ui/Button';
 
 const ResetPasswordPage = () => {
   const [searchParams]    = useSearchParams();
@@ -80,13 +81,9 @@ const ResetPasswordPage = () => {
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
                 />
               </div>
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-lg bg-gradient-to-br from-orange-500 to-red-500 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all"
-              >
-                {loading ? 'Updating…' : 'Set new password'}
-              </button>
+              <Button type="submit" size="lg" fullWidth loading={loading}>
+                Set new password
+              </Button>
             </form>
           )}
         </div>

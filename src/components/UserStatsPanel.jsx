@@ -5,6 +5,7 @@ import useCurrentUser from '../hooks/useCurrentUser';
 import getMostRecentDate from '../utils/getMostRecentDate';
 import RestaurantReviewModal from './RestaurantReviewModal';
 import RatingDisplay from './RatingDisplay';
+import SectionEmpty from './SectionEmpty';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
 
 // Top 4 most-chosen restaurants + indecision stats. Pulled out of
@@ -79,9 +80,11 @@ export default function UserStatsPanel() {
             ))}
           </div>
         ) : top4.length === 0 ? (
-          <p className="text-gray-500 text-sm italic">
-            No history yet. Accept a restaurant from the coin flip to get started.
-          </p>
+          <SectionEmpty
+            icon="🍽"
+            title="No history yet"
+            subtitle="Accept a restaurant from the coin flip to get started."
+          />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {top4.map(({ id, count, rank }) => {

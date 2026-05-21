@@ -18,6 +18,7 @@ import { fileToDownscaledAvatarDataUrl } from "../utils/downscaleAvatar";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import useCurrentUser from "../hooks/useCurrentUser";
+import Button from "../components/ui/Button";
 
 // `view` selects which subset of sections to render. Used by YouPage to
 // split this large page across its Account and Preferences tabs without
@@ -588,13 +589,14 @@ const UserInfoPage = ({ view = 'account' }) => {
                   </p>
                   {emailError && <p className="text-xs text-red-500">{emailError}</p>}
                   <div className="flex items-center gap-3">
-                    <button
+                    <Button
                       type="submit"
-                      disabled={emailSaving || !emailNew.trim() || !emailCurrent}
-                      className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                      size="sm"
+                      loading={emailSaving}
+                      disabled={!emailNew.trim() || !emailCurrent}
                     >
-                      {emailSaving ? 'Saving…' : 'Update email'}
-                    </button>
+                      Update email
+                    </Button>
                     <button
                       type="button"
                       onClick={resetEmailForm}
@@ -677,13 +679,14 @@ const UserInfoPage = ({ view = 'account' }) => {
                   </div>
                   {pwError && <p className="text-xs text-red-500">{pwError}</p>}
                   <div className="flex items-center gap-3">
-                    <button
+                    <Button
                       type="submit"
-                      disabled={pwSaving || !pwCurrent || !pwNew || !pwConfirm}
-                      className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                      size="sm"
+                      loading={pwSaving}
+                      disabled={!pwCurrent || !pwNew || !pwConfirm}
                     >
-                      {pwSaving ? 'Saving…' : 'Update password'}
-                    </button>
+                      Update password
+                    </Button>
                     <button
                       type="button"
                       onClick={resetPwForm}

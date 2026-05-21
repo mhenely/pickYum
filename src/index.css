@@ -12,3 +12,15 @@
 html {
   scrollbar-gutter: stable;
 }
+
+/* Brand typography sweep: page-level headings get Plus Jakarta Sans
+   (the same display font as the logo) so the app's voice carries
+   across the entire page hierarchy instead of stopping at the navbar.
+   Body copy + smaller headings stay on Inter for readability density.
+   Pages that need a non-display heading can override with a utility
+   like `font-sans` on the element. */
+@layer base {
+  h1, h2 {
+    font-family: "Plus Jakarta Sans", "Inter", sans-serif;
+  }
+}

@@ -81,6 +81,9 @@ model User {
   sentRequests     FriendRequest[]  @relation("SentRequests")
   receivedRequests FriendRequest[]  @relation("ReceivedRequests")
   recommendations  Recommendation[] @relation("SentRecommendations")
+  // Curated recommendation lists this user owns. Distinct from the
+  // private FavoriteList collection — these are outward-facing.
+  recommendationLists RecommendationList[]
 
   hostedGroups           Group[]            @relation("GroupHost")
   groupMemberships       GroupMember[]
@@ -529,10 +532,90 @@ model Recommendation {
 
   fromUser   User       @relation("SentRecommendations", fields: [fromUserId], references: [id], onDelete: Cascade)
   restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  // Back-relation to the many-to-many join table — a recommendation can
+  // be a member of any number of the owner's curated lists at the same
+  // time. Empty array = standalone rec (the only shape that existed
+  // before lists shipped).
+  listEntries RecommendationListEntry[]
 
   @@unique([fromUserId, restaurantId])
   @@index([restaurantId])
   @@map("recommendations")
+}
+
+// Curated list of recommendations the owner wants to surface as a group
+// — e.g. "Date night picks", "Best brunch in town", "Cheap eats." A list
+// is owned by one user; recommendations inside it stay owned by the
+// same user (the listEntries join table is filtered to fromUserId =
+// userId at the API layer). Visibility controls who can see the list
+// when they view the owner's profile / recs surface.
+//
+// Lists are independent of FavoriteList — favorites are a personal
+// "places I like" collection; recommendation lists are an outward-facing
+// endorsement. Different intents, different audiences, different model.
+model RecommendationList {
+  id          Int                          @id @default(autoincrement())
+  userId      Int                          @map("user_id")
+  name        String
+  // Optional one-liner shown under the title in the list view. Capped
+  // server-side to ~280 chars — tweet length, plenty for context.
+  description String?
+  // Optional accent color (#RRGGBB) picked from the brand palette.
+  // null = the default neutral chip color.
+  color       String?                      @db.VarChar(7)
+  // Who can see the list when browsing the owner's profile / recs
+  // surface. Defaults to NETWORK (= friends ∪ follows) to match the
+  // visibility of individual recommendations today, so adopting lists
+  // doesn't accidentally narrow the audience.
+  visibility  RecommendationListVisibility @default(NETWORK)
+  // User-controlled order for the owner's own list-management UI.
+  // Mirrors FavoriteList.position semantics — re-orders are full
+  // rewrites so collisions aren't a concern.
+  position    Int                          @default(0)
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  updatedAt   DateTime                     @updatedAt @map("updated_at")
+
+  user    User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries RecommendationListEntry[]
+
+  // Per-user uniqueness on name keeps the management UI sane and
+  // mirrors FavoriteList's constraint.
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("recommendation_lists")
+}
+
+// Visibility levels for a RecommendationList. Ordered from narrow to
+// broad so a future PUBLIC level can be appended without re-ordering
+// the existing values.
+//   FRIENDS   — accepted-friend relationships only (mutual).
+//   FOLLOWERS — people who follow the owner (one-way subscribers).
+//   NETWORK   — friends OR followers (default; matches single-rec
+//               visibility today).
+enum RecommendationListVisibility {
+  FRIENDS
+  FOLLOWERS
+  NETWORK
+}
+
+// Membership in a recommendation list — one row per (list, rec).
+// Composite PK so a rec appears at most once per list, but the same rec
+// can belong to multiple lists. Cascade on both sides keeps cleanup
+// implicit.
+model RecommendationListEntry {
+  listId           Int      @map("list_id")
+  recommendationId Int      @map("recommendation_id")
+  // User-controlled order within the list. Same rewrite-on-reorder
+  // strategy as FavoriteListEntry.
+  position         Int      @default(0)
+  addedAt          DateTime @default(now()) @map("added_at")
+
+  list           RecommendationList @relation(fields: [listId],           references: [id], onDelete: Cascade)
+  recommendation Recommendation     @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+
+  @@id([listId, recommendationId])
+  @@index([recommendationId])
+  @@map("recommendation_list_entries")
 }
 
 // ── Persistent groups ─────────────────────────────────────────

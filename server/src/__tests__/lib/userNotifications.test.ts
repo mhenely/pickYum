@@ -237,3 +237,36 @@ describe('Redis subscriber setup', () => {
     expect(moduleLoadCalls.onArgs).toContainEqual(['message', 'function']);
   });
 });
+
+describe('reason coverage — each UserNotificationReason produces a valid frame', () => {
+  // Sanity check that every reason in the union type round-trips through
+  // notifyUser without throwing AND that the frame contains the reason
+  // string. The map covers reasons added at different times — `list-shared`
+  // is the newest and easy to forget when extending notifyUser; this
+  // test would have caught a missed buildPushPayload case (which throws
+  // a TypeScript exhaustiveness error at compile time, but a runtime
+  // miss would silently drop the push).
+  //
+  // The SSE frame is asserted via the in-memory fallback path so we
+  // don't need to JSON.parse a Redis publish payload per case.
+  const REASONS = [
+    'group-invite',
+    'trip-invite',
+    'meal-participant',
+    'friend-request',
+    'vote-result',
+    'list-shared',
+  ] as const;
+
+  it.each(REASONS)('routes %s to the local SSE frame with the matching reason', (reason) => {
+    mockRedis.status = 'connecting';
+    const { res, writes } = fakeRes();
+    registerUserClient(42, res);
+
+    notifyUser(42, reason);
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain('event: refresh');
+    expect(writes[0]).toContain(`"reason":"${reason}"`);
+  });
+});
