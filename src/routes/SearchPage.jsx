@@ -143,6 +143,12 @@ const pillClass = (active) =>
       : 'bg-white border-gray-300 text-gray-600 hover:border-orange-400 hover:text-orange-600'
   }`;
 
+// Module-level sentinel for the dietary-tags useSelector fallback —
+// without this, `?? []` would mint a fresh array per dispatch and
+// trip React-Redux's dev-mode selector-stability check. Same pattern
+// as EMPTY_QUEUE in Toaster.
+const EMPTY_DIETARY_TAGS = [];
+
 export default function SearchPage() {
   const dispatch = useDispatch();
   const currentUser = useCurrentUser();
@@ -178,11 +184,24 @@ export default function SearchPage() {
     searchCuisineType,
     priceFilters: priceFiltersArray,
     openNowFilter, openAtTime, deliveryFilter, takeoutFilter,
+    dietaryFilterEnabled, toggleDietaryFilter,
     sortBy, query, cuisineFilter,
     currentPage,
     searchMode, nameQuery,
     priceFilterSet: priceFilters,
   } = useSearchFilters();
+
+  // User's profile dietary tags — drive the nearby-search dietary
+  // filter when `dietaryFilterEnabled` is on. Source-of-truth lives in
+  // userInfoSlice (loaded by loadUserData on auth restore).
+  const userDietaryTags = useSelector(
+    (s) => s.userInfo.user?.dietaryTags ?? EMPTY_DIETARY_TAGS,
+  );
+  // The set we actually send to the server. Empty when the user has no
+  // dietary tags OR the toggle is off — falls through the API client's
+  // `if (dietary && dietary.length > 0)` guard so unfiltered users
+  // never trigger the dietary path.
+  const dietaryToApply = dietaryFilterEnabled ? userDietaryTags : [];
 
   // ── Transient UI state (local only) ───────────────────────────
   const [nearbyLoading, setNearbyLoading] = useState(false);
@@ -542,7 +561,9 @@ export default function SearchPage() {
         resolvedLat != null && resolvedLng != null && radiusMeters != null
           ? { lat: resolvedLat, lng: resolvedLng, radius: radiusMeters }
           : undefined;
-      const { restaurants } = await api.places.search(q, bias);
+      // Same dietary-filter hook as nearby — text-search also honors
+      // the user's dietary tags when enabled.
+      const { restaurants } = await api.places.search(q, bias, dietaryToApply);
       dispatch(setNearbyResults({
         results:         restaurants,
         // Label the result-set header with the query string. The grid
@@ -571,8 +592,11 @@ export default function SearchPage() {
       // Pass the cuisine slug so the server filters at the Google
       // Places API call rather than after the fact. null/empty falls
       // back to the default 3-slice fan-out across all food types.
+      // dietaryToApply (Phase E) honors the user's dietary tags when
+      // the toggle is enabled — vegetarian users won't see
+      // steakhouses, etc. Empty list = no dietary filter applied.
       const { restaurants: places, resolvedAddress: addr, resolvedLat, resolvedLng } =
-        await api.places.nearby(locationInput.trim(), radiusMeters, searchCuisineType);
+        await api.places.nearby(locationInput.trim(), radiusMeters, searchCuisineType, dietaryToApply);
       dispatch(setNearbyResults({
         results: places,
         resolvedAddress: addr ?? locationInput.trim(),
@@ -1294,6 +1318,30 @@ export default function SearchPage() {
             Takeout
           </button>
         </div>
+
+        {/* Dietary — Phase E. Only rendered when the user has any
+            dietary tags on their profile (otherwise the toggle is
+            meaningless). Shows a quick view of what's being applied,
+            with a single Off/On toggle to opt out per session. The
+            individual tags are managed on the Your Info page. */}
+        {userDietaryTags.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider shrink-0">Dietary</span>
+            <button
+              type="button"
+              onClick={toggleDietaryFilter}
+              className={pillClass(dietaryFilterEnabled)}
+              title="Filter results by your dietary tags. Manage tags on the Your Info page."
+            >
+              {dietaryFilterEnabled ? '✓ ' : ''}Honor my tags
+            </button>
+            {dietaryFilterEnabled && (
+              <span className="text-xs text-gray-500">
+                {userDietaryTags.join(', ')}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Sort — lives in the filter panel (always visible) so it
             applies to both nearby AND saved sections uniformly,

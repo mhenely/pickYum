@@ -79,6 +79,25 @@ export function verifyEmailTemplate(verifyUrl: string): { subject: string; html:
   };
 }
 
+// Sent after a successful in-app password change. Goes to the OLD email
+// (the address the user knew before the change) so a session hijacker
+// can't quietly rotate the password without the legitimate owner finding
+// out. The reset link in the body gives the legit owner a fast path
+// to recover if it wasn't them.
+export function passwordChangedTemplate(resetUrl: string): { subject: string; html: string; text: string } {
+  return {
+    subject: `Your ${APP_NAME} password was changed`,
+    text: `Your ${APP_NAME} password was just changed.\n\nIf this was you, no action is needed.\n\nIf this wasn't you, reset your password immediately:\n${resetUrl}`,
+    html: shell(
+      'Your password was changed',
+      `<p style="color:#444;line-height:1.5">Your ${APP_NAME} password was just changed. If this was you, you can ignore this email.</p>
+       <p style="color:#444;line-height:1.5"><strong>If this wasn't you</strong>, reset your password right away — your account may be compromised.</p>
+       <p style="margin:24px 0"><a href="${resetUrl}" style="background:#dc2626;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:600">Reset password</a></p>
+       <p style="color:#888;font-size:12px;word-break:break-all">Or paste this link into your browser: ${resetUrl}</p>`,
+    ),
+  };
+}
+
 export function passwordResetTemplate(resetUrl: string): { subject: string; html: string; text: string } {
   return {
     subject: `Reset your ${APP_NAME} password`,

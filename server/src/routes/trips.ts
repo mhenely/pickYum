@@ -8,6 +8,12 @@ import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLife
 import { notifyUser } from '../lib/userNotifications';
 import { parseNumericId } from '../lib/validators';
 import { userMinimalSelect, eventOptionsInclude } from '../lib/prismaHelpers';
+import { cacheRead, cacheKeyForUser, cacheClear } from '../lib/serverCache';
+
+// Trips list is two parallel queries (hosted + member). Same caching
+// rationale as the groups list — short TTL keeps a brief flicker of
+// staleness on writes while collapsing nav-back-to-list cost.
+const TRIPS_LIST_TTL_S = 60;
 import {
   parseVotingStartsAt,
   parseVoteMethod,
@@ -189,22 +195,27 @@ const tripInclude = {
 // Uses the slim `tripListInclude` (host + _count); TripDetailPage's
 // `GET /:id` is where the full payload lives.
 router.get('/', async (req: Request, res: Response) => {
-  const [hosted, member] = await Promise.all([
-    prisma.trip.findMany({
-      where: { hostId: req.userId },
-      include: tripListInclude,
-      orderBy: { createdAt: 'desc' },
-    }),
-    prisma.trip.findMany({
-      where: {
-        members: { some: { userId: req.userId } },
-        NOT: { hostId: req.userId }, // exclude hosted trips already in the first query
-      },
-      include: tripListInclude,
-      orderBy: { createdAt: 'desc' },
-    }),
-  ]);
-  res.json({ trips: [...hosted, ...member] });
+  const userId = req.userId as number;
+  const key = cacheKeyForUser('trips-list', userId);
+  const payload = await cacheRead(key, TRIPS_LIST_TTL_S, async () => {
+    const [hosted, member] = await Promise.all([
+      prisma.trip.findMany({
+        where: { hostId: userId },
+        include: tripListInclude,
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.trip.findMany({
+        where: {
+          members: { some: { userId } },
+          NOT: { hostId: userId }, // exclude hosted trips already in the first query
+        },
+        include: tripListInclude,
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    return { trips: [...hosted, ...member] };
+  });
+  res.json(payload);
 });
 
 // ── Create ────────────────────────────────────────────────────
@@ -251,6 +262,10 @@ router.post('/', async (req: Request, res: Response) => {
     await tx.tripMember.create({ data: { tripId: created.id, userId: req.userId } });
     return tx.trip.findUnique({ where: { id: created.id }, include: tripInclude });
   });
+
+  // Bust the creator's trips-list cache so the new trip shows up on
+  // their next visit to /trips within the cache TTL window.
+  cacheClear(cacheKeyForUser('trips-list', req.userId)).catch(() => {});
 
   res.status(201).json({ trip });
 });

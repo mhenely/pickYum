@@ -8,8 +8,20 @@ import { requireAuth } from '../middleware/auth';
 import {
   registerUserClient, unregisterUserClient,
 } from '../lib/userNotifications';
+import prisma from '../lib/prisma';
+import { getVapidPublicKey, isPushEnabled } from '../lib/webPush';
 
 const router = Router();
+
+// `/vapid-key` is intentionally public — the VAPID public key is by
+// definition not a secret, and the client needs it before any subscribe
+// handshake (the subscribe call itself uses authenticated cookies).
+// Registering it BEFORE the requireAuth middleware below lets it
+// short-circuit before the auth check runs.
+router.get('/vapid-key', (_req: Request, res: Response) => {
+  res.json({ publicKey: getVapidPublicKey(), enabled: isPushEnabled() });
+});
+
 router.use(requireAuth);
 
 // GET /api/notifications/stream — opens an SSE stream for the auth'd user.
@@ -45,6 +57,58 @@ router.get('/stream', (req: Request, res: Response) => {
     clearInterval(heartbeat);
     unregisterUserClient(req.userId, res);
   });
+});
+
+// ── Web Push subscription management ───────────────────────────────
+// (vapid-key registered above the requireAuth gate — public endpoint)
+//
+// POST /api/notifications/subscriptions
+// Body: { endpoint, keys: { p256dh, auth }, userAgent? }
+// Idempotent — `endpoint` is the natural unique key, so re-subscribing
+// from the same device just updates the row in place (re-issued keys,
+// fresh userAgent) instead of accumulating duplicates.
+router.post('/subscriptions', async (req: Request, res: Response) => {
+  const { endpoint, keys, userAgent } = req.body as {
+    endpoint?: string;
+    keys?: { p256dh?: string; auth?: string };
+    userAgent?: string;
+  };
+
+  if (!endpoint || typeof endpoint !== 'string' || endpoint.length > 2048) {
+    res.status(400).json({ error: 'endpoint is required (<=2048 chars)' });
+    return;
+  }
+  if (!keys?.p256dh || !keys?.auth) {
+    res.status(400).json({ error: 'keys.p256dh and keys.auth are required' });
+    return;
+  }
+  // Length-cap the UA so a hostile client can't push megabytes here.
+  const ua = typeof userAgent === 'string' ? userAgent.slice(0, 512) : null;
+
+  await prisma.pushSubscription.upsert({
+    where:  { endpoint },
+    create: { userId: req.userId, endpoint, p256dh: keys.p256dh, auth: keys.auth, userAgent: ua },
+    // Re-bind to this user if the endpoint was previously owned by a
+    // different account on the same device (e.g. logout → login as
+    // someone else). Refresh keys + UA either way.
+    update: { userId: req.userId, p256dh: keys.p256dh, auth: keys.auth, userAgent: ua },
+  });
+  res.status(204).end();
+});
+
+// DELETE /api/notifications/subscriptions
+// Body: { endpoint }  (the endpoint is the natural key on the client too)
+// Used by the frontend's "unsubscribe / turn off notifications" path.
+router.delete('/subscriptions', async (req: Request, res: Response) => {
+  const { endpoint } = req.body as { endpoint?: string };
+  if (!endpoint || typeof endpoint !== 'string') {
+    res.status(400).json({ error: 'endpoint is required' });
+    return;
+  }
+  // Scope to req.userId so user A can't unsubscribe user B's device
+  // by knowing the endpoint URL.
+  await prisma.pushSubscription.deleteMany({ where: { endpoint, userId: req.userId } });
+  res.status(204).end();
 });
 
 export default router;

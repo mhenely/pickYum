@@ -9,6 +9,7 @@
 
 import { Router, Request, Response } from 'express';
 import prisma from '../../lib/prisma';
+import { cacheRead, cacheKeyForUser } from '../../lib/serverCache';
 import {
   INSIGHT_WINDOW_DAYS,
   INSIGHTS_ALL_TIME_CAP_DAYS,
@@ -16,6 +17,14 @@ import {
   SPARKLINE_WEEKS,
   DAY_MS,
 } from '../../config/insights';
+
+// Insights payloads can be cached for ~60s without breaking UX. The
+// rollup is over completed history (UserAccepted rows) — users don't
+// typically look at insights immediately after accepting a meal, so
+// staleness of a single acceptance for up to a minute is invisible.
+// At our scale the per-user compute is 4 parallel Prisma queries +
+// JS aggregation totalling 100-300ms; cached reads are sub-5ms.
+const INSIGHTS_CACHE_TTL_S = 60;
 
 // Re-export so existing tests / docs that import this from the users
 // surface still work after the split.
@@ -78,8 +87,22 @@ function sparklineWindow(windowDays: number | undefined): {
 // GET /api/users/me/insights?since=week|month|year|all
 router.get('/me/insights', async (req: Request, res: Response) => {
   const userId = req.userId;
-
   const sinceParam = typeof req.query.since === 'string' ? req.query.since : 'all';
+
+  // Per-user-per-window cache key. Two users with the same window
+  // need separate entries (totally different data); the same user
+  // viewing different windows ('week' vs 'month') also needs
+  // separate entries.
+  const key = cacheKeyForUser('insights', userId as number, sinceParam);
+  const payload = await cacheRead(key, INSIGHTS_CACHE_TTL_S, () => computeInsights(userId as number, sinceParam));
+  res.json(payload);
+});
+
+// Extracted compute function so the route stays a thin cache wrapper.
+// All the previous handler logic (parallel fetches, single-pass rollup,
+// roll-ups, sparkline binning) lives here unchanged — only the
+// `res.json(...)` at the bottom became `return { ... }`.
+async function computeInsights(userId: number, sinceParam: string) {
   const windowDays = INSIGHT_WINDOW_DAYS[sinceParam];
   // Resolve the lower-bound timestamp:
   //   - Explicit windowDays ('week'/'month'/'year') → slide from now.
@@ -385,7 +408,7 @@ router.get('/me/insights', async (req: Request, res: Response) => {
   // indicator when no window is in effect, so we surface null in that case.
   const previousPeriodCount: number | null = windowDays ? (previousPeriodCountRaw ?? 0) : null;
 
-  res.json({
+  return {
     totalDecisions,
     distinctChosen,
     varietyScore,
@@ -400,7 +423,7 @@ router.get('/me/insights', async (req: Request, res: Response) => {
     oftenSkipped,
     neglectedFavorites,
     recent,
-  });
-});
+  };
+}
 
 export default router;

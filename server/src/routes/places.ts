@@ -4,6 +4,12 @@ import crypto from 'crypto';
 import { requireAuth } from '../middleware/auth';
 import redis from '../lib/redis';
 import { trackGoogleCall } from '../lib/apiUsage';
+import {
+  parseDietaryParam,
+  filterableSubset,
+  infoOnlyTags,
+  applyDietaryFilter,
+} from '../lib/dietaryFilters';
 import { logger } from '../lib/logger';
 import { mirrorPhotoFromCdnUrl, proxyMirroredPublicUrl } from '../lib/photoStorage';
 
@@ -459,6 +465,13 @@ function triggerBackgroundMirror(name: string, maxWidthPx: number, cdnUrl: strin
 // cache hits. cuisineType (when set) gets its own slot — a search for
 // Italian and a search for any-cuisine at the same coords must not
 // collide; tally them as different result sets.
+//
+// Dietary filters intentionally do NOT enter the cache key. Vegetarian
+// + non-vegetarian users querying the same area share the upstream
+// Google call (the response carries servesVegetarianFood for both),
+// and the post-cache filter trims per request. Pays a tiny JS cost
+// per response in exchange for not multiplying Google spend by the
+// dietary-tag dimension.
 function cacheKey(lat: number, lng: number, radius: number, cuisineType: string | null = null): string {
   return `${lat.toFixed(3)},${lng.toFixed(3)}::${radius}::${cuisineType ?? 'any'}`;
 }
@@ -501,6 +514,8 @@ const TEXT_FIELD_MASK = [
   'places.websiteUri',
   'places.takeout',
   'places.delivery',
+  // Dietary-filter hook (Phase E). See FIELD_MASK for the rationale.
+  'places.servesVegetarianFood',
   'places.businessStatus',
   'places.photos',
 ].join(',');
@@ -708,6 +723,14 @@ router.get('/text-search', async (req: Request, res: Response) => {
     bias = { lat: latRaw, lng: lngRaw, radius: radiusRaw };
   }
 
+  // Same dietary-filter shape as /nearby. The text-search cache is
+  // keyed on (q, bias) only — dietary stays out of the key so a
+  // veg-on user and a veg-off user searching "thai" share the
+  // upstream call, and the post-filter trims per request.
+  const dietary = parseDietaryParam(req.query.dietary);
+  const informationalDietary = infoOnlyTags(dietary);
+  const activeDietary        = filterableSubset(dietary);
+
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
     res.json({ restaurants: [], configured: false });
@@ -717,7 +740,13 @@ router.get('/text-search', async (req: Request, res: Response) => {
   const cached = await textGet(q, bias);
   if (cached) {
     trackGoogleCall(req, 'textSearch', { cacheHit: true });
-    res.json({ restaurants: cached.restaurants, configured: true });
+    const cachedRestaurants = cached.restaurants as Array<{ servesVegetarianFood?: boolean | null }>;
+    res.json({
+      restaurants: applyDietaryFilter(cachedRestaurants, activeDietary),
+      configured: true,
+      informationalDietary,
+      activeDietary,
+    });
     return;
   }
 
@@ -774,10 +803,23 @@ router.get('/text-search', async (req: Request, res: Response) => {
       phone:         (p.internationalPhoneNumber as string | undefined) ?? null,
       // Public website URL. null when missing; the modal hides the row.
       website:       (p.websiteUri as string | undefined) ?? null,
+      // Dietary-filter hook (Phase E). Tri-state: true / false / null.
+      // null = Google didn't tell us either way; the filter treats
+      // unknowns conservatively (drops them from vegetarian-required
+      // results) so an opt-in filter doesn't leak through every
+      // unflagged place.
+      servesVegetarianFood: typeof p.servesVegetarianFood === 'boolean' ? p.servesVegetarianFood : null,
     }));
 
   await textSet(q, bias, { restaurants });
-  res.json({ restaurants, configured: true });
+  // Cache is stored unfiltered — same rationale as /nearby. Post-
+  // filter the response to honor the caller's dietary param.
+  res.json({
+    restaurants: applyDietaryFilter(restaurants, activeDietary),
+    configured: true,
+    informationalDietary,
+    activeDietary,
+  });
 });
 
 // ── Fields to request — only pay for what we use ──────────────────────────
@@ -813,6 +855,8 @@ const FIELD_MASK = [
   'places.websiteUri',
   'places.takeout',
   'places.delivery',
+  // Dietary-filter hook (Phase E). See FIELD_MASK comment for SKU note.
+  'places.servesVegetarianFood',
   'places.businessStatus',
   'places.photos',
 ].join(',');
@@ -1098,6 +1142,8 @@ async function runNearbyFanOut(opts: {
         regularOpeningHours: extractRegularOpeningHours(p),
         phone:   (p.internationalPhoneNumber as string | undefined) ?? null,
         website: (p.websiteUri as string | undefined) ?? null,
+        // Dietary-filter hook (Phase E). See text-search projection above.
+        servesVegetarianFood: typeof p.servesVegetarianFood === 'boolean' ? p.servesVegetarianFood : null,
       };
     })
     .sort((a: any, b: any) => {
@@ -1118,7 +1164,7 @@ async function runNearbyFanOut(opts: {
   return entry;
 }
 
-// GET /api/places/nearby?address=<>&radiusMeters=<>&cuisineType=<>
+// GET /api/places/nearby?address=<>&radiusMeters=<>&cuisineType=<>&dietary=<csv>
 router.get('/nearby', async (req: Request, res: Response) => {
   const address = (req.query.address as string | undefined)?.trim();
   const radiusRaw = Number(req.query.radiusMeters);
@@ -1130,6 +1176,17 @@ router.get('/nearby', async (req: Request, res: Response) => {
   const cuisineType = cuisineTypeRaw && ALLOWED_CUISINE_TYPES.has(cuisineTypeRaw)
     ? cuisineTypeRaw
     : null;
+
+  // Dietary filter (Phase E). Comma-separated list of dietary tags.
+  // We honor the ones we can hard-filter on (vegetarian / vegan) and
+  // surface the rest as `informationalDietary` in the response so the
+  // client can render a "we don't filter for X" note. The post-filter
+  // runs against the cached unfiltered result set so a vegetarian
+  // search and a non-vegetarian search at the same coords share the
+  // upstream Google call.
+  const dietary = parseDietaryParam(req.query.dietary);
+  const informationalDietary = infoOnlyTags(dietary);
+  const activeDietary        = filterableSubset(dietary);
 
   if (!address) {
     res.status(400).json({ error: 'address is required' });
@@ -1231,12 +1288,22 @@ router.get('/nearby', async (req: Request, res: Response) => {
         logger.warn({ err: errMsg, key }, '[places] SWR background refresh failed');
       });
     }
+    // `cached.restaurants` is typed `unknown[]` in NearbyEntry to keep
+    // the cache module from re-declaring the place row shape; the cast
+    // narrows it to the PlaceLike contract `applyDietaryFilter`
+    // expects. Safe because the projection at line ~1088 now emits
+    // servesVegetarianFood, and older cached rows (pre-Phase-E) read
+    // as `undefined` which the filter treats as "fails the filter"
+    // when one is active — the conservative no-leak behavior.
+    const cachedRestaurants = cached.restaurants as Array<{ servesVegetarianFood?: boolean | null }>;
     res.json({
-      restaurants: cached.restaurants,
+      restaurants: applyDietaryFilter(cachedRestaurants, activeDietary),
       configured: true,
       resolvedAddress: cached.resolvedAddress,
       resolvedLat: cached.resolvedLat,
       resolvedLng: cached.resolvedLng,
+      informationalDietary,
+      activeDietary,
     });
     return;
   }
@@ -1259,12 +1326,15 @@ router.get('/nearby', async (req: Request, res: Response) => {
 
   try {
     const result = await inflight;
+    const restaurants = result.restaurants as Array<{ servesVegetarianFood?: boolean | null }>;
     res.json({
-      restaurants: result.restaurants,
+      restaurants: applyDietaryFilter(restaurants, activeDietary),
       configured: true,
       resolvedAddress: result.resolvedAddress,
       resolvedLat: result.resolvedLat,
       resolvedLng: result.resolvedLng,
+      informationalDietary,
+      activeDietary,
     });
   } catch (err: unknown) {
     const status = err instanceof NearbyFanOutError ? err.status : 502;

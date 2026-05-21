@@ -18,6 +18,7 @@ import favoritesRouter from './favorites';
 import collectionsRouter from './collections';
 import insightsRouter from './insights';
 import refreshRouter from './refresh';
+import usageRouter from './usage';
 
 const router = Router();
 router.use(requireAuth);
@@ -30,6 +31,7 @@ router.use(favoritesRouter);
 router.use(collectionsRouter);
 router.use(insightsRouter);
 router.use(refreshRouter);
+router.use(usageRouter);
 
 // Re-export the test/scaffolding hooks so callers that historically
 // imported them from `routes/users` continue to work.

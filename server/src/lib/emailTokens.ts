@@ -68,6 +68,30 @@ export async function issueToken(userId: number, purpose: EmailTokenPurpose): Pr
 }
 
 /**
+ * Validates a token without consuming it. Returns the user id on success.
+ * Use this when you need to look up the user (e.g. to fetch identity for
+ * password-strength validation) before deciding whether to consume.
+ *
+ * Reads share the same O(1) tokenLookup + bcrypt-verify path as consume —
+ * they just skip the atomic `updateMany`. A subsequent `consumeToken` is
+ * still required to mark the row used.
+ */
+export async function peekToken(raw: string, purpose: EmailTokenPurpose): Promise<number | null> {
+  if (typeof raw !== 'string' || raw.length < 20) return null;
+
+  const tokenLookup = lookupKey(raw);
+  const candidate = await prisma.emailToken.findUnique({
+    where: { tokenLookup },
+  });
+  if (!candidate) return null;
+  if (candidate.purpose !== purpose) return null;
+  if (candidate.usedAt) return null;
+  if (candidate.expiresAt <= new Date()) return null;
+  if (!await bcrypt.compare(raw, candidate.tokenHash)) return null;
+  return candidate.userId;
+}
+
+/**
  * Validates a token and consumes it (marks usedAt). Returns the user id on
  * success. Errors are intentionally generic to avoid leaking which step failed.
  *

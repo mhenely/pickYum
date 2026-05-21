@@ -14,6 +14,7 @@ import { api } from '../lib/api';
 import RouletteWheel from '../components/RouletteWheel';
 import CoinFlip from '../components/CoinFlip';
 import { SkeletonLine } from '../components/Skeleton';
+import ExternalActions from '../components/ExternalActions';
 import { placePhotoUrl } from '../lib/api';
 import InfoRow from '../components/InfoRow';
 import ScheduleModal from '../components/ScheduleModal';
@@ -639,6 +640,19 @@ const ResultView = ({ session, isHost, onAccept, onRedo, onReject }) => {
           )}
         </div>
       </div>
+
+      {/* Post-vote next-step affordances. The session snapshot only
+          carries name/type/price (intentionally lean — see
+          RestaurantSnapshot comment) so the only link that reliably
+          renders here is Reserve. Voters who want fuller info (web-
+          site / directions / delivery) can still click through to the
+          full restaurant detail elsewhere; the host gets the rich
+          ChosenCelebration overlay post-accept which has it all. */}
+      {winner && (
+        <div className="text-left">
+          <ExternalActions restaurant={winner} variant="compact" />
+        </div>
+      )}
 
       {session.scores && (
         <div className="text-left">

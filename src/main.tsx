@@ -34,6 +34,11 @@ const TripJoinPage        = lazy(() => import('./routes/TripJoinPage'));
 const InsightsPage        = lazy(() => import('./routes/InsightsPage'));
 const PrivacyPage         = lazy(() => import('./routes/PrivacyPage'));
 const TermsPage           = lazy(() => import('./routes/TermsPage'));
+// Admin dashboard for ops-level visibility into Google Places spend.
+// Backend gates on the `role='admin'` user column; frontend route is
+// open and surfaces a "not authorized" empty state when the API
+// returns 403, so the role can be toggled in the DB without redeploys.
+const AdminUsagePage      = lazy(() => import('./routes/AdminUsagePage'));
 
 const PageFallback = <div className="min-h-screen flex items-center justify-center text-gray-400">Loading…</div>;
 
@@ -96,6 +101,11 @@ const router = createBrowserRouter([
           // `trips/join/:token` must come first or it gets shadowed.
           { path: 'trips/join/:token', element: <Suspense fallback={PageFallback}><TripJoinPage /></Suspense> },
           { path: 'trips/:id',       element: <Suspense fallback={PageFallback}><TripDetailPage /></Suspense> },
+          // Admin-only dashboards. The route itself is unconditionally
+          // mounted; the page handles 403 from the backend by rendering
+          // a friendly "not authorized" state, so non-admins navigating
+          // here don't crash, they just see a closed-door message.
+          { path: 'admin/usage',     element: <Suspense fallback={PageFallback}><AdminUsagePage /></Suspense> },
         ],
       },
     ],

@@ -15,8 +15,30 @@ jest.mock('../../lib/userNotifications', () => ({
 // Side-effect-free Redis mock so the import chain doesn't try to connect.
 jest.mock('../../lib/redis', () => ({ __esModule: true, default: null }));
 
+// Mock prisma for subscription endpoints — the SSE stream handler
+// doesn't touch the DB, only the new /subscriptions endpoints do.
+jest.mock('../../lib/prisma', () => ({
+  __esModule: true,
+  default: {
+    pushSubscription: { upsert: jest.fn(), deleteMany: jest.fn() },
+  },
+}));
+
+// Mock webPush so importing the routes file doesn't try to read
+// VAPID env vars or initialize the web-push lib. Tests assert against
+// these mock returns directly.
+jest.mock('../../lib/webPush', () => ({
+  getVapidPublicKey: jest.fn(() => 'test-public-key'),
+  isPushEnabled:     jest.fn(() => true),
+}));
+
 import notificationsRouter from '../../routes/notifications';
 import { registerUserClient, unregisterUserClient } from '../../lib/userNotifications';
+import prisma from '../../lib/prisma';
+
+const mockPrisma = prisma as unknown as {
+  pushSubscription: { upsert: jest.Mock; deleteMany: jest.Mock };
+};
 
 const SECRET = process.env.JWT_SECRET!;
 const authCookie = (userId = 1) => `token=${jwt.sign({ userId }, SECRET)}`;
@@ -24,6 +46,7 @@ const authCookie = (userId = 1) => `token=${jwt.sign({ userId }, SECRET)}`;
 function buildApp() {
   const app = express();
   app.use(cookieParser());
+  app.use(express.json());
   app.use('/api/notifications', notificationsRouter);
   return app;
 }
@@ -63,11 +86,13 @@ describe('GET /api/notifications/stream — auth', () => {
 // invocation lets us assert against deterministic state.
 describe('GET /api/notifications/stream — handler behavior', () => {
   function getHandler() {
-    // The stream handler is the last layer registered on the sub-router.
-    // We pluck it out by walking the router stack rather than re-exporting.
-    type Layer = { route?: { stack: Array<{ handle: (req: Request, res: Response) => void }> } };
+    // Pluck the /stream handler out of the router stack. Used to be
+    // "first route layer" which broke when /vapid-key was added as a
+    // public endpoint before the requireAuth gate — explicit path
+    // match avoids future ordering issues.
+    type Layer = { route?: { path?: string; stack: Array<{ handle: (req: Request, res: Response) => void }> } };
     const layers = (notificationsRouter as unknown as { stack: Layer[] }).stack;
-    const streamLayer = layers.find((l) => l.route)!;
+    const streamLayer = layers.find((l) => l.route?.path === '/stream')!;
     return streamLayer.route!.stack[0].handle;
   }
 
@@ -148,5 +173,109 @@ describe('GET /api/notifications/stream — handler behavior', () => {
     (req as EventEmitter).emit('close');
 
     expect(unregisterUserClient).toHaveBeenCalledWith(42, res);
+  });
+});
+
+// ── VAPID key endpoint ───────────────────────────────────────────
+
+describe('GET /api/notifications/vapid-key', () => {
+  it('returns the public key + enabled flag (publicly accessible)', async () => {
+    // No auth cookie — vapid-key is intentionally open since the
+    // public key is by definition public information, and the client
+    // needs it before any subscribe handshake.
+    const res = await request(buildApp()).get('/api/notifications/vapid-key');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ publicKey: 'test-public-key', enabled: true });
+  });
+});
+
+// ── Subscribe / unsubscribe endpoints ────────────────────────────
+
+describe('POST /api/notifications/subscriptions', () => {
+  it('returns 401 with no auth cookie', async () => {
+    const res = await request(buildApp())
+      .post('/api/notifications/subscriptions')
+      .send({ endpoint: 'https://push.example/abc', keys: { p256dh: 'k', auth: 'a' } });
+    expect(res.status).toBe(401);
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it('upserts the subscription keyed by endpoint', async () => {
+    mockPrisma.pushSubscription.upsert.mockResolvedValue({});
+    const res = await request(buildApp())
+      .post('/api/notifications/subscriptions')
+      .set('Cookie', authCookie(7))
+      .send({
+        endpoint:  'https://push.example/abc',
+        keys:      { p256dh: 'public-key', auth: 'auth-secret' },
+        userAgent: 'TestBrowser/1.0',
+      });
+
+    expect(res.status).toBe(204);
+    expect(mockPrisma.pushSubscription.upsert).toHaveBeenCalledWith({
+      where:  { endpoint: 'https://push.example/abc' },
+      create: { userId: 7, endpoint: 'https://push.example/abc', p256dh: 'public-key', auth: 'auth-secret', userAgent: 'TestBrowser/1.0' },
+      update: { userId: 7, p256dh: 'public-key', auth: 'auth-secret', userAgent: 'TestBrowser/1.0' },
+    });
+  });
+
+  it('rejects an over-long endpoint (defense against payload abuse)', async () => {
+    const res = await request(buildApp())
+      .post('/api/notifications/subscriptions')
+      .set('Cookie', authCookie(7))
+      .send({ endpoint: 'x'.repeat(3000), keys: { p256dh: 'k', auth: 'a' } });
+    expect(res.status).toBe(400);
+    expect(mockPrisma.pushSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects when keys are missing', async () => {
+    const res = await request(buildApp())
+      .post('/api/notifications/subscriptions')
+      .set('Cookie', authCookie(7))
+      .send({ endpoint: 'https://push.example/abc' });
+    expect(res.status).toBe(400);
+  });
+
+  it('caps userAgent at 512 chars to prevent storage bloat', async () => {
+    mockPrisma.pushSubscription.upsert.mockResolvedValue({});
+    const longUa = 'x'.repeat(2000);
+    await request(buildApp())
+      .post('/api/notifications/subscriptions')
+      .set('Cookie', authCookie(7))
+      .send({ endpoint: 'https://push.example/abc', keys: { p256dh: 'k', auth: 'a' }, userAgent: longUa });
+
+    const call = mockPrisma.pushSubscription.upsert.mock.calls[0][0];
+    expect(call.create.userAgent.length).toBe(512);
+  });
+});
+
+describe('DELETE /api/notifications/subscriptions', () => {
+  it('returns 401 with no auth cookie', async () => {
+    const res = await request(buildApp())
+      .delete('/api/notifications/subscriptions')
+      .send({ endpoint: 'https://push.example/abc' });
+    expect(res.status).toBe(401);
+  });
+
+  it('deletes only subscriptions belonging to the requester', async () => {
+    mockPrisma.pushSubscription.deleteMany.mockResolvedValue({ count: 1 });
+    const res = await request(buildApp())
+      .delete('/api/notifications/subscriptions')
+      .set('Cookie', authCookie(7))
+      .send({ endpoint: 'https://push.example/abc' });
+    expect(res.status).toBe(204);
+    // The userId scope is the load-bearing part — without it, user A
+    // could unsubscribe user B's device just by knowing the endpoint.
+    expect(mockPrisma.pushSubscription.deleteMany).toHaveBeenCalledWith({
+      where: { endpoint: 'https://push.example/abc', userId: 7 },
+    });
+  });
+
+  it('rejects missing endpoint', async () => {
+    const res = await request(buildApp())
+      .delete('/api/notifications/subscriptions')
+      .set('Cookie', authCookie(7))
+      .send({});
+    expect(res.status).toBe(400);
   });
 });

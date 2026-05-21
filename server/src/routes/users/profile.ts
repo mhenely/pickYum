@@ -14,7 +14,7 @@ import prisma from '../../lib/prisma';
 import { avatarUpdateLimiter } from '../../middleware/rateLimits';
 import { validatePassword } from '../auth';
 import { issueToken } from '../../lib/emailTokens';
-import { sendEmail, verifyEmailTemplate } from '../../lib/email';
+import { sendEmail, verifyEmailTemplate, passwordChangedTemplate } from '../../lib/email';
 import { logger } from '../../lib/logger';
 import { logTaskFailure } from '../../lib/asyncSafety';
 import {
@@ -63,15 +63,20 @@ router.patch('/me', async (req: Request, res: Response) => {
 
   const wantsSensitiveChange = Boolean(email || password);
 
+  // Pulled outside the sensitive-change guard so password validation can use
+  // the user's identity (email + username) regardless of which fields change.
+  // Loaded once and reused below for the bcrypt compare and the post-change
+  // notification email.
+  const me = await prisma.user.findUnique({
+    where: { id: req.userId },
+    select: { passwordHash: true, email: true, username: true },
+  });
+
   if (wantsSensitiveChange) {
     if (typeof currentPassword !== 'string' || !currentPassword) {
       res.status(400).json({ error: 'currentPassword is required to change email or password' });
       return;
     }
-    const me = await prisma.user.findUnique({
-      where: { id: req.userId },
-      select: { passwordHash: true },
-    });
     if (!me?.passwordHash) {
       // OAuth-only accounts have no password — they can't re-authenticate this
       // way. Direct them to set one first (via the reset flow) before changing
@@ -88,7 +93,12 @@ router.patch('/me', async (req: Request, res: Response) => {
   }
 
   if (password) {
-    const pwError = validatePassword(password);
+    // Strength check uses the NEW email if the user is changing both, since
+    // that's what they'd be attacked under going forward.
+    const pwError = validatePassword(password, {
+      email: email || me?.email,
+      username: username || me?.username,
+    });
     if (pwError) { res.status(400).json({ error: pwError }); return; }
   }
 
@@ -148,6 +158,24 @@ router.patch('/me', async (req: Request, res: Response) => {
         await sendEmail({ to: user.email, ...verifyEmailTemplate(url) });
       } catch (err) {
         logger.error({ err, userId: user.id }, 'failed to send verification email after email change');
+      }
+    })();
+  }
+
+  // Notify the OLD address whenever the password changed so a session
+  // hijacker can't quietly rotate credentials. `me.email` is the pre-update
+  // value — that's intentional. The reset link in the body lets the real
+  // owner regain control fast if it wasn't them. Best-effort send; logged
+  // on failure but doesn't block the response.
+  if (password && me?.email) {
+    const oldEmail = me.email;
+    (async () => {
+      try {
+        const raw = await issueToken(user.id, 'PASSWORD_RESET');
+        const url = `${CLIENT_URL}/reset-password?token=${encodeURIComponent(raw)}`;
+        await sendEmail({ to: oldEmail, ...passwordChangedTemplate(url) });
+      } catch (err) {
+        logger.error({ err, userId: user.id }, 'failed to send password-changed notification');
       }
     })();
   }

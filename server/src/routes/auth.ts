@@ -9,10 +9,11 @@ import { Strategy as FacebookStrategy } from 'passport-facebook';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { sendEmail, verifyEmailTemplate, passwordResetTemplate } from '../lib/email';
-import { issueToken, consumeToken } from '../lib/emailTokens';
+import { issueToken, consumeToken, peekToken } from '../lib/emailTokens';
 import { ensureDefaultFavoriteList } from '../lib/favoriteLists';
 import { logger } from '../lib/logger';
 import { audit } from '../lib/audit';
+import { checkPasswordStrength } from '../lib/passwordStrength';
 // Auth policy constants — see server/src/config/auth.ts for the per-value
 // rationale. Centralizing them makes per-environment overrides trivial
 // (a future env-var pass swaps the imports for env-aware defaults) and
@@ -61,16 +62,22 @@ const emailLimiter = rateLimit({
 });
 
 // Minimum-password validation — uses MIN_PASSWORD_LEN from config/auth.ts.
-// The rule itself ("≥N chars + at least one letter + one number") stays
-// here because it's specific to the registration flow; the threshold is
-// the only knob.
-export function validatePassword(pw: unknown): string | null {
+// Structural rules ("≥N chars + at least one letter + one number") stay
+// here; the additional strength gate (common-password blocklist, identity
+// similarity, sequence patterns) lives in lib/passwordStrength.ts so the
+// blocklist data stays out of the route file.
+//
+// `identity` is optional context used to reject passwords containing the
+// user's email local-part or username. Register / reset / change-password
+// callers pass it when they have it; the basic structural rules apply
+// even when it's absent.
+export function validatePassword(pw: unknown, identity: { email?: string; username?: string } = {}): string | null {
   if (typeof pw !== 'string') return 'password is required';
   if (pw.length < MIN_PASSWORD_LEN) return `password must be at least ${MIN_PASSWORD_LEN} characters`;
   if (!/[A-Za-z]/.test(pw) || !/\d/.test(pw)) {
     return 'password must contain at least one letter and one number';
   }
-  return null;
+  return checkPasswordStrength(pw, identity);
 }
 
 // ── Username generation ───────────────────────────────────────
@@ -249,7 +256,7 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
     res.status(400).json({ error: `username must be 1-${MAX_USERNAME_LEN} characters` });
     return;
   }
-  const pwError = validatePassword(password);
+  const pwError = validatePassword(password, { email, username });
   if (pwError) {
     res.status(400).json({ error: pwError });
     return;
@@ -386,7 +393,20 @@ router.post('/reset-password', authLimiter, async (req: Request, res: Response) 
     res.status(400).json({ error: 'Token is required' });
     return;
   }
-  const pwError = validatePassword(password);
+  // Peek-then-consume so a weak-password rejection doesn't burn the user's
+  // one-shot reset token. We look up the user (read-only), validate with
+  // their identity context, and only mark the token used once the password
+  // passes. The actual consume below also re-checks the same row.
+  const peekedUserId = await peekToken(token, 'PASSWORD_RESET');
+  if (!peekedUserId) {
+    res.status(400).json({ error: 'Invalid or expired reset link' });
+    return;
+  }
+  const identity = await prisma.user.findUnique({
+    where: { id: peekedUserId },
+    select: { email: true, username: true },
+  });
+  const pwError = validatePassword(password, identity ?? {});
   if (pwError) {
     res.status(400).json({ error: pwError });
     return;
@@ -394,6 +414,8 @@ router.post('/reset-password', authLimiter, async (req: Request, res: Response) 
 
   const userId = await consumeToken(token, 'PASSWORD_RESET');
   if (!userId) {
+    // Race window between peek and consume — token went stale or was used
+    // elsewhere. Same generic message either way.
     res.status(400).json({ error: 'Invalid or expired reset link' });
     return;
   }

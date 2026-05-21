@@ -22,6 +22,7 @@ jest.mock('bcryptjs', () => ({
 jest.mock('../../lib/emailTokens', () => ({
   issueToken:   jest.fn(),
   consumeToken: jest.fn(),
+  peekToken:    jest.fn(),
 }));
 
 // audit + email writes are fire-and-forget side effects on the auth-recovery
@@ -332,6 +333,7 @@ describe('GET /api/auth/me', () => {
 const tokensMock = require('../../lib/emailTokens') as {
   issueToken:   jest.Mock;
   consumeToken: jest.Mock;
+  peekToken:    jest.Mock;
 };
 
 describe('POST /api/auth/verify-email', () => {
@@ -405,9 +407,16 @@ describe('POST /api/auth/reset-password', () => {
     jest.clearAllMocks();
     (mockPrisma.user.update as jest.Mock).mockResolvedValue({ id: 1 });
     (mockBcrypt.hash as jest.Mock).mockResolvedValue('$2a$12$newhash');
+    // Default identity lookup — return a benign user so the strength gate
+    // doesn't flag the test password as containing the email/username.
+    // Individual tests can override via mockResolvedValueOnce.
+    (mockPrisma.user.findUnique as jest.Mock).mockResolvedValue({
+      email: 'someone@example.com', username: 'someone',
+    });
   });
 
   it('hashes the new password, signs the user in, and audits the reset', async () => {
+    tokensMock.peekToken.mockResolvedValue(1);
     tokensMock.consumeToken.mockResolvedValue(1);
 
     const res = await request(buildApp())
@@ -434,7 +443,9 @@ describe('POST /api/auth/reset-password', () => {
   });
 
   it('returns 400 when the token is invalid', async () => {
-    tokensMock.consumeToken.mockResolvedValue(null);
+    // peekToken short-circuits first — no consumeToken call needed for the
+    // invalid-token branch since peek now gates the rest of the flow.
+    tokensMock.peekToken.mockResolvedValue(null);
 
     const res = await request(buildApp())
       .post('/api/auth/reset-password')
@@ -446,9 +457,13 @@ describe('POST /api/auth/reset-password', () => {
   });
 
   it('rejects a reused token on the second submission', async () => {
-    tokensMock.consumeToken
+    // First call: peek + consume both succeed. Second call: peek says the
+    // token's already been used, so we never reach consume. Either way
+    // the second submission gets a 400.
+    tokensMock.peekToken
       .mockResolvedValueOnce(1)
       .mockResolvedValueOnce(null);
+    tokensMock.consumeToken.mockResolvedValueOnce(1);
 
     const a = await request(buildApp())
       .post('/api/auth/reset-password')

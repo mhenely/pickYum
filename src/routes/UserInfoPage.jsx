@@ -1,5 +1,11 @@
 import { useDispatch, useSelector } from "react-redux";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import {
+  getNotificationPermission,
+  getCurrentSubscription,
+  subscribeToPush,
+  unsubscribeFromPush,
+} from '../lib/pushNotifications';
 
 import {
   setUserData,
@@ -73,6 +79,26 @@ const UserInfoPage = () => {
 
   const [usernameSaving, setUsernameSaving] = useState(false);
   const [usernameSuccess, setUsernameSuccess] = useState(false);
+
+  // Change-password form — collapsed by default to keep the Profile section
+  // visually quiet for the 99% of sessions that don't touch credentials.
+  const [pwOpen,            setPwOpen]            = useState(false);
+  const [pwCurrent,         setPwCurrent]         = useState('');
+  const [pwNew,             setPwNew]             = useState('');
+  const [pwConfirm,         setPwConfirm]         = useState('');
+  const [pwError,           setPwError]           = useState('');
+  const [pwSuccess,         setPwSuccess]         = useState(false);
+  const [pwSaving,          setPwSaving]          = useState(false);
+
+  // Change-email form — same collapse pattern. Submitting flips
+  // emailVerified server-side and fires a fresh verification link to
+  // the new address; the success banner relays that.
+  const [emailOpen,        setEmailOpen]         = useState(false);
+  const [emailNew,         setEmailNew]          = useState('');
+  const [emailCurrent,     setEmailCurrent]      = useState('');
+  const [emailError,       setEmailError]        = useState('');
+  const [emailSuccess,     setEmailSuccess]      = useState('');
+  const [emailSaving,      setEmailSaving]       = useState(false);
 
   // Avatar — source of truth lives in auth.user (populated from /api/auth/me
   // on session restore). Local state just covers the in-flight upload + the
@@ -157,6 +183,52 @@ const UserInfoPage = () => {
     persistDietaryTags(dietaryTags.filter((x) => x !== t));
   };
 
+  // Push notifications — Web Push subscription state for THIS device.
+  // 'unknown' = haven't yet looked; once we have, one of:
+  //   'subscribed'   — user is opted in on this device
+  //   'unsubscribed' — supported but not opted in (default for new users)
+  //   'denied'       — user clicked Block in the browser prompt; only
+  //                    recoverable by re-permissioning in browser settings
+  //   'unsupported'  — browser doesn't ship Web Push (Safari < 16.4 non-PWA)
+  //   'disabled'     — server doesn't have VAPID keys configured
+  const [pushState, setPushState]   = useState('unknown');
+  const [pushSaving, setPushSaving] = useState(false);
+  const [pushError,  setPushError]  = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const init = async () => {
+      const perm = getNotificationPermission();
+      if (perm === 'unsupported') { if (!cancelled) setPushState('unsupported'); return; }
+      if (perm === 'denied')      { if (!cancelled) setPushState('denied');      return; }
+      const existing = await getCurrentSubscription();
+      if (cancelled) return;
+      setPushState(existing ? 'subscribed' : 'unsubscribed');
+    };
+    init();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleEnablePush = async () => {
+    setPushError(''); setPushSaving(true);
+    const result = await subscribeToPush();
+    setPushSaving(false);
+    if (result.ok) { setPushState('subscribed'); return; }
+    switch (result.reason) {
+      case 'permission-denied': setPushState('denied'); break;
+      case 'no-vapid-key':      setPushState('disabled'); setPushError('Push notifications aren\'t configured on the server yet.'); break;
+      case 'unsupported':       setPushState('unsupported'); break;
+      default:                  setPushError('Couldn\'t enable notifications. Please try again.');
+    }
+  };
+
+  const handleDisablePush = async () => {
+    setPushError(''); setPushSaving(true);
+    await unsubscribeFromPush();
+    setPushSaving(false);
+    setPushState('unsubscribed');
+  };
+
   // Address book — replaces the single defaultAddress field. UI state
   // covers the "add new" inline form, the per-row inline-edit form, and
   // a small toast-style success indicator. Persistent address list lives
@@ -231,6 +303,73 @@ const UserInfoPage = () => {
       setUsernameError(err.message ?? 'Could not update username.');
     } finally {
       setUsernameSaving(false);
+    }
+  };
+
+  const resetPwForm = () => {
+    setPwOpen(false);
+    setPwCurrent('');
+    setPwNew('');
+    setPwConfirm('');
+    setPwError('');
+  };
+
+  const handlePasswordSubmit = async (e) => {
+    e.preventDefault();
+    setPwError('');
+    setPwSuccess(false);
+    if (!pwCurrent || !pwNew) { setPwError('Fill in both password fields.'); return; }
+    if (pwNew !== pwConfirm)  { setPwError('New passwords do not match.');    return; }
+    if (pwNew === pwCurrent)  { setPwError('New password must be different.'); return; }
+    setPwSaving(true);
+    try {
+      await api.users.updateProfile({ password: pwNew, currentPassword: pwCurrent });
+      setPwCurrent(''); setPwNew(''); setPwConfirm('');
+      setPwOpen(false);
+      setPwSuccess(true);
+      setTimeout(() => setPwSuccess(false), 4000);
+    } catch (err) {
+      setPwError(err?.message ?? 'Could not update password.');
+    } finally {
+      setPwSaving(false);
+    }
+  };
+
+  const resetEmailForm = () => {
+    setEmailOpen(false);
+    setEmailNew('');
+    setEmailCurrent('');
+    setEmailError('');
+  };
+
+  const handleEmailSubmit = async (e) => {
+    e.preventDefault();
+    setEmailError('');
+    setEmailSuccess('');
+    const trimmed = emailNew.trim().toLowerCase();
+    if (!trimmed || !emailCurrent) { setEmailError('Fill in both fields.'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      setEmailError('Enter a valid email address.');
+      return;
+    }
+    if (trimmed === (userInfo.email || '').toLowerCase()) {
+      setEmailError('That\'s already your current email.');
+      return;
+    }
+    setEmailSaving(true);
+    try {
+      const { user } = await api.users.updateProfile({ email: trimmed, currentPassword: emailCurrent });
+      // Source-of-truth updates: userInfoSlice for downstream displays,
+      // authSlice so the navbar/etc. show the new email.
+      dispatch(setUserData({ ...userInfo, id: user.id, email: user.email, username: user.username }));
+      dispatch(patchAuthUser({ email: user.email, emailVerified: false }));
+      setEmailNew(''); setEmailCurrent('');
+      setEmailOpen(false);
+      setEmailSuccess(`Verification link sent to ${user.email}. Check your inbox to confirm the change.`);
+    } catch (err) {
+      setEmailError(err?.message ?? 'Could not update email.');
+    } finally {
+      setEmailSaving(false);
     }
   };
 
@@ -429,6 +568,182 @@ const UserInfoPage = () => {
             </div>
           </form>
 
+          {/* Account security — collapsed sections for email + password
+              changes. Hidden behind toggles so the Profile area stays
+              focused on the username form (the daily-driver edit) and
+              the credential flows only appear when actively used.
+              Both require re-entering the current password server-side. */}
+          <div className="border-b border-gray-900/10 pb-8">
+            <h2 className="text-base font-semibold leading-7 text-gray-900">Account security</h2>
+            <p className="mt-1 text-sm leading-6 text-gray-600">
+              Change the email or password you use to sign in.
+            </p>
+
+            {/* Current email + change-email toggle */}
+            <div className="mt-6">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900">Email</p>
+                  <p className="text-sm text-gray-500 break-all">{userInfo.email || '—'}</p>
+                </div>
+                {!emailOpen && (
+                  <button
+                    type="button"
+                    onClick={() => { setEmailOpen(true); setEmailSuccess(''); }}
+                    className="text-sm font-semibold text-orange-600 hover:text-orange-700"
+                  >
+                    Change email
+                  </button>
+                )}
+              </div>
+              {emailSuccess && (
+                <p className="mt-2 text-xs text-green-600">{emailSuccess}</p>
+              )}
+
+              {emailOpen && (
+                <form onSubmit={handleEmailSubmit} className="mt-4 flex flex-col gap-3">
+                  <div>
+                    <label htmlFor="email-new" className="block text-sm font-medium text-gray-900 mb-1">
+                      New email
+                    </label>
+                    <input
+                      id="email-new"
+                      type="email"
+                      autoComplete="email"
+                      value={emailNew}
+                      onChange={(e) => { setEmailNew(e.target.value); setEmailError(''); }}
+                      placeholder="you@example.com"
+                      className="block w-full rounded-md border-0 py-2 px-3 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-orange-500 sm:text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="email-current-pw" className="block text-sm font-medium text-gray-900 mb-1">
+                      Current password
+                    </label>
+                    <input
+                      id="email-current-pw"
+                      type="password"
+                      autoComplete="current-password"
+                      value={emailCurrent}
+                      onChange={(e) => { setEmailCurrent(e.target.value); setEmailError(''); }}
+                      placeholder="••••••••"
+                      className="block w-full rounded-md border-0 py-2 px-3 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-orange-500 sm:text-sm"
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    We&apos;ll send a verification link to the new address. You stay signed in.
+                  </p>
+                  {emailError && <p className="text-xs text-red-500">{emailError}</p>}
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="submit"
+                      disabled={emailSaving || !emailNew.trim() || !emailCurrent}
+                      className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {emailSaving ? 'Saving…' : 'Update email'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={resetEmailForm}
+                      className="text-sm font-medium text-gray-600 hover:text-gray-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+
+            {/* Password row + change-password toggle */}
+            <div className="mt-8 border-t border-gray-100 pt-6">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <p className="text-sm font-medium text-gray-900">Password</p>
+                  <p className="text-sm text-gray-500">Last updated when you registered or reset it.</p>
+                </div>
+                {!pwOpen && (
+                  <button
+                    type="button"
+                    onClick={() => { setPwOpen(true); setPwSuccess(false); }}
+                    className="text-sm font-semibold text-orange-600 hover:text-orange-700"
+                  >
+                    Change password
+                  </button>
+                )}
+              </div>
+              {pwSuccess && (
+                <p className="mt-2 text-xs text-green-600">Password updated. We sent a confirmation to your email.</p>
+              )}
+
+              {pwOpen && (
+                <form onSubmit={handlePasswordSubmit} className="mt-4 flex flex-col gap-3">
+                  <div>
+                    <label htmlFor="pw-current" className="block text-sm font-medium text-gray-900 mb-1">
+                      Current password
+                    </label>
+                    <input
+                      id="pw-current"
+                      type="password"
+                      autoComplete="current-password"
+                      value={pwCurrent}
+                      onChange={(e) => { setPwCurrent(e.target.value); setPwError(''); }}
+                      placeholder="••••••••"
+                      className="block w-full rounded-md border-0 py-2 px-3 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-orange-500 sm:text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="pw-new" className="block text-sm font-medium text-gray-900 mb-1">
+                      New password
+                    </label>
+                    <input
+                      id="pw-new"
+                      type="password"
+                      autoComplete="new-password"
+                      value={pwNew}
+                      onChange={(e) => { setPwNew(e.target.value); setPwError(''); }}
+                      placeholder="••••••••"
+                      className="block w-full rounded-md border-0 py-2 px-3 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-orange-500 sm:text-sm"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      At least 8 characters, one letter and one number. Avoid common or guessable words.
+                    </p>
+                  </div>
+                  <div>
+                    <label htmlFor="pw-confirm" className="block text-sm font-medium text-gray-900 mb-1">
+                      Confirm new password
+                    </label>
+                    <input
+                      id="pw-confirm"
+                      type="password"
+                      autoComplete="new-password"
+                      value={pwConfirm}
+                      onChange={(e) => { setPwConfirm(e.target.value); setPwError(''); }}
+                      placeholder="••••••••"
+                      className="block w-full rounded-md border-0 py-2 px-3 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-orange-500 sm:text-sm"
+                    />
+                  </div>
+                  {pwError && <p className="text-xs text-red-500">{pwError}</p>}
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="submit"
+                      disabled={pwSaving || !pwCurrent || !pwNew || !pwConfirm}
+                      className="rounded-md bg-orange-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {pwSaving ? 'Saving…' : 'Update password'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={resetPwForm}
+                      className="text-sm font-medium text-gray-600 hover:text-gray-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+
           {/* Dietary tags — surfaced in group + trip member rows so meal
               planners can see restrictions at a glance. Free-form, but the
               recommended-set chips below cover the common cases. */}
@@ -505,6 +820,74 @@ const UserInfoPage = () => {
             {dietaryTags.length >= 10 && !tagsError && (
               <p className="mt-2 text-xs text-gray-400">You've reached the 10-tag limit.</p>
             )}
+          </div>
+
+          {/* Push notifications — per-device opt-in. Browsers gate the
+              permission prompt on a user gesture so we surface a
+              real button instead of asking on app load. Subscription
+              is scoped to this device; the user has to opt-in
+              separately on a phone vs laptop. Falls back to a
+              disabled state on browsers/situations that can't
+              support push (Safari < 16.4 non-PWA, missing VAPID
+              keys on the server). */}
+          <div className="border-b border-gray-900/10 pb-8">
+            <h2 className="text-base font-semibold leading-7 text-gray-900">Push notifications</h2>
+            <p className="mt-1 text-sm leading-6 text-gray-600">
+              Get a browser notification on this device when friends invite you to a group, a trip vote opens, or someone recommends a spot.
+            </p>
+
+            <div className="mt-4 flex items-center gap-3 flex-wrap">
+              {pushState === 'subscribed' && (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                    ✓ Enabled on this device
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleDisablePush}
+                    disabled={pushSaving}
+                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                  >
+                    {pushSaving ? 'Turning off…' : 'Turn off on this device'}
+                  </button>
+                </>
+              )}
+
+              {pushState === 'unsubscribed' && (
+                <button
+                  type="button"
+                  onClick={handleEnablePush}
+                  disabled={pushSaving}
+                  className="rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white shadow-brand-sm hover:from-orange-400 hover:to-red-400 disabled:opacity-50 transition-all"
+                >
+                  {pushSaving ? 'Enabling…' : '🔔 Enable notifications'}
+                </button>
+              )}
+
+              {pushState === 'denied' && (
+                <p className="text-xs text-gray-500">
+                  Browser notifications are blocked for this site. Re-enable them in your browser's site settings to opt in.
+                </p>
+              )}
+
+              {pushState === 'unsupported' && (
+                <p className="text-xs text-gray-500">
+                  This browser doesn't support web push notifications. Try Chrome, Edge, Firefox, or Safari 16.4+ (added to home screen on iOS).
+                </p>
+              )}
+
+              {pushState === 'disabled' && (
+                <p className="text-xs text-gray-500">
+                  Push notifications aren't configured on the server yet — check back later.
+                </p>
+              )}
+
+              {pushState === 'unknown' && (
+                <span className="text-xs text-gray-400">Checking notification status…</span>
+              )}
+            </div>
+
+            {pushError && <p className="mt-2 text-xs text-red-500">{pushError}</p>}
           </div>
 
           {/* Address book — replaces the older single "Default search

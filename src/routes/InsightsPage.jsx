@@ -16,7 +16,12 @@ const METHOD_LABELS = {
   flip:     '🪙 Coin flip',
   spin:     '🎰 Roulette',
   vote:     '🗳 Group vote',
-  surprise: '🎲 Surprise me',
+  // 'surprise' is the persisted chooseMethod for any pick made without
+  // animation — the pre-Phase-D "Surprise Me" button used it, and the
+  // Phase-D "skip the spin" + 1-option "Pick this one" affordances
+  // continue to. Label kept neutral so it accurately describes what
+  // the user did regardless of which UI verb produced it.
+  surprise: '🎲 Quick pick',
   direct:   '👉 Direct pick',
   unknown:  '— Legacy',
 };

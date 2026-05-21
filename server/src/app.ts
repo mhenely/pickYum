@@ -26,6 +26,7 @@ import tripRoutes from './routes/trips';
 import healthRoutes from './routes/health';
 import flagsRoutes from './routes/flags';
 import notificationsRoutes from './routes/notifications';
+import adminRoutes from './routes/admin';
 
 export function createApp() {
   const app = express();
@@ -81,6 +82,7 @@ export function createApp() {
   app.use('/api/health', healthRoutes);
   app.use('/api/flags',  flagsRoutes);
   app.use('/api/notifications', notificationsRoutes);
+  app.use('/api/admin', adminRoutes);
 
   // E2E test hooks — mounted ONLY when the env gate is set. Provides
   // destructive endpoints (reset / unlock test users) that have no

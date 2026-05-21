@@ -11,6 +11,7 @@
 import type { Response } from 'express';
 import redis from './redis';
 import { logger } from './logger';
+import { sendPushToUser, type PushPayload } from './webPush';
 
 const USER_SSE_CHANNEL = 'pickyum:user-notifications';
 
@@ -78,9 +79,38 @@ if (redis) {
   ).catch((err) => logger.error({ err }, 'user-notifications subscriber failed to connect'));
 }
 
+// Generic push payload per notification reason. Web push payloads are
+// intentionally lean — the user clicks through to the URL and reads
+// the actual details in-app. Personalized text (who invited, what
+// group name) would need notifyUser to take a richer signature;
+// keeping it generic for v1 means every existing call site fires push
+// without modification.
+function buildPushPayload(reason: UserNotificationReason): PushPayload {
+  switch (reason) {
+    case 'group-invite':
+      return { title: 'New group invite', body: 'Someone invited you to a pickYum group.',  url: '/socials', tag: 'group-invite' };
+    case 'trip-invite':
+      return { title: 'New trip invite',  body: 'Someone invited you to plan a trip.',       url: '/trips',   tag: 'trip-invite' };
+    case 'meal-participant':
+      return { title: 'Added to a meal',  body: 'You\'ve been added to a trip meal.',         url: '/trips',   tag: 'meal-participant' };
+    case 'friend-request':
+      return { title: 'New friend request', body: 'Someone sent you a friend request.',       url: '/socials', tag: 'friend-request' };
+    case 'vote-result':
+      return { title: 'Vote concluded',   body: 'A group decided on tonight\'s pick.',        url: '/socials', tag: 'vote-result' };
+  }
+}
+
 // Public publisher. Fire-and-forget — failures log but don't propagate to
 // the request handler. The downstream client will eventually pick up the
 // invite via the 60s poll fallback, so a notification miss isn't fatal.
+//
+// Dual delivery (Phase G.3):
+//   1. In-app SSE refresh ping — same UX as before. Drives the navbar
+//      badge update for users with the tab open.
+//   2. Web push — reaches users with the tab CLOSED. Goes to every
+//      device the user has opted in on. No-op when VAPID isn't
+//      configured (sendPushToUser returns 0 silently).
+// Both paths are best-effort; failures on either don't impact the other.
 export function notifyUser(userId: number, reason: UserNotificationReason): void {
   const frame = buildRefreshFrame(reason);
   if (redis && redis.status === 'ready') {
@@ -91,6 +121,15 @@ export function notifyUser(userId: number, reason: UserNotificationReason): void
   } else {
     writeFrameToLocalUserClients(userId, frame);
   }
+
+  // Fire web push in parallel — independent of the SSE path so a push
+  // service hiccup doesn't affect the in-app notification (and vice
+  // versa). Errors are already logged inside sendPushToUser; we
+  // attach a catch here so the floating promise can't surface as an
+  // unhandledRejection on Node 15+.
+  sendPushToUser(userId, buildPushPayload(reason)).catch((err) => {
+    logger.debug({ err, userId, reason }, 'sendPushToUser failed (non-fatal)');
+  });
 }
 
 // Cleanup helper for graceful shutdown. Closes every open SSE connection

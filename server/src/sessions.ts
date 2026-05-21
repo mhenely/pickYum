@@ -125,8 +125,17 @@ export function redactForClient(session: GroupSession): ClientSession {
 
 const memStore = new Map<string, GroupSession>();
 
+// Session TTL: the window of inactivity before Redis evicts the session.
+// Default 24h is generous on purpose — group decisions can span a full
+// day (host opens voting at lunch, members vote sporadically, host
+// closes after dinner) and trip-meal voting often spans multiple days.
+// `getSession` extends the TTL on every read (see below), so an active
+// session never expires while anyone is watching. The TTL only matters
+// once nobody has touched the session in `SESSION_TTL_HOURS` straight.
+//
+// Override via env when running short-lived dev sessions or load tests.
 function getTtlMs(): number {
-  return (parseInt(process.env.SESSION_TTL_HOURS ?? '4', 10) || 4) * 60 * 60 * 1000;
+  return (parseInt(process.env.SESSION_TTL_HOURS ?? '24', 10) || 24) * 60 * 60 * 1000;
 }
 
 // ── SSE client registry (per-instance, in-memory) ─────────────
@@ -276,7 +285,22 @@ export function generateVoterToken(): string {
 export async function getSession(id: string): Promise<GroupSession | undefined> {
   const key = id.toLowerCase();
   if (redis && redis.status === 'ready') {
-    const raw = await redis.get(`session:${key}`);
+    // Auto-extend TTL on every read so an active session never expires
+    // while anyone is interacting with it. Without this, a session that
+    // got few writes after start-voting (e.g. host kicked off a vote,
+    // then nobody touched it for 4+ hours before coming back to accept
+    // the result) would silently expire mid-flow and the host's
+    // accept-result would fail with "session expired."
+    //
+    // Pipelined so the GET + PEXPIRE land in one round-trip — same
+    // wire latency as the original GET, just with the side effect of
+    // resetting the eviction clock to the next TTL window.
+    const [getResult] = await redis.pipeline()
+      .get(`session:${key}`)
+      .pexpire(`session:${key}`, getTtlMs())
+      .exec() ?? [];
+    // pipeline().exec() returns [error, result] tuples per command
+    const raw = getResult?.[1] as string | null | undefined;
     return raw ? (JSON.parse(raw) as GroupSession) : undefined;
   }
   return memStore.get(key);

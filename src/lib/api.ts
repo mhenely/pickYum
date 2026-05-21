@@ -832,18 +832,30 @@ export const api = {
     // must match one of the CUISINE_OPTIONS values in
     // src/utils/cuisineTypes.js — anything else is dropped server-
     // side (silently falls back to the fan-out).
-    nearby: (address: string, radiusMeters: number, cuisineType?: string | null) => {
+    // `dietary` (optional) is a list of dietary tags. The server hard-
+    // filters on the ones it can act on (vegetarian, vegan) and surfaces
+    // the rest as `informationalDietary` in the response so the client
+    // can render a "we don't filter for X" note next to results.
+    nearby: (
+      address: string,
+      radiusMeters: number,
+      cuisineType?: string | null,
+      dietary?: string[] | null,
+    ) => {
       const params = new URLSearchParams({
         address,
         radiusMeters: String(radiusMeters),
       });
       if (cuisineType) params.set('cuisineType', cuisineType);
+      if (dietary && dietary.length > 0) params.set('dietary', dietary.join(','));
       return request<{
         restaurants: PlacesRestaurant[];
         configured: boolean;
         resolvedAddress?: string;
         resolvedLat?: number;
         resolvedLng?: number;
+        informationalDietary?: string[];
+        activeDietary?: string[];
       }>(`/api/places/nearby?${params.toString()}`);
     },
     // Optional bias triple anchors text-search results to a geographic
@@ -852,6 +864,7 @@ export const api = {
     search: (
       q: string,
       bias?: { lat: number; lng: number; radius: number },
+      dietary?: string[] | null,
     ) => {
       const params = new URLSearchParams({ q });
       if (bias && Number.isFinite(bias.lat) && Number.isFinite(bias.lng) && Number.isFinite(bias.radius)) {
@@ -859,9 +872,13 @@ export const api = {
         params.set('lng',    String(bias.lng));
         params.set('radius', String(bias.radius));
       }
-      return request<{ restaurants: PlacesRestaurant[]; configured: boolean }>(
-        `/api/places/text-search?${params.toString()}`,
-      );
+      if (dietary && dietary.length > 0) params.set('dietary', dietary.join(','));
+      return request<{
+        restaurants: PlacesRestaurant[];
+        configured: boolean;
+        informationalDietary?: string[];
+        activeDietary?: string[];
+      }>(`/api/places/text-search?${params.toString()}`);
     },
   },
   trips: {

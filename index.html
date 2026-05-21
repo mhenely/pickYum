@@ -3,6 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+
+    <!-- PWA install support. Web App Manifest powers the "Install" prompt
+         in Chrome/Edge and the rich Add-to-Home-Screen card in Safari
+         16.4+. Icons referenced from the manifest live in /public — see
+         PWA_ICONS_README in there for generation steps.
+         apple-touch-icon: Safari uses THIS, not the manifest icons, for
+         the home-screen tile. Needs PNG, 180x180 recommended.
+         apple-mobile-web-app-capable + status-bar-style: when installed
+         on iOS, the app runs full-screen without Safari's chrome.
+         theme-color: the OS uses it for the address bar / task switcher
+         tint — orange-500 to match the brand. -->
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="pickYum" />
+    <meta name="theme-color" content="#f97316" />
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>pickYum — Decide Where to Eat</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">

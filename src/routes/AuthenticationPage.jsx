@@ -183,7 +183,22 @@ const AuthenticationPage = () => {
             })}
           </div>
 
-          {/* Email form — hidden by default, toggled by the link below */}
+          {/* Toggle for the email/password form. Hidden by default so the OAuth
+              buttons stay the primary CTA; this link is the escape hatch for
+              users who want a username/password account. */}
+          {!showEmailForm && (
+            <div className="text-center mt-5">
+              <button
+                type="button"
+                onClick={() => setShowEmailForm(true)}
+                className="text-sm font-medium text-orange-600 hover:text-orange-700 hover:underline"
+              >
+                Sign in or sign up with email
+              </button>
+            </div>
+          )}
+
+          {/* Email form — hidden by default, toggled by the link above */}
           {showEmailForm && (
             <>
               <div className="relative my-6">

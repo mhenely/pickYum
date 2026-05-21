@@ -74,6 +74,7 @@ model User {
   oauthAccounts      OAuthAccount[]
   emailTokens        EmailToken[]
   savedAddresses     SavedAddress[]
+  pushSubscriptions  PushSubscription[]
 
   following        Follow[]         @relation("Follower")
   followers        Follow[]         @relation("Following")
@@ -886,4 +887,41 @@ model AuditLog {
   @@index([kind, createdAt])
   @@index([ip, createdAt])
   @@map("audit_log")
+}
+
+// Web Push subscription (RFC 8030) per device + user. Created when a
+// user opts in to browser notifications from a device; deleted when
+// they revoke or the browser invalidates the endpoint (we soft-delete
+// from the server on 410 GONE responses from the push service).
+//
+// One user can have many subscriptions (phone + laptop + work
+// laptop). `endpoint` is the unique per-device URL the browser
+// hands us; we use it as the natural unique key so re-subscribing
+// from the same device just updates the existing row rather than
+// piling up duplicates.
+//
+// `p256dh` + `auth` are the W3C-defined cryptographic keys the push
+// service uses to encrypt payloads. Both are opaque from our side;
+// we just round-trip them to web-push at dispatch time.
+model PushSubscription {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  // Push service URL — unique per (subscription, browser, device).
+  // Up to ~2KB in spec; we cap at 2048 to fit a B-tree index.
+  endpoint  String   @unique @db.VarChar(2048)
+  // ECDH public key the push service uses to encrypt payloads.
+  // Always 65 bytes base64url-encoded ≈ 87 chars; 256 is a generous cap.
+  p256dh    String   @db.VarChar(256)
+  // HMAC auth secret. 16 bytes base64url-encoded ≈ 22 chars.
+  auth      String   @db.VarChar(64)
+  // Stored at subscribe time so the user can recognize devices on a
+  // future "manage your devices" surface ("MacBook · Chrome 130").
+  // Free-form — we don't parse it, just display.
+  userAgent String?  @map("user_agent") @db.VarChar(512)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscription")
 }

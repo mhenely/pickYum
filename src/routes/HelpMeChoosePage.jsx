@@ -413,6 +413,24 @@ const HelpMeChoosePage = () => {
     setRouletteWinnerId(winnerId);
   };
 
+  // Skip-the-spin shortcut. Picks a random winner from the flip pool
+  // immediately — no wheel animation, no Accept step. Replaces the
+  // pre-Phase-D "Surprise Me" mode (a third top-level pick verb that
+  // blurred the choice between flip / wheel / random). Chose method
+  // 'surprise' so existing Insights aggregations keep working — the
+  // value is still meaningful ("user took the no-ceremony path").
+  const handleSkipSpin = () => {
+    if (flipPool.length < 1) return;
+    const randomId = flipPool[Math.floor(Math.random() * flipPool.length)];
+    dispatch(addUserAcceptance({
+      restaurantId: randomId,
+      optionsSnapshot: flipPool.map(String),
+      chooseMethod: 'surprise',
+    }));
+    dispatch(removeUserOption(randomId));
+    dispatch(showChosenCelebration(randomId));
+  };
+
   const handleRouletteAccept = () => {
     if (!rouletteWinnerId) return;
     dispatch(addUserAcceptance({
@@ -593,29 +611,6 @@ const HelpMeChoosePage = () => {
             ].join(" ")}
           >
             {mode === "coinflip" ? "🎰 Switch to Roulette" : "🪙 Switch to Coin Flip"}
-          </button>
-
-          {/* Surprise me — picks a random restaurant from the flip pool and
-              records it as an acceptance for Insights tracking. */}
-          <button
-            onClick={() => {
-              if (flipPool.length < 1) return;
-              const randomId = flipPool[Math.floor(Math.random() * flipPool.length)];
-              dispatch(addUserAcceptance({
-                restaurantId: randomId,
-                optionsSnapshot: flipPool.map(String),
-                chooseMethod: 'surprise',
-              }));
-              dispatch(removeUserOption(randomId));
-              // Same celebration pop as flip/spin/Choose-Now — keeps
-              // the "surprise me" surface aligned with every other
-              // commit-to-a-restaurant flow.
-              dispatch(showChosenCelebration(randomId));
-            }}
-            disabled={flipPool.length < 1}
-            className="w-full rounded-lg border-2 border-purple-500 py-2.5 px-4 font-semibold text-sm text-purple-600 hover:bg-purple-500 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            🎲 Surprise Me
           </button>
 
           {/* Group vote */}
@@ -917,24 +912,49 @@ const HelpMeChoosePage = () => {
                 {options.length === 0
                   ? "Nothing to flip yet"
                   : options.length === 1
-                  ? "Add one more to start flipping"
+                  ? "Just one option — pick it or add more"
                   : "Not enough in your flip pool"}
               </p>
               <p className="text-sm text-gray-500 mb-5 max-w-xs mx-auto">
                 {options.length === 0
                   ? "Add at least 2 restaurants to your options to use the coin flip or roulette."
                   : options.length === 1
-                  ? "You have 1 option — add one more to start flipping."
+                  ? "You can accept this one as tonight's pick, or add another to flip / spin between them."
                   : "Your active filters are excluding too many options. Try adjusting them above."}
               </p>
-              {options.length < 2 && (
-                <Link
-                  to="/"
-                  className="inline-block rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-5 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
-                >
-                  Find restaurants on Search →
-                </Link>
-              )}
+              <div className="flex flex-col sm:flex-row gap-2 items-center justify-center">
+                {/* 1-option fast path: previously covered by "Surprise
+                    Me" (which would happily pick from a single-option
+                    pool). After Phase D dropped the Surprise verb,
+                    this is the explicit affordance for "I'm fine
+                    with this one." Reuses the same celebration
+                    pop as flip/spin so the post-pick UX is unified. */}
+                {options.length === 1 && (
+                  <button
+                    onClick={() => {
+                      const onlyId = options[0];
+                      dispatch(addUserAcceptance({
+                        restaurantId: onlyId,
+                        optionsSnapshot: options.map(String),
+                        chooseMethod: 'surprise',
+                      }));
+                      dispatch(removeUserOption(onlyId));
+                      dispatch(showChosenCelebration(onlyId));
+                    }}
+                    className="inline-block rounded-lg bg-gradient-to-br from-orange-500 to-red-500 px-5 py-2.5 text-sm font-semibold text-white hover:from-orange-400 hover:to-red-400 transition-all shadow-brand-sm"
+                  >
+                    Pick this one
+                  </button>
+                )}
+                {options.length < 2 && (
+                  <Link
+                    to="/"
+                    className={`inline-block rounded-lg ${options.length === 1 ? 'border border-gray-300 bg-white text-gray-700 hover:bg-gray-50' : 'bg-gradient-to-br from-orange-500 to-red-500 text-white hover:from-orange-400 hover:to-red-400 shadow-brand-sm'} px-5 py-2.5 text-sm font-semibold transition-all`}
+                  >
+                    Find restaurants on Search →
+                  </Link>
+                )}
+              </div>
             </div>
           )}
 
@@ -989,6 +1009,21 @@ const HelpMeChoosePage = () => {
               >
                 {isSpinning ? "Spinning…" : "Spin"}
               </button>
+
+              {/* Skip-the-spin: instant random pick, no animation,
+                  no Accept step. Replaces the pre-Phase-D "Surprise
+                  Me" top-level mode — same behavior, less visual
+                  clutter (one less verb on the left rail). Hidden
+                  while spinning or after a winner has resolved so it
+                  doesn't compete with the result banner. */}
+              {!isSpinning && !rouletteWinnerId && (
+                <button
+                  onClick={handleSkipSpin}
+                  className="text-xs text-gray-500 hover:text-orange-600 transition-colors"
+                >
+                  or skip the spin →
+                </button>
+              )}
 
               {rouletteWinnerId && !isSpinning && (
                 <ResultBanner

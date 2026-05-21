@@ -36,6 +36,12 @@ const initialState = {
   openAtTime: "",
   deliveryFilter: false,
   takeoutFilter: false,
+  // Phase-E dietary filter toggle. When true (default), the user's
+  // profile dietaryTags are applied as a search filter — vegetarian
+  // users won't see steakhouses, etc. Off opts out for this session
+  // (the user might want broader results despite their dietary tag,
+  // e.g. when searching for a place a friend can also eat at).
+  dietaryFilterEnabled: true,
 
   // Sort & name search
   sortBy: "none",
@@ -97,6 +103,7 @@ export const searchSlice = createSlice({
     setOpenAtTime:       (state, action) => { state.openAtTime    = action.payload; resetPage(state); },
     toggleDeliveryFilter:(state)         => { state.deliveryFilter = !state.deliveryFilter; resetPage(state); },
     toggleTakeoutFilter: (state)         => { state.takeoutFilter  = !state.takeoutFilter; resetPage(state); },
+    toggleDietaryFilter: (state)         => { state.dietaryFilterEnabled = !state.dietaryFilterEnabled; resetPage(state); },
     setSortBy:           (state, action) => { state.sortBy        = action.payload; resetPage(state); },
     setQuery:            (state, action) => { state.query         = action.payload; resetPage(state); },
     setCuisineFilter:    (state, action) => { state.cuisineFilter = action.payload; resetPage(state); },
@@ -120,6 +127,7 @@ export const {
   setOpenAtTime,
   toggleDeliveryFilter,
   toggleTakeoutFilter,
+  toggleDietaryFilter,
   setSortBy,
   setQuery,
   setCuisineFilter,

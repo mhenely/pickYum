@@ -1,6 +1,7 @@
 import { useSelector, useDispatch } from 'react-redux';
 import { dismissChosenCelebration } from '../redux/slices/celebrationSlice';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
+import ExternalActions from './ExternalActions';
 
 // Global "Tonight you're going to {name}!" celebration. Mounted once
 // at the app root and subscribes to celebrationSlice.chosenId; any
@@ -84,6 +85,13 @@ export default function ChosenCelebration() {
               Delivery
             </span>
           </div>
+
+          {/* Peak-intent affordances — the moment a user accepts a
+              winner is the moment they're most likely to act on it.
+              Hidden when no useful link is available so we don't show
+              a labeled "Next step" header above nothing. */}
+          <ExternalActions restaurant={restaurant} variant="primary" />
+
           <button
             onClick={onClose}
             className="mt-1 w-full rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-500 transition-colors"

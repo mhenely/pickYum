@@ -2,6 +2,14 @@ import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
 import { requireAuth } from '../middleware/auth';
 import { writeLimiter } from '../middleware/rateLimits';
+import { cacheRead, cacheKeyForUser, cacheClear } from '../lib/serverCache';
+
+// Group list is a heavy 4-query parallel fetch. Cached briefly so a
+// user navigating Groups → Group detail → back doesn't pay the full
+// fan-out twice. TTL kept short because the list is mutable (invites
+// accepted/declined, groups created/archived) and client-side
+// optimistic updates handle the immediate post-write case anyway.
+const GROUPS_LIST_TTL_S = 60;
 import { launchVoting, revokeVoterTokensForUserOnParent } from '../lib/eventLifecycle';
 import { notifyUser } from '../lib/userNotifications';
 import { userMinimalSelect, eventOptionsInclude } from '../lib/prismaHelpers';
@@ -176,6 +184,9 @@ async function launchGroupVotingForId(groupId: number, eventId: number) {
 
 // GET /api/groups
 router.get('/', async (req: Request, res: Response) => {
+  const userId = req.userId as number;
+  const key = cacheKeyForUser('groups-list', userId);
+  const payload = await cacheRead(key, GROUPS_LIST_TTL_S, async () => {
   const eventSummarySelect = {
     select: {
       id: true,
@@ -218,12 +229,12 @@ router.get('/', async (req: Request, res: Response) => {
 
   const [hostedRaw, memberRaw, pendingInvites, archivedHostedRaw] = await Promise.all([
     prisma.group.findMany({
-      where: { hostId: req.userId, archivedAt: null },
+      where: { hostId: userId, archivedAt: null },
       include: listGroupShape,
       orderBy: { createdAt: 'desc' },
     }),
     prisma.groupMember.findMany({
-      where: { userId: req.userId, group: { archivedAt: null } },
+      where: { userId, group: { archivedAt: null } },
       include: {
         group: {
           include: {
@@ -235,7 +246,7 @@ router.get('/', async (req: Request, res: Response) => {
       orderBy: { joinedAt: 'desc' },
     }),
     prisma.groupInvite.findMany({
-      where: { invitedId: req.userId, status: 'PENDING' },
+      where: { invitedId: userId, status: 'PENDING' },
       include: {
         group: { select: { id: true, name: true, hostId: true } },
         invitedBy: { select: { id: true, username: true, avatarUrl: true } },
@@ -243,7 +254,7 @@ router.get('/', async (req: Request, res: Response) => {
       orderBy: { createdAt: 'desc' },
     }),
     prisma.group.findMany({
-      where: { hostId: req.userId, archivedAt: { not: null } },
+      where: { hostId: userId, archivedAt: { not: null } },
       // Archived groups display past results only — no member list rendered,
       // and the SocialsPage `doneEvents = events.filter(e => e.status === 'DONE')`
       // filter throws away non-DONE rows on the client. Skip them server-side
@@ -265,7 +276,9 @@ router.get('/', async (req: Request, res: Response) => {
   const groups = [...hosted.filter((g) => !memberGroupIds.has(g.id)), ...member];
   const archivedGroups = archivedHostedRaw.map((g) => ({ ...g, role: 'host' as const }));
 
-  res.json({ groups, pendingInvites, archivedGroups });
+    return { groups, pendingInvites, archivedGroups };
+  });
+  res.json(payload);
 });
 
 // Maximum length for group + event names. Long enough for "Sunday Brunch with
@@ -293,6 +306,11 @@ router.post('/', async (req: Request, res: Response) => {
       invites: true,
     },
   });
+  // Bust the host's groups-list cache so the new group shows up on
+  // their next visit to /groups within the cache TTL window. Without
+  // this, the user would create a group, navigate away, come back to
+  // the list, and see the cached (pre-create) shape until TTL expiry.
+  cacheClear(cacheKeyForUser('groups-list', req.userId)).catch(() => {});
   res.status(201).json({ group });
 });
 
@@ -501,6 +519,11 @@ router.patch('/:id/invites/:inviteId', async (req: Request, res: Response) => {
       update: {},
     });
   }
+
+  // Bust the responder's groups-list cache. Accepting an invite adds
+  // the group to their list; declining removes the pending invite —
+  // either way the list shape changes and stale would surprise them.
+  cacheClear(cacheKeyForUser('groups-list', req.userId)).catch(() => {});
 
   res.json({ message: action === 'accept' ? 'Joined group' : 'Invite declined' });
 });

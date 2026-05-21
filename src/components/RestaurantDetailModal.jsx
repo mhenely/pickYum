@@ -10,6 +10,7 @@ import { useFetchData } from '../hooks/useFetchData';
 import InfoRow from './InfoRow';
 import HeartWithKebab from './HeartWithKebab';
 import RestaurantPhotoGallery from './RestaurantPhotoGallery';
+import ExternalActions from './ExternalActions';
 import { PRICE_LABELS } from '../utils/restaurantConstants';
 import { normalizeUrl } from '../utils/normalizeUrl';
 import { googleMapsUrl } from '../utils/googleMapsUrl';
@@ -733,6 +734,15 @@ const RestaurantDetailModal = ({
                 Delivery
               </span>
             </div>
+
+            {/* Third-party deep-links — Reserve / Directions / Delivery
+                etc. Compact variant since this modal already has its
+                own action row below; this section is the "if you've
+                decided you like this place, here's the next step"
+                affordance. ExternalActions self-hides when no link is
+                available, so the whole block collapses for a fully
+                bare restaurant entry. */}
+            <ExternalActions restaurant={r} variant="compact" />
 
             {/* Action buttons — three modes, in priority order:
                  1. `actions === null` → render nothing (e.g. group

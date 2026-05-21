@@ -110,8 +110,8 @@ const AboutPage = () => {
               <p className="text-sm text-gray-600 mb-2">Switch to roulette when you have more than two options. Click <strong>Switch to Roulette</strong> in the left sidebar.</p>
               <ul className="text-sm text-gray-600 space-y-1.5 list-disc list-inside">
                 <li>All current options appear as wheel slices (requires at least 2).</li>
-                <li>Click <strong>Choose My Fate</strong> to spin. The wheel slows and highlights the winner.</li>
-                <li>Use <strong>🎲 Surprise Me</strong> to skip the flip and jump straight to the acceptance screen.</li>
+                <li>Click <strong>Spin</strong> to start the wheel. It slows and highlights the winner.</li>
+                <li>In a hurry? Click <strong>or skip the spin</strong> below the Spin button to jump straight to a random pick — no animation.</li>
               </ul>
             </div>
             <div className="rounded-lg bg-orange-50 border border-orange-100 px-4 py-3">
@@ -219,7 +219,7 @@ const AboutPage = () => {
           <ul className="text-sm text-gray-600 space-y-2.5 list-disc list-inside mt-3">
             <li>The <strong>Options dropdown</strong> in the navbar lets you peek at your lineup and remove restaurants from any page.</li>
             <li>On the Choose page, type in the search box to find and add any restaurant — or add a custom name on the fly.</li>
-            <li>Use <strong>🎲 Surprise Me</strong> to skip straight to a random pick without flipping or spinning.</li>
+            <li>In Roulette mode, click <strong>or skip the spin</strong> for an instant random pick — no wheel animation.</li>
             <li>Your Google profile photo appears in the navbar. Without Google login, a generic avatar shows instead.</li>
             <li>The coin flip and roulette each count toward your <strong>Total Flips & Spins</strong> stat on Your Info.</li>
             <li>Scheduled group voting auto-launches at the set time, even if no one is on the page.</li>
