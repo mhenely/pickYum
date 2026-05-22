@@ -17,7 +17,7 @@
 //      anything more than "make an account."
 
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { MagnifyingGlassIcon, SparklesIcon, UserGroupIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
 import Button from '../components/ui/Button';
 import LandingCoinFlipDemo from '../components/LandingCoinFlipDemo';
@@ -64,14 +64,15 @@ function PillarCard({ Icon, title, body, detail }) {
 }
 
 export default function LandingPage() {
-  const navigate = useNavigate();
-  // "Try as a guest" sets a localStorage flag and bounces to /. HomePage
-  // reads the flag and routes straight to SearchPage thereafter, so the
-  // user (and any refresh) lands in the working surface instead of the
-  // marketing page.
+  // "Try as a guest" sets a localStorage flag and forces a full-page
+  // load of `/`. We can't use react-router's navigate('/') here because
+  // LandingPage IS at `/` — navigate sees no path change, doesn't
+  // re-render HomePage, and the just-written localStorage flag never
+  // gets re-read. A full reload re-runs HomePage from scratch, which
+  // checks the flag inline and routes to SearchPage in guest mode.
   const handleTryAsGuest = () => {
     try { localStorage.setItem('pickyum_skip_landing', '1'); } catch { /* ignore */ }
-    navigate('/');
+    window.location.assign('/');
   };
 
   // No wrapper min-h-screen — App's <main> already grows to fill

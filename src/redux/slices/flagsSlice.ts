@@ -46,7 +46,12 @@ const initialState: FlagsState = {
 export const loadFlags = createAsyncThunk('flags/load', async () => {
   // Direct fetch — no api.ts dependency to avoid a cycle if api.ts ever
   // needs to read flags during its own boot (zod strictness, etc).
-  const base = (import.meta as unknown as { env?: { VITE_API_BASE_URL?: string } })?.env?.VITE_API_BASE_URL ?? 'http://localhost:3000';
+  // Direct `import.meta.env.X` form (not via a cast) so Vite's static
+  // env replacement recognizes the access and bakes the value in at
+  // build time. The previous cast-via-unknown form defeated the static
+  // replacement and the bundle always fell through to the localhost
+  // fallback in production.
+  const base = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000';
   const res = await fetch(`${base}/api/flags`, { credentials: 'include' });
   if (!res.ok) throw new Error(`flags fetch failed: ${res.status}`);
   const body = await res.json() as { flags: Partial<FeatureFlags> };
