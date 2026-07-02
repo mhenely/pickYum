@@ -40,12 +40,23 @@ export const KNOWN_DIETARY_TAGS = [
 
 export type DietaryTag = typeof KNOWN_DIETARY_TAGS[number];
 
-// Subset that translates to an actual server-side filter. Vegan is
-// included because `servesVegetarianFood` is a reasonable approximation
-// — most vegan-friendly places also surface vegetarian — until Google
-// adds a `servesVeganFood` field. Document the approximation in the UI
-// so users know what they're getting.
-export const FILTERABLE_TAGS: ReadonlySet<DietaryTag> = new Set(['vegetarian', 'vegan']);
+// Subset that translates to an actual server-side filter.
+//
+// EMPTY as of the Enterprise+Atmosphere cost fix: vegetarian/vegan
+// previously hard-filtered on Google's `servesVegetarianFood` field,
+// but requesting that field bumped every search call to the
+// Enterprise+Atmosphere SKU (the most expensive tier — see the
+// TEXT_FIELD_MASK warning in routes/places.ts). The field was dropped
+// from the masks, so the data no longer arrives and every dietary tag
+// is informational-only. CRITICAL: with the field absent, leaving
+// vegetarian/vegan in this set would make the filter drop EVERY place
+// (the predicate treats missing data as "doesn't satisfy") — an
+// enabled vegetarian filter would silently return zero results.
+//
+// If a cheap vegetarian signal ever becomes available (own data,
+// user-contributed tags, a lower-tier Google field), re-add the tag
+// here and the cache key / route / response shape pick it up again.
+export const FILTERABLE_TAGS: ReadonlySet<DietaryTag> = new Set<DietaryTag>([]);
 
 // Tags surfaced as "we don't filter for this" in the response. The
 // client renders them as a small sidebar note so the user knows the

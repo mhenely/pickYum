@@ -5,7 +5,17 @@ import {
   infoOnlyTags,
   placeSatisfiesDietary,
   applyDietaryFilter,
+  FILTERABLE_TAGS,
 } from '../../lib/dietaryFilters';
+
+// NOTE on the current contract: FILTERABLE_TAGS is EMPTY as of the
+// Enterprise+Atmosphere cost fix — `servesVegetarianFood` was dropped
+// from the Places field masks (it bumped every search call to the most
+// expensive SKU), so no dietary tag can be hard-filtered server-side.
+// Every known tag is informational-only. These tests pin that
+// behavior: if a tag is ever re-added to FILTERABLE_TAGS (e.g. from a
+// non-Google data source), the sections below marked "reactivation"
+// document what needs re-testing.
 
 describe('parseDietaryParam', () => {
   it('returns empty list for missing input', () => {
@@ -28,87 +38,85 @@ describe('parseDietaryParam', () => {
   });
 });
 
-describe('filterableSubset', () => {
-  it('keeps only tags we actually filter on', () => {
-    expect(filterableSubset(['vegetarian', 'gluten-free', 'vegan', 'nut-allergy'])).toEqual(['vegan', 'vegetarian']);
+describe('FILTERABLE_TAGS (cost-fix contract)', () => {
+  it('is empty — no dietary tag hard-filters server-side', () => {
+    // If this fails because a tag was re-added: confirm the data source
+    // powering the filter does NOT come from an Enterprise+Atmosphere
+    // Places field (see the tier-guard test + TEXT_FIELD_MASK warning
+    // in routes/places.ts), then update the reactivation cases below.
+    expect(FILTERABLE_TAGS.size).toBe(0);
   });
+});
 
-  it('returns empty when no filterable tags present', () => {
+describe('filterableSubset', () => {
+  it('returns empty for every tag — nothing is filterable today', () => {
+    expect(filterableSubset(['vegetarian', 'gluten-free', 'vegan', 'nut-allergy'])).toEqual([]);
     expect(filterableSubset(['gluten-free', 'kosher', 'halal'])).toEqual([]);
   });
 });
 
 describe('infoOnlyTags', () => {
-  it('returns the known-but-unfilterable tags from the input', () => {
-    // Vegetarian/vegan are filterable; gluten-free and nut-allergy
-    // are known dietary tags but not filterable server-side.
-    expect(infoOnlyTags(['vegetarian', 'gluten-free', 'nut-allergy'])).toEqual(['gluten-free', 'nut-allergy']);
+  it('surfaces every known tag as informational (including vegetarian/vegan)', () => {
+    // Reactivation note: pre-cost-fix, vegetarian/vegan were excluded
+    // from this list because they hard-filtered. Now they're
+    // informational like everything else — the UI shows "we can't
+    // filter for this; check the menu" instead of silently dropping
+    // every result (which is what an active filter with no data field
+    // would do).
+    expect(infoOnlyTags(['vegetarian', 'gluten-free', 'nut-allergy']))
+      .toEqual(['vegetarian', 'gluten-free', 'nut-allergy']);
   });
 
   it('drops completely unknown tags from the info list', () => {
-    // The "informational" surface only shows tags we recognize but
-    // can't filter on. A tag we don't recognize at all is just dropped.
-    expect(infoOnlyTags(['vegetarian', 'made-up-tag'])).toEqual([]);
+    expect(infoOnlyTags(['made-up-tag'])).toEqual([]);
+    expect(infoOnlyTags(['vegetarian', 'made-up-tag'])).toEqual(['vegetarian']);
   });
 });
 
 describe('dietaryKeyFragment', () => {
-  it('returns an empty string when no filterable tags', () => {
+  it('is always empty — no filterable tags means no cache-key split', () => {
+    // Cache entries stay shared across users regardless of dietary
+    // prefs, which is exactly what we want for spend.
     expect(dietaryKeyFragment([])).toBe('');
     expect(dietaryKeyFragment(['gluten-free'])).toBe('');
-  });
-
-  it('returns a stable sorted suffix when filterable tags are present', () => {
-    expect(dietaryKeyFragment(['vegan', 'vegetarian'])).toBe('::diet=vegan+vegetarian');
-    expect(dietaryKeyFragment(['vegetarian', 'vegan'])).toBe('::diet=vegan+vegetarian');
+    expect(dietaryKeyFragment(['vegan', 'vegetarian'])).toBe('');
   });
 });
 
 describe('placeSatisfiesDietary', () => {
-  const veggieOk    = { servesVegetarianFood: true  };
-  const veggieNo    = { servesVegetarianFood: false };
-  const veggieUnknown = { servesVegetarianFood: null };
-  const noField     = {};
+  const veggieOk = { servesVegetarianFood: true  };
+  const veggieNo = { servesVegetarianFood: false };
+  const noField  = {};
 
-  it('lets everything through when no filterable tags requested', () => {
+  it('lets everything through — all tags are informational now', () => {
+    // THE regression this suite must catch: with servesVegetarianFood
+    // absent from API responses, a still-active vegetarian hard-filter
+    // would drop EVERY place (missing data = conservative fail) and
+    // the search would silently return zero results. The predicate
+    // must treat vegetarian/vegan as info-only pass-throughs.
     expect(placeSatisfiesDietary(veggieNo, [])).toBe(true);
     expect(placeSatisfiesDietary(veggieNo, ['gluten-free'])).toBe(true);
-  });
-
-  it('requires explicit servesVegetarianFood=true for vegetarian filter', () => {
-    expect(placeSatisfiesDietary(veggieOk,      ['vegetarian'])).toBe(true);
-    expect(placeSatisfiesDietary(veggieNo,      ['vegetarian'])).toBe(false);
-    expect(placeSatisfiesDietary(veggieUnknown, ['vegetarian'])).toBe(false);
-    expect(placeSatisfiesDietary(noField,       ['vegetarian'])).toBe(false);
-  });
-
-  it('treats vegan as vegetarian-equivalent (Google has no vegan field)', () => {
+    expect(placeSatisfiesDietary(veggieNo, ['vegetarian'])).toBe(true);
+    expect(placeSatisfiesDietary(noField,  ['vegetarian'])).toBe(true);
+    expect(placeSatisfiesDietary(noField,  ['vegan'])).toBe(true);
     expect(placeSatisfiesDietary(veggieOk, ['vegan'])).toBe(true);
-    expect(placeSatisfiesDietary(veggieNo, ['vegan'])).toBe(false);
   });
 });
 
 describe('applyDietaryFilter', () => {
   const places = [
-    { name: 'Veggie Town',  servesVegetarianFood: true  },
-    { name: 'Meat Palace',  servesVegetarianFood: false },
-    { name: 'Mystery Diner', servesVegetarianFood: null },
+    { name: 'Veggie Town',   servesVegetarianFood: true  },
+    { name: 'Meat Palace',   servesVegetarianFood: false },
+    { name: 'Mystery Diner', servesVegetarianFood: null  },
+    { name: 'Post-Fix Cafe' }, // fresh rows no longer carry the field at all
   ];
 
-  it('returns input as-is (same array) when no filterable tag is set', () => {
-    // Hot-path optimization: unfiltered requests pay no extra cost.
-    const result = applyDietaryFilter(places, []);
-    expect(result).toBe(places);
-  });
-
-  it('returns input as-is when only info-only tags are requested', () => {
-    const result = applyDietaryFilter(places, ['gluten-free']);
-    expect(result).toBe(places);
-  });
-
-  it('drops places that fail the filter', () => {
-    const result = applyDietaryFilter(places, ['vegetarian']);
-    expect(result).toHaveLength(1);
-    expect(result[0].name).toBe('Veggie Town');
+  it('returns input as-is (same array reference) for any tag mix', () => {
+    // Hot-path contract: with no filterable tags, the filter must
+    // short-circuit and never allocate — every request takes this path.
+    expect(applyDietaryFilter(places, [])).toBe(places);
+    expect(applyDietaryFilter(places, ['gluten-free'])).toBe(places);
+    expect(applyDietaryFilter(places, ['vegetarian'])).toBe(places);
+    expect(applyDietaryFilter(places, ['vegetarian', 'vegan', 'kosher'])).toBe(places);
   });
 });

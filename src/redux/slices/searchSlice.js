@@ -14,7 +14,12 @@ const initialState = {
   // Nearby search
   nearbyResults: null,      // PlacesRestaurant[] | null — null means local-list mode
   locationInput: "",
-  radiusMeters: null,
+  // Default 5 mi (8047 m — matches the RADIUS_OPTIONS entry in
+  // SearchPage). Was null (forced the user to pick before searching);
+  // beta feedback asked for a sensible default they can change.
+  // Smaller default circles also rank better with the server's
+  // distance-ranked nearby search and improve cache hit rates.
+  radiusMeters: 8047,
   // SEARCH-TIME cuisine filter: a single Google Places type
   // (e.g. 'italian_restaurant') passed to /api/places/nearby so we
   // only get back restaurants of that cuisine. null = no filter,
@@ -36,6 +41,10 @@ const initialState = {
   openAtTime: "",
   deliveryFilter: false,
   takeoutFilter: false,
+  // Hide fast-food chains from results. Client-side filter on the
+  // `primaryType` slug the server now surfaces ('fast_food_restaurant')
+  // — zero extra API cost. Beta-requested.
+  hideFastFood: false,
   // Phase-E dietary filter toggle. When true (default), the user's
   // profile dietaryTags are applied as a search filter — vegetarian
   // users won't see steakhouses, etc. Off opts out for this session
@@ -99,10 +108,24 @@ export const searchSlice = createSlice({
       resetPage(state);
     },
     clearPriceFilters:   (state)         => { state.priceFilters  = []; resetPage(state); },
-    toggleOpenNow:       (state)         => { state.openNowFilter = !state.openNowFilter; resetPage(state); },
-    setOpenAtTime:       (state, action) => { state.openAtTime    = action.payload; resetPage(state); },
+    // "Open now" and "open at <time>" are mutually exclusive — one is
+    // a live check against the current clock, the other a hypothetical.
+    // Beta feedback caught both being active at once (the time filter
+    // silently won while Open Now stayed visually selected). Each
+    // setter clears the other.
+    toggleOpenNow: (state) => {
+      state.openNowFilter = !state.openNowFilter;
+      if (state.openNowFilter) state.openAtTime = "";
+      resetPage(state);
+    },
+    setOpenAtTime: (state, action) => {
+      state.openAtTime = action.payload;
+      if (state.openAtTime) state.openNowFilter = false;
+      resetPage(state);
+    },
     toggleDeliveryFilter:(state)         => { state.deliveryFilter = !state.deliveryFilter; resetPage(state); },
     toggleTakeoutFilter: (state)         => { state.takeoutFilter  = !state.takeoutFilter; resetPage(state); },
+    toggleHideFastFood:  (state)         => { state.hideFastFood   = !state.hideFastFood; resetPage(state); },
     toggleDietaryFilter: (state)         => { state.dietaryFilterEnabled = !state.dietaryFilterEnabled; resetPage(state); },
     setSortBy:           (state, action) => { state.sortBy        = action.payload; resetPage(state); },
     setQuery:            (state, action) => { state.query         = action.payload; resetPage(state); },
@@ -127,6 +150,7 @@ export const {
   setOpenAtTime,
   toggleDeliveryFilter,
   toggleTakeoutFilter,
+  toggleHideFastFood,
   toggleDietaryFilter,
   setSortBy,
   setQuery,

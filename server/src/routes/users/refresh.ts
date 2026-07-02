@@ -30,21 +30,24 @@ const PLACE_PRICE_LEVEL_MAP: Record<string, number | null> = {
 // were created before the lat/lng columns existed. New rows already
 // store coords at create time; this catches the legacy rows.
 //
-// `photos` / `userRatingCount` were added alongside the
-// Search/Compare/Choose card redesign so the UI can show photos +
-// rating-count breakdown without a per-card Places API call. Reviews
-// are intentionally NOT requested — `reviews` is Enterprise-tier and
-// roughly doubles the per-call cost. Users get a "View on Google"
-// deep-link to the place's Maps page instead.
-const DETAIL_FIELD_MASK = [
+// ⚠ SKU TIER WARNING — a Place Details call bills at the tier of its
+// most expensive requested field (see the TEXT_FIELD_MASK warning in
+// routes/places.ts for the full story). This mask deliberately tops
+// out at ENTERPRISE tier. `takeout` / `delivery` were removed — both
+// are Enterprise+Atmosphere fields that silently bumped every refresh
+// call to the most expensive SKU during the launch-month billing
+// blowout. Saved rows keep whatever takeout/delivery values they were
+// materialized with; refreshes simply stop updating those two columns.
+// `reviews` is intentionally absent for the same reason — users get a
+// "View on Google" deep-link instead. The tier-guard test enforces
+// this mask stays Atmosphere-free. Exported for that test only.
+export const DETAIL_FIELD_MASK = [
   'rating', 'userRatingCount', 'priceLevel',
-  'takeout', 'delivery',
   'internationalPhoneNumber', 'websiteUri',
   'location',
   'photos',
   // Structured weekly hours — drives the detail modal's hours table
-  // AND the open-now / closing-soon indicator on the modal/card. Pro
-  // tier, same SKU bucket as the rest of this mask.
+  // AND the open-now / closing-soon indicator on the modal/card.
   'regularOpeningHours',
 ].join(',');
 // Bumped from 30 to 90 — restaurant photos/phone/website rarely

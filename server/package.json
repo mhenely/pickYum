@@ -12,6 +12,12 @@
     "db:generate": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:check": "tsx scripts/check-migrations.ts",
+    "db:migrate:staging": "dotenv -e .env.staging -- prisma migrate deploy",
+    "db:migrate:production": "dotenv -e .env.production -- prisma migrate deploy",
+    "db:status:staging": "dotenv -e .env.staging -- prisma migrate status",
+    "db:status:production": "dotenv -e .env.production -- prisma migrate status",
+    "db:studio:staging": "dotenv -e .env.staging -- prisma studio",
+    "db:studio:production": "dotenv -e .env.production -- prisma studio",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"

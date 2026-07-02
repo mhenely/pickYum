@@ -11,10 +11,16 @@ node_modules
 dist
 dist-ssr
 *.local
+# Ignore every env file (.env, .env.staging, .env.production, .env.local, etc.)
+# at any depth — secrets must never be committed.
 .env
-.env.example
+.env.*
 server/.env
-server/.env.example
+server/.env.*
+# Re-include the .example templates so they ARE tracked (they hold
+# placeholders only, no real secrets).
+!.env.example
+!server/.env.example
 
 # Server build output
 server/dist

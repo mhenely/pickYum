@@ -184,7 +184,8 @@ export default function SearchPage() {
     searchCuisineType,
     priceFilters: priceFiltersArray,
     openNowFilter, openAtTime, deliveryFilter, takeoutFilter,
-    dietaryFilterEnabled, toggleDietaryFilter,
+    hideFastFood, toggleHideFastFood,
+    dietaryFilterEnabled,
     sortBy, query, cuisineFilter,
     currentPage,
     searchMode, nameQuery,
@@ -504,8 +505,14 @@ export default function SearchPage() {
       },
       (err) => {
         setLocating(false);
+        // Permission-denied gets concrete re-enable steps — beta
+        // feedback showed "enable it in your browser settings" left
+        // users stranded with no idea where that setting lives. The
+        // padlock/aA-menu instruction covers Chrome/Edge/Firefox
+        // (padlock left of the URL) and iOS Safari (the aA menu).
+        // Typing an address is offered as the zero-config fallback.
         const msg = err.code === err.PERMISSION_DENIED
-          ? 'Location permission denied. Enable it in your browser settings to use this feature.'
+          ? 'Location access is blocked. To re-enable: click the padlock icon next to the web address (on iPhone: the "aA" menu) → Location → Allow, then reload the page. Or just type your address or zip code instead.'
           : err.code === err.POSITION_UNAVAILABLE
           ? 'Could not determine your location — try entering an address.'
           : 'Location request timed out. Try again or enter an address.';
@@ -875,12 +882,22 @@ export default function SearchPage() {
         if (normalizedCuisineFilter && normalizeCuisine(p.cuisineType) !== normalizedCuisineFilter) return false;
         if (filters.size > 0 && !filters.has(p.priceLevel)) return false;
         if (!openAtTime && openNowFilter && p.openNow === false) return false;
-        if (deliveryFilter && !p.delivery) return false;
-        if (takeoutFilter && !p.takeout)   return false;
+        // Delivery/takeout: explicit-false semantics. Fresh search
+        // results no longer carry these fields (dropped from the
+        // Places mask — Enterprise+Atmosphere SKU), so `undefined`
+        // must PASS the filter; only a known false is excluded.
+        // The old truthy check (`!p.delivery`) would empty the whole
+        // result list the moment the pill was toggled.
+        if (deliveryFilter && p.delivery === false) return false;
+        if (takeoutFilter && p.takeout === false)   return false;
+        // Fast-food toggle (beta-requested). primaryType is the
+        // machine slug surfaced by the server; only fresh results
+        // carry it, older cached rows pass through unfiltered.
+        if (hideFastFood && p.primaryType === 'fast_food_restaurant') return false;
         return true;
       });
     },
-    [nearbyResults, query, normalizedCuisineFilter, priceFiltersArray, openAtTime, openNowFilter, deliveryFilter, takeoutFilter],
+    [nearbyResults, query, normalizedCuisineFilter, priceFiltersArray, openAtTime, openNowFilter, deliveryFilter, takeoutFilter, hideFastFood],
   );
 
   const sortedLocal = useMemo(
@@ -1300,7 +1317,12 @@ export default function SearchPage() {
           )}
         </div>
 
-        {/* Delivery / Takeout */}
+        {/* Delivery / Takeout / fast-food. Note: fresh nearby results
+            no longer carry delivery/takeout data (the Places fields
+            were dropped for cost — see server routes/places.ts), so
+            those two pills only exclude places we KNOW lack the
+            service (saved rows + legacy data); unknowns pass. The
+            fast-food toggle works on all fresh results. */}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider shrink-0">Service</span>
           <button
@@ -1317,29 +1339,28 @@ export default function SearchPage() {
           >
             Takeout
           </button>
+          <button
+            type="button"
+            onClick={toggleHideFastFood}
+            className={pillClass(hideFastFood)}
+            title="Hide fast-food chains from results"
+          >
+            Hide fast food
+          </button>
         </div>
 
-        {/* Dietary — Phase E. Only rendered when the user has any
-            dietary tags on their profile (otherwise the toggle is
-            meaningless). Shows a quick view of what's being applied,
-            with a single Off/On toggle to opt out per session. The
-            individual tags are managed on the Your Info page. */}
+        {/* Dietary — informational since the cost fix. Google's
+            dietary data field was dropped from our searches (it
+            bumped every call to the most expensive billing tier), so
+            tags can no longer hard-filter results. Surface them as a
+            reminder instead of a toggle that silently does nothing.
+            Tags are managed on the Your Info page. */}
         {userDietaryTags.length > 0 && (
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider shrink-0">Dietary</span>
-            <button
-              type="button"
-              onClick={toggleDietaryFilter}
-              className={pillClass(dietaryFilterEnabled)}
-              title="Filter results by your dietary tags. Manage tags on the Your Info page."
-            >
-              {dietaryFilterEnabled ? '✓ ' : ''}Honor my tags
-            </button>
-            {dietaryFilterEnabled && (
-              <span className="text-xs text-gray-500">
-                {userDietaryTags.join(', ')}
-              </span>
-            )}
+            <span className="text-xs text-gray-500">
+              {userDietaryTags.join(', ')} — shown for reference; results aren&apos;t filtered, check menus
+            </span>
           </div>
         )}
 
@@ -1368,7 +1389,14 @@ export default function SearchPage() {
         </div>
       </div>
 
-      {/* ── Name / cuisine search row ────────────────────────── */}
+      {/* ── Name / cuisine post-filter row ─────────────────────
+          Hidden in name-search mode: there the primary input IS a
+          name query, so this row duplicated it — and the cuisine
+          dropdown (derived from saved + nearby results) is typically
+          empty for a fresh session, rendering a lone useless
+          "All cuisines" entry (beta feedback). Nearby + saved-list
+          modes keep the row for narrowing already-fetched results. */}
+      {searchMode !== 'name' && (
       <div className="flex gap-3 mb-4">
         <input
           type="text"
@@ -1391,6 +1419,7 @@ export default function SearchPage() {
           ))}
         </select>
       </div>
+      )}
 
       {/* ── Pre-search empty state ────────────────────────────── */}
       {/* When no nearby search has run yet, the body is mostly whitespace

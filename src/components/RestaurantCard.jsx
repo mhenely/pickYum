@@ -53,6 +53,17 @@ function PhotoHero({ photos, maxWidthPx, photoBoxClass, restaurantName, onError 
         src={placePhotoUrl(first, maxWidthPx)}
         alt={restaurantName}
         className="absolute inset-0 h-full w-full object-cover"
+        // Native lazy-load: the browser only requests this photo when
+        // the card scrolls into (or near) the viewport. Without this,
+        // a 20-card search-result grid eagerly fires 20 photo-proxy
+        // calls on mount even if the user only scans the first 4-6
+        // before clicking. Lazy loading cuts that to typically 4-8
+        // calls per search. Photo proxy is $0.007/call on first view
+        // (mirror miss) — biggest single cost lever in this codebase.
+        // `decoding="async"` lets the browser decode off the main
+        // thread; pairs well with lazy for smoother scroll.
+        loading="lazy"
+        decoding="async"
         // Hide on load failure so a 404 / expired photo ref doesn't
         // leave a broken-image icon on the card. Also notify the parent
         // so it can trigger a JIT refresh of the photo refs — Google

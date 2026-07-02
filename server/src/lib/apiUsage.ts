@@ -3,26 +3,33 @@ import prisma from './prisma';
 import { logger } from './logger';
 
 // Cost-per-call (in cents) for each Google Places API endpoint we
-// invoke. Values reflect the Pro-tier pricing we're on; cache hits
-// are recorded at 0 since they don't reach Google. Estimated for
-// internal accounting — compare against the Google Cloud Billing API
-// for ground truth when needed.
+// invoke. Cache hits are recorded at 0 since they don't reach Google.
+// Estimated for internal accounting — compare against the Google
+// Cloud Billing console for ground truth when needed.
 //
-// SKU references (current Google Places API pricing):
-//   - searchNearby (Pro):     $32  / 1000 → 3.2¢/call
-//   - searchText  (Pro):      $32  / 1000 → 3.2¢/call
-//   - Place Photo (media):    $7   / 1000 → 0.7¢/call
-//   - Place Details (Pro):    $17  / 1000 → 1.7¢/call
-//   - Geocoding:              $5   / 1000 → 0.5¢/call
+// ⚠ These rates must track the SKU TIER each call actually bills at,
+// which is decided by the field masks in routes/places.ts. History:
+// this table previously assumed Pro-tier rates while the masks
+// requested Enterprise+Atmosphere fields — so the admin dashboard
+// underreported real spend during the launch-month billing blowout.
+// If you change a field mask, re-derive the tier and update here.
+//
+// Current tier per endpoint (post cost-fix; see TEXT_FIELD_MASK
+// warning in routes/places.ts):
+//   - searchNearby (Enterprise):  $35 / 1000 → 3.5¢/call
+//   - searchText  (Enterprise):   $35 / 1000 → 3.5¢/call
+//   - Place Photo (media):        $7  / 1000 → 0.7¢/call
+//   - Place Details (Enterprise): $20 / 1000 → 2.0¢/call
+//   - Geocoding (Essentials):     $5  / 1000 → 0.5¢/call
 //
 // Adding a new endpoint: add to the union type + the cost table.
 // Both must match; TS will complain if a typed call site uses an
 // endpoint not in the cost table.
 export const GOOGLE_COST_CENTS = {
-  nearby:        3.2,
-  textSearch:    3.2,
+  nearby:        3.5,
+  textSearch:    3.5,
   photo:         0.7,
-  placeDetails:  1.7,
+  placeDetails:  2.0,
   geocode:       0.5,
 } as const;
 

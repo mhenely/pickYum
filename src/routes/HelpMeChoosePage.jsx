@@ -254,6 +254,50 @@ const HelpMeChoosePage = () => {
   // and get no feedback (no error, no visible change).
   const optionsSet = useMemo(() => new Set(options.map(sid)), [options]);
 
+  // ── Smart defaults (beta feedback) ────────────────────────
+  // 1. Mode: coin flip handles exactly 2 candidates; with 3+ the
+  //    roulette wheel is the natural fit. Auto-pick accordingly —
+  //    but only until the user explicitly switches modes, after
+  //    which their choice wins for the rest of the visit.
+  const userPickedMode = useRef(false);
+  useEffect(() => {
+    if (userPickedMode.current) return;
+    setMode(flipPool.length > 2 ? 'roulette' : 'coinflip');
+  }, [flipPool.length]);
+
+  // 2. Heads/Tails: pre-assign the first two pool entries so the coin
+  //    is instantly flippable — the manual assign step was the #1
+  //    point of confusion in beta ("why won't Flip work?"). Only
+  //    fires when BOTH sides are unassigned (never fights a partial
+  //    manual assignment) and never mid-flip / mid-result.
+  useEffect(() => {
+    if (mode !== 'coinflip') return;
+    if (headsId || tailsId) return;
+    if (isFlipping || flipComplete) return;
+    if (flipPool.length < 2) return;
+    setHeadsId(flipPool[0]);
+    setTailsId(flipPool[1]);
+  }, [mode, headsId, tailsId, isFlipping, flipComplete, flipPool]);
+
+  // Shared mode switcher — used by the left-rail toggle AND the inline
+  // link under the coin/wheel. Clears any in-progress result state so
+  // switching mid-result can't leave a stale winner banner behind.
+  const switchMode = useCallback((next) => {
+    userPickedMode.current = true;
+    setMode((current) => {
+      if (current === next) return current;
+      if (next === 'roulette') {
+        setHeadsId(null);
+        setTailsId(null);
+        setFlipResult(null);
+        setFlipComplete(false);
+      } else {
+        setRouletteWinnerId(null);
+      }
+      return next;
+    });
+  }, []);
+
   const filtersActive =
     priceFilter.size > 0 || cuisineFilter || openNowOnly || avoidDays > 0;
 
@@ -611,21 +655,12 @@ const HelpMeChoosePage = () => {
             </div>
           </div>
 
-          {/* Mode toggle */}
+          {/* Mode toggle — same switchMode helper as the inline link
+              under the coin/wheel, so both paths mark the choice as
+              user-made (disables the auto-mode default) and clear
+              in-progress result state identically. */}
           <button
-            onClick={() => {
-              setMode((m) => {
-                if (m === "coinflip") {
-                  setHeadsId(null);
-                  setTailsId(null);
-                  setFlipResult(null);
-                  setFlipComplete(false);
-                  return "roulette";
-                }
-                setRouletteWinnerId(null);
-                return "coinflip";
-              });
-            }}
+            onClick={() => switchMode(mode === "coinflip" ? "roulette" : "coinflip")}
             className={[
               "w-full rounded-lg border-2 py-2.5 px-4 font-semibold text-sm transition-colors",
               mode === "coinflip"
@@ -1019,6 +1054,29 @@ const HelpMeChoosePage = () => {
                 {isFlipping ? "Flipping…" : "Flip"}
               </button>
 
+              {/* Explain the (auto-)assignment + offer the mode switch
+                  right where the user's attention is. Beta feedback:
+                  the H/T mechanic and the left-rail mode toggle were
+                  both easy to miss. Hidden once a result is pending
+                  so they don't compete with the banner. */}
+              {!isFlipping && !flipComplete && (
+                <div className="flex flex-col items-center gap-1 text-center">
+                  <p className="text-xs text-gray-400 max-w-xs">
+                    We picked two options for you — {isTouchDevice
+                      ? 'tap H / T on a card'
+                      : 'drag the H / T badges onto cards'} to change which is which.
+                  </p>
+                  {flipPool.length > 2 && (
+                    <button
+                      onClick={() => switchMode('roulette')}
+                      className="text-xs text-gray-500 hover:text-orange-600 transition-colors"
+                    >
+                      {flipPool.length} options in play — spin the roulette wheel instead →
+                    </button>
+                  )}
+                </div>
+              )}
+
               {flipComplete && (
                 <ResultBanner
                   label={flipResult === "heads" ? "🪙 Heads!" : "🪙 Tails!"}
@@ -1056,12 +1114,23 @@ const HelpMeChoosePage = () => {
                   while spinning or after a winner has resolved so it
                   doesn't compete with the result banner. */}
               {!isSpinning && !rouletteWinnerId && (
-                <button
-                  onClick={handleSkipSpin}
-                  className="text-xs text-gray-500 hover:text-orange-600 transition-colors"
-                >
-                  or skip the spin →
-                </button>
+                <div className="flex flex-col items-center gap-1">
+                  <button
+                    onClick={handleSkipSpin}
+                    className="text-xs text-gray-500 hover:text-orange-600 transition-colors"
+                  >
+                    or skip the spin →
+                  </button>
+                  {/* Inline mode switch — mirrors the coin side's link
+                      so switching modes never requires finding the
+                      left-rail toggle. */}
+                  <button
+                    onClick={() => switchMode('coinflip')}
+                    className="text-xs text-gray-500 hover:text-orange-600 transition-colors"
+                  >
+                    or flip a coin between two →
+                  </button>
+                </div>
               )}
 
               {rouletteWinnerId && !isSpinning && (

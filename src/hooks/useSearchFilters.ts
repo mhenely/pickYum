@@ -31,6 +31,7 @@ import {
   setOpenAtTime,
   toggleDeliveryFilter,
   toggleTakeoutFilter,
+  toggleHideFastFood,
   toggleDietaryFilter,
   setSortBy,
   setQuery,
@@ -53,6 +54,7 @@ interface SearchState {
   openAtTime: string;
   deliveryFilter: boolean;
   takeoutFilter: boolean;
+  hideFastFood: boolean;
   dietaryFilterEnabled: boolean;
   sortBy: string;
   query: string;
@@ -90,6 +92,7 @@ export function useSearchFilters() {
     openAtTime: state.openAtTime,
     deliveryFilter: state.deliveryFilter,
     takeoutFilter: state.takeoutFilter,
+    hideFastFood: state.hideFastFood,
     dietaryFilterEnabled: state.dietaryFilterEnabled,
     sortBy: state.sortBy,
     query: state.query,
@@ -117,6 +120,7 @@ export function useSearchFilters() {
     setOpenAtTime:        useCallback((p: string)                                    => dispatch(setOpenAtTime(p)),        [dispatch]),
     toggleDeliveryFilter: useCallback(()                                             => dispatch(toggleDeliveryFilter()),  [dispatch]),
     toggleTakeoutFilter:  useCallback(()                                             => dispatch(toggleTakeoutFilter()),   [dispatch]),
+    toggleHideFastFood:   useCallback(()                                             => dispatch(toggleHideFastFood()),    [dispatch]),
     toggleDietaryFilter:  useCallback(()                                             => dispatch(toggleDietaryFilter()),   [dispatch]),
     setSortBy:            useCallback((p: string)                                    => dispatch(setSortBy(p)),            [dispatch]),
     setQuery:             useCallback((p: string)                                    => dispatch(setQuery(p)),             [dispatch]),

@@ -174,27 +174,45 @@ function extractRegularOpeningHours(p: RawPlace): RegularOpeningHours | null {
 // ── Cache layer (Redis when available, in-memory fallback) ───────────────
 //
 // TTLs picked to maximize cache hit rate without serving meaningfully
-// stale data. Bumped from earlier defaults to cut Google Places spend
-// — restaurant data doesn't change minute-to-minute, and the cost
-// pressure on the Places API budget made the conservative defaults
-// hard to justify.
+// stale data. Bumped progressively over time as Google Places spend
+// pressure has grown — restaurant data doesn't change minute-to-minute
+// (or even day-to-day for most fields), so the conservative defaults
+// from earlier iterations were burning money to refresh data that
+// hadn't actually changed.
 //
 // NEARBY: stale-while-revalidate. We serve fresh from cache for
 // NEARBY_FRESH_S, then serve stale (and kick off a background refresh)
-// up to NEARBY_TTL_S. This lets the effective hit rate climb past the
-// old hard 30-min cliff: the "unlucky first user past the boundary"
-// no longer pays a full fan-out — they get instant-stale and a
-// background fetch quietly refreshes the cache for everyone after.
+// up to NEARBY_TTL_S. The fresh-window bump (15min → 60min) is the
+// load-bearing change for cost: most users iterating on radius / cuisine
+// / dietary now hit the fresh path, paying zero. The outer TTL bump
+// (90min → 24h) gives SWR room — past the 60-min boundary, users still
+// get instant stale + background refresh, but the worst-case "user
+// past the freshUntil window who triggers the refresh" amortizes across
+// every other user reading the cached result for the next 23h. Combined,
+// effective cache hit rate climbs significantly for any area with even
+// modest user density.
 //
-// Worst-case staleness is NEARBY_TTL_S (90 min). Restaurants' hours,
-// ratings, and photo refs don't shift that fast, and the actual
-// "is open now" computation is done client-side from
-// regularOpeningHours periods (not from a cached snapshot). If a
-// place permanently closes, the 90-min worst case is acceptable —
-// users will still see them but the next refresh picks it up.
-const NEARBY_FRESH_S = 15 * 60; //  15 minutes — serve as fresh, no refresh
-const NEARBY_TTL_S   = 90 * 60; //  90 minutes — total cache lifetime (incl. stale window)
-const TEXT_TTL_S     =  5 * 60; //  5 minutes
+// Worst-case staleness is NEARBY_TTL_S (24h). Restaurants' hours,
+// ratings, and photo refs don't shift that fast — typical data drift
+// over a day is "rating ticked from 4.4 to 4.5 because of 12 new
+// reviews", which doesn't change whether the user wants to eat there.
+// The actual "is open now" computation is done client-side from
+// regularOpeningHours periods (not from a cached snapshot), so
+// hour-of-day correctness is independent of this TTL. A place that
+// permanently closes gets a "closed permanently" pill from the
+// `businessStatus` field the next time the SWR refresh lands, so the
+// 24h worst case shows them as still listed but doesn't claim they're
+// open.
+const NEARBY_FRESH_S = 60 * 60;       //  60 minutes — serve as fresh, no refresh
+const NEARBY_TTL_S   = 24 * 60 * 60;  //  24 hours — total cache lifetime (incl. stale window)
+// TEXT_TTL_S: text-search results don't have SWR (just plain TTL), so
+// staleness here is "user reruns the same name search within N min and
+// gets cached results". 30 min is forgiving but well within how often
+// a Google text-search result for a specific restaurant name actually
+// changes (rating + business_status are the only volatile fields, and
+// neither shifts noticeably in half an hour). The previous 5-min ceiling
+// was paranoid by an order of magnitude relative to actual data drift.
+const TEXT_TTL_S     = 30 * 60;       //  30 minutes
 // Geocoding results essentially never change — an address resolves
 // to the same lat/lng forever (until the post office renumbers a
 // street, which is rare). Bumped to 24h so a daily user pays the
@@ -478,44 +496,57 @@ function cacheKey(lat: number, lng: number, radius: number, cuisineType: string 
 
 // ── Text-search field mask (smaller than nearby — no location needed) ────
 //
-// SKU tier note: stays in Pro tier. We intentionally do NOT request
-// `places.reviews` here — that field bumps the call to Enterprise
-// pricing. Frontend surfaces a "View on Google" deep-link to the place's
-// Maps page instead, where users can read full reviews on Google's own
-// surface (also avoids the TOS author-attribution requirement on our
-// rendered text).
-const TEXT_FIELD_MASK = [
+// ⚠ SKU TIER WARNING — read before adding ANY field here.
+//
+// A search call bills at the tier of its MOST EXPENSIVE requested
+// field, and each tier has a different monthly free-call allowance
+// (Essentials 10K / Pro 5K / Enterprise 1K). Google's field→SKU table:
+// https://developers.google.com/maps/billing-and-pricing/sku-details
+//
+// This mask deliberately tops out at ENTERPRISE tier:
+//   - Pro fields:        displayName, formattedAddress, photos, types,
+//                        primaryType, primaryTypeDisplayName, businessStatus
+//   - Enterprise fields: rating, userRatingCount, priceLevel,
+//                        regularOpeningHours, internationalPhoneNumber,
+//                        websiteUri
+//
+// Fields we deliberately DO NOT request (cost history — do not re-add
+// without pricing out the consequence):
+//   - takeout / delivery / servesVegetarianFood → Enterprise+Atmosphere,
+//     the most expensive SKU. These three fields alone were the root
+//     cause of the launch-month billing blowout: they silently bumped
+//     every search call to the top SKU and burned its 1K/month free
+//     allowance almost immediately. The Takeout/Delivery badges and
+//     the vegetarian hard-filter were dropped in exchange for
+//     Enterprise-tier billing.
+//   - reviews → also Enterprise+Atmosphere; users get a "View on
+//     Google" deep-link instead.
+//
+// A tier-guard test (see __tests__/routes/placesFieldMask.test.ts)
+// fails the build if an Atmosphere-tier field sneaks back in.
+// Exported for that test only — not consumed by other modules.
+export const TEXT_FIELD_MASK = [
   'places.id',
   'places.displayName',
   'places.formattedAddress',
   'places.rating',
   'places.userRatingCount',
   'places.priceLevel',
-  // primaryType is used server-side only (deny-list filter); the user-
-  // visible cuisine label comes from primaryTypeDisplayName. Cheap to
-  // keep — both are in the same Pro-tier slot — but listed here as a
-  // single audit cue so removals are easy to spot if Google ever
-  // tiers them differently.
+  // primaryType is used server-side (deny-list filter) AND surfaced to
+  // the client for the fast-food toggle; the user-visible cuisine label
+  // comes from primaryTypeDisplayName.
   'places.primaryType',
   'places.primaryTypeDisplayName',
   // regularOpeningHours feeds the structured weekly hours table in the
   // detail modal (weekdayDescriptions) AND the client-side open-now /
   // closing-soon computation (periods, evaluated fresh against the
-  // user's clock). currentOpeningHours used to live here too for the
-  // snapshot `openNow` flag, but the frontend computes open-now fresh
-  // from periods anyway — the snapshot was redundant and contributes
-  // nothing to the UI, so it was dropped to trim the response payload.
+  // user's clock).
   'places.regularOpeningHours',
   // Phone + website at search time so newly-materialized rows show
   // these fields in the detail modal immediately, without having to
-  // wait for refresh-places to back-fill them. Both Pro tier — same
-  // SKU bucket as everything else in this mask, no cost bump.
+  // wait for refresh-places to back-fill them.
   'places.internationalPhoneNumber',
   'places.websiteUri',
-  'places.takeout',
-  'places.delivery',
-  // Dietary-filter hook (Phase E). See FIELD_MASK for the rationale.
-  'places.servesVegetarianFood',
   'places.businessStatus',
   'places.photos',
 ].join(',');
@@ -793,8 +824,10 @@ router.get('/text-search', async (req: Request, res: Response) => {
       priceLevel:    PRICE_LEVEL_MAP[p.priceLevel] ?? null,
       address:       (p.formattedAddress as string | undefined) ?? null,
       cuisineType:   (p.primaryTypeDisplayName?.text as string | undefined) ?? null,
-      takeout:       p.takeout === true,
-      delivery:      p.delivery === true,
+      // Machine-readable type slug ("fast_food_restaurant", "cafe", …).
+      // Powers the client-side fast-food toggle — already fetched for
+      // the deny-list filter, so surfacing it costs nothing extra.
+      primaryType:   (p.primaryType as string | undefined) ?? null,
       openNow:       (p.currentOpeningHours?.openNow as boolean | undefined) ?? null,
       photos:        extractPhotos(p),
       regularOpeningHours: extractRegularOpeningHours(p),
@@ -803,12 +836,10 @@ router.get('/text-search', async (req: Request, res: Response) => {
       phone:         (p.internationalPhoneNumber as string | undefined) ?? null,
       // Public website URL. null when missing; the modal hides the row.
       website:       (p.websiteUri as string | undefined) ?? null,
-      // Dietary-filter hook (Phase E). Tri-state: true / false / null.
-      // null = Google didn't tell us either way; the filter treats
-      // unknowns conservatively (drops them from vegetarian-required
-      // results) so an opt-in filter doesn't leak through every
-      // unflagged place.
-      servesVegetarianFood: typeof p.servesVegetarianFood === 'boolean' ? p.servesVegetarianFood : null,
+      // takeout / delivery / servesVegetarianFood intentionally absent:
+      // their fields were dropped from the mask to escape the
+      // Enterprise+Atmosphere SKU. Saved rows keep whatever values they
+      // were materialized with; fresh search results simply omit them.
     }));
 
   await textSet(q, bias, { restaurants });
@@ -823,11 +854,14 @@ router.get('/text-search', async (req: Request, res: Response) => {
 });
 
 // ── Fields to request — only pay for what we use ──────────────────────────
-// SKU tier note: stays in Pro tier. `places.reviews` was removed because
-// it bumps the call to Enterprise pricing; users get a "View on Google"
-// deep-link to the place's Maps page instead, which costs us nothing and
-// shows full reviews on Google's own surface.
-const FIELD_MASK = [
+// ⚠ SKU TIER WARNING: see the TEXT_FIELD_MASK comment above for the
+// full field→tier breakdown and the cost history behind it. Summary:
+// this mask deliberately tops out at ENTERPRISE tier. Do NOT add
+// takeout / delivery / servesVegetarianFood / reviews — each bumps
+// every nearby call to Enterprise+Atmosphere (the most expensive SKU,
+// smallest free allowance). The tier-guard test enforces this.
+// Exported for that test only.
+export const FIELD_MASK = [
   'places.id',
   'places.displayName',
   'places.formattedAddress',
@@ -835,12 +869,9 @@ const FIELD_MASK = [
   'places.rating',
   'places.userRatingCount',
   'places.priceLevel',
-  // `places.types` is not rendered to the user but is consumed
-  // server-side by the cuisine-broaden post-filter (see merge loop in
-  // the /nearby handler — when slice 2 is the broader `restaurant`
-  // call, we drop results whose `primaryType` AND `types[]` both miss
-  // the cuisine slug). Keeping it costs only response bytes, no SKU
-  // change — adding/removing fields within the Pro tier is free.
+  // `places.types` is consumed server-side by the cuisine-broaden
+  // post-filter (see merge loop in the /nearby handler) and by the
+  // client-side fast-food toggle. Same Pro-tier slot as primaryType.
   'places.types',
   'places.primaryType',
   'places.primaryTypeDisplayName',
@@ -849,14 +880,9 @@ const FIELD_MASK = [
   // regularOpeningHours periods.
   'places.regularOpeningHours',
   // Phone + website surfaced at search time so the modal can show
-  // them without waiting on the refresh-places back-fill. Pro tier,
-  // no SKU bump.
+  // them without waiting on the refresh-places back-fill.
   'places.internationalPhoneNumber',
   'places.websiteUri',
-  'places.takeout',
-  'places.delivery',
-  // Dietary-filter hook (Phase E). See FIELD_MASK comment for SKU note.
-  'places.servesVegetarianFood',
   'places.businessStatus',
   'places.photos',
 ].join(',');
@@ -910,6 +936,18 @@ const EXCLUDED_PRIMARY_TYPES = [
   // Services
   'bank', 'post_office',
   'police', 'fire_station',
+];
+
+// Local-only deny-list extension. These types are filtered in the
+// server-side post-filter (see excludedPrimarySet in runNearbyFanOut)
+// but NOT sent to Google — the API-side excludedPrimaryTypes list is
+// hard-capped at 50 entries and EXCLUDED_PRIMARY_TYPES is already at
+// 49. The post-filter set has no cap, so overflow entries live here.
+// Beta feedback: BJ's Wholesale Club appeared in restaurant results —
+// warehouse clubs sell food, so Google tags them with food types, but
+// their primaryType is a wholesale/retail category we never excluded.
+const EXCLUDED_PRIMARY_TYPES_LOCAL_ONLY = [
+  'wholesaler', 'warehouse_store', 'liquor_store', 'market',
 ];
 
 // ── Cuisine-type whitelist ───────────────────────────────────────────────
@@ -1022,9 +1060,17 @@ async function runNearbyFanOut(opts: {
   // didn't rank in the top 20 of the direct call.
   // Promise.allSettled instead of Promise.all so a single failing
   // slice doesn't sink the whole search.
-  const typeSets: string[][] = cuisineType
+  //
+  // NEARBY_SLICES (env, default 2) is a cost throttle: set to 1 on the
+  // deployment to halve per-search Google spend at the cost of losing
+  // the slice-B long tail (cafés / bakeries / dessert / bars — places
+  // not tagged `restaurant`). A config-only lever so spend pressure
+  // can be relieved without a code change.
+  const sliceCap = process.env.NEARBY_SLICES === '1' ? 1 : 2;
+  const typeSets: string[][] = (cuisineType
     ? [[cuisineType], ['restaurant']]
-    : NEARBY_TYPE_SETS;
+    : NEARBY_TYPE_SETS
+  ).slice(0, sliceCap);
   const nearbyResponses = await Promise.allSettled(
     typeSets.map((includedTypes) =>
       fetch('https://places.googleapis.com/v1/places:searchNearby', {
@@ -1038,6 +1084,14 @@ async function runNearbyFanOut(opts: {
           includedTypes,
           excludedPrimaryTypes: EXCLUDED_PRIMARY_TYPES,
           maxResultCount: 20,
+          // DISTANCE, not the default POPULARITY. With a wide radius,
+          // popularity ranking returns the 20 most popular places
+          // anywhere in the circle — users see a handful of local hits
+          // plus famous spots miles away, while ordinary restaurants
+          // two blocks over never make the cut (beta feedback caught
+          // exactly this). Distance ranking returns the 20 CLOSEST
+          // matches per slice, which is what "search near me" means.
+          rankPreference: 'DISTANCE',
           locationRestriction: {
             circle: {
               center: { latitude: lat, longitude: lng },
@@ -1110,8 +1164,9 @@ async function runNearbyFanOut(opts: {
 
   // Defense-in-depth filter: `excludedPrimaryTypes` is a hint to
   // Google, not a guarantee. Re-check primaryType on response and
-  // drop any straggler.
-  const excludedPrimarySet = new Set(EXCLUDED_PRIMARY_TYPES);
+  // drop any straggler. Includes the local-only overflow entries that
+  // don't fit in Google's 50-entry API-side cap.
+  const excludedPrimarySet = new Set([...EXCLUDED_PRIMARY_TYPES, ...EXCLUDED_PRIMARY_TYPES_LOCAL_ONLY]);
 
   const restaurants = mergedPlaces
     .filter((p: any) => p.businessStatus !== 'CLOSED_PERMANENTLY')
@@ -1127,8 +1182,9 @@ async function runNearbyFanOut(opts: {
         priceLevel: PRICE_LEVEL_MAP[p.priceLevel] ?? null,
         address: (p.formattedAddress as string | undefined) ?? null,
         cuisineType: (p.primaryTypeDisplayName?.text as string | undefined) ?? null,
-        takeout: p.takeout === true,
-        delivery: p.delivery === true,
+        // Machine-readable type slug — powers the client-side fast-food
+        // toggle. See text-search projection for rationale.
+        primaryType: (p.primaryType as string | undefined) ?? null,
         // Always null now — currentOpeningHours was dropped from the
         // field mask. The frontend computes its own openNow fresh
         // against the user's clock from regularOpeningHours periods,
@@ -1142,8 +1198,9 @@ async function runNearbyFanOut(opts: {
         regularOpeningHours: extractRegularOpeningHours(p),
         phone:   (p.internationalPhoneNumber as string | undefined) ?? null,
         website: (p.websiteUri as string | undefined) ?? null,
-        // Dietary-filter hook (Phase E). See text-search projection above.
-        servesVegetarianFood: typeof p.servesVegetarianFood === 'boolean' ? p.servesVegetarianFood : null,
+        // takeout / delivery / servesVegetarianFood intentionally absent
+        // — dropped from the mask to escape the Enterprise+Atmosphere
+        // SKU. See TEXT_FIELD_MASK warning comment.
       };
     })
     .sort((a: any, b: any) => {
