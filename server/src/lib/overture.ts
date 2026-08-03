@@ -112,13 +112,23 @@ export function transformOvertureFeature(feature: unknown): OpenPlaceRow | null 
   const props = f?.properties;
   if (!props) return null;
 
+  // NUL bytes (\u0000) are legal in JSON strings but categorically
+  // rejected by Postgres TEXT — one poisoned row killed entire metro
+  // ingests before this strip (NYC/LA/Chicago all died mid-file).
+  // EVERY string that reaches the DB goes through this sanitizer,
+  // including name and sourceId — not just the optional fields.
+  const str = (v: unknown, max: number): string | null => {
+    if (typeof v !== 'string') return null;
+    const cleaned = v.replace(/\u0000/g, '').trim();
+    return cleaned ? cleaned.slice(0, max) : null;
+  };
+
   // GERS id lives at the FEATURE level in current releases; older
   // tooling put it in properties. Accept either — this exact mismatch
   // once made an ingest run silently reject all 99K features.
-  const rawId = typeof f?.id === 'string' ? f.id : (typeof props.id === 'string' ? props.id : null);
-  const name = typeof props.names?.primary === 'string' ? props.names.primary.trim() : '';
-  if (!rawId || !name) return null;
-  const sourceId = rawId;
+  const sourceId = str(f?.id, 64) ?? str(props.id, 64);
+  const name = str(props.names?.primary, 200);
+  if (!sourceId || !name) return null;
 
   const coords = f?.geometry?.type === 'Point' && Array.isArray(f.geometry.coordinates)
     ? f.geometry.coordinates
@@ -136,13 +146,11 @@ export function transformOvertureFeature(feature: unknown): OpenPlaceRow | null 
     : [];
 
   const addr = Array.isArray(props.addresses) ? props.addresses[0] : undefined;
-  const str = (v: unknown, max: number): string | null =>
-    typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null;
 
   return {
     source: 'overture',
-    sourceId: sourceId.slice(0, 64),
-    name: name.slice(0, 200),
+    sourceId,
+    name,
     categoryPrimary: primary,
     categories: alternates,
     lat, lng,

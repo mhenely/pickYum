@@ -1,0 +1,28 @@
+{
+  "_comment": "Region manifest for the Overture places index. bbox = [lngMin, latMin, lngMax, latMax] (west, south, east, north) — the format the overturemaps CLI expects. Used by hand-run loads today and the future monthly-refresh automation. Adding a metro = add an entry, download its bbox, run ingest (fast mode for first load, refresh+prune thereafter).",
+  "regions": [
+    { "slug": "portland",     "label": "Portland, OR metro",                       "bbox": [-123.20, 45.30, -122.40, 45.72] },
+    { "slug": "florida-gulf", "label": "Venice-Sarasota-Bradenton-St.Pete-Tampa",  "bbox": [-82.90, 27.00, -82.20, 28.20] },
+    { "slug": "nyc",          "label": "New York City + inner NJ",                 "bbox": [-74.30, 40.48, -73.65, 40.95] },
+    { "slug": "seattle",      "label": "Seattle-Tacoma-Everett",                   "bbox": [-122.55, 47.10, -121.95, 48.05] },
+    { "slug": "los-angeles",  "label": "Los Angeles + Orange County",              "bbox": [-118.70, 33.60, -117.60, 34.35] },
+    { "slug": "dc-baltimore", "label": "Washington DC + Baltimore corridor",       "bbox": [-77.35, 38.65, -76.30, 39.45] },
+    { "slug": "sf-bay",       "label": "SF-Oakland-San Jose",                      "bbox": [-122.55, 37.20, -121.75, 38.00] },
+    { "slug": "las-vegas",    "label": "Las Vegas + Henderson",                    "bbox": [-115.35, 35.95, -114.95, 36.35] },
+    { "slug": "chicago",      "label": "Chicago + Evanston + Oak Park",            "bbox": [-88.00, 41.60, -87.50, 42.10] },
+    { "slug": "boston",       "label": "Boston-Cambridge-Quincy",                  "bbox": [-71.30, 42.20, -70.90, 42.55] },
+    { "slug": "austin",       "label": "Austin metro",                             "bbox": [-98.00, 30.10, -97.55, 30.55] },
+    { "slug": "denver",       "label": "Denver + Boulder",                         "bbox": [-105.35, 39.50, -104.65, 40.05] },
+    { "slug": "atlanta",      "label": "Atlanta + Decatur + Sandy Springs",        "bbox": [-84.60, 33.55, -84.15, 33.95] },
+    { "slug": "orlando",      "label": "Orlando + Disney/Kissimmee",               "bbox": [-81.60, 28.30, -81.15, 28.70] },
+    { "slug": "new-orleans",  "label": "New Orleans + Metairie",                   "bbox": [-90.20, 29.85, -89.95, 30.05] },
+    { "slug": "nashville",    "label": "Nashville + Franklin",                     "bbox": [-87.00, 35.85, -86.55, 36.35] },
+    { "slug": "miami",        "label": "Miami + Fort Lauderdale",                  "bbox": [-80.45, 25.60, -80.05, 26.20] },
+    { "slug": "san-diego",    "label": "San Diego + La Jolla",                     "bbox": [-117.30, 32.55, -116.90, 33.05] },
+    { "slug": "st-louis",     "label": "St. Louis + Metro East IL",                "bbox": [-90.65, 38.45, -89.90, 38.85] },
+    { "slug": "kansas-city",  "label": "Kansas City MO+KS, Overland Park",         "bbox": [-94.90, 38.80, -94.25, 39.35] },
+    { "slug": "boca-palm-beach", "label": "Boca Raton-Delray-West Palm Beach",     "bbox": [-80.30, 26.20, -80.03, 26.95] },
+    { "slug": "louisville",   "label": "Louisville + southern IN",                 "bbox": [-85.95, 38.05, -85.45, 38.40] },
+    { "slug": "santa-barbara","label": "Santa Barbara + Goleta + Carpinteria",     "bbox": [-119.95, 34.35, -119.45, 34.55] }
+  ]
+}

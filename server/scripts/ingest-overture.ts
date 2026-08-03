@@ -1,8 +1,14 @@
 // Ingest Overture Maps places into the open_places table.
 //
 // Usage (run from server/, against the env of your choice):
+//   # New region — fast path (batched INSERT .. ON CONFLICT DO NOTHING):
 //   npx dotenv -e .env.production -- npx tsx scripts/ingest-overture.ts --file portland.geojsonseq
-//   npx dotenv -e .env.production -- npx tsx scripts/ingest-overture.ts --file portland.geojsonseq --replace
+//
+//   # Monthly refresh of an already-loaded region — upserts every row,
+//   # then prunes rows inside the bbox that the new release no longer
+//   # contains (closed/removed places):
+//   npx dotenv -e .env.production -- npx tsx scripts/ingest-overture.ts \
+//     --file portland.geojsonseq --mode refresh --prune-bbox=-123.20,45.30,-122.40,45.72
 //
 // Input: a GeoJSON-SEQ file (one feature per line) from the official
 // Overture CLI. Produce it with:
@@ -16,11 +22,18 @@
 // download itself can't filter by category, so expect the input to
 // contain every POI type and the ingest to keep ~10-20% of rows.
 //
-// Idempotent: rows upsert on the (source, sourceId) unique key, so
-// re-running the same file — or a newer Overture release for the
-// same area — updates in place. --replace wipes existing overture
-// rows first (use when narrowing the bbox, otherwise out-of-bbox
-// strays linger).
+// Modes:
+//   fast (default) — createMany + skipDuplicates: one round trip per
+//     batch instead of per row (~10× faster over a remote pooler).
+//     Existing rows are left untouched, so this is for FIRST loads of
+//     a region, not refreshes.
+//   refresh — upserts row-by-row (updates existing places in-place,
+//     stamping ingestedAt) and, with --prune-bbox, deletes rows inside
+//     that bbox whose ingestedAt predates this run — i.e. places the
+//     new release dropped. Prune runs AFTER the ingest completes, so
+//     the endpoint serves the region uninterrupted throughout.
+//   --replace — wipes ALL overture rows first (every region!). Only
+//     for starting over; per-region maintenance wants refresh+prune.
 
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
@@ -29,36 +42,113 @@ import { transformOvertureFeature, type OpenPlaceRow } from '../src/lib/overture
 
 const BATCH_SIZE = 500;
 
-function parseArgs(): { file: string; replace: boolean } {
-  const args = process.argv.slice(2);
-  const fileIdx = args.indexOf('--file');
-  const file = fileIdx >= 0 ? args[fileIdx + 1] : undefined;
-  if (!file) {
-    console.error('Usage: tsx scripts/ingest-overture.ts --file <path.geojsonseq> [--replace]');
-    process.exit(1);
-  }
-  return { file, replace: args.includes('--replace') };
+interface Args {
+  file: string;
+  mode: 'fast' | 'refresh';
+  replace: boolean;
+  pruneBbox: { minLng: number; minLat: number; maxLng: number; maxLat: number } | null;
 }
 
-// createMany({ skipDuplicates }) would be faster but silently keeps
-// stale rows when re-ingesting a newer release. Upsert-per-row in a
-// transaction batch keeps releases refreshable at metro-scale cost
-// (~10-20K food rows = a few minutes) — fine for a script run
-// occasionally by hand.
-async function flushBatch(batch: OpenPlaceRow[]): Promise<void> {
-  await prisma.$transaction(
-    batch.map((row) =>
-      prisma.openPlace.upsert({
-        where: { source_sourceId: { source: row.source, sourceId: row.sourceId } },
-        create: row,
-        update: { ...row, ingestedAt: new Date() },
-      }),
-    ),
+function usageAndExit(msg?: string): never {
+  if (msg) console.error(`Error: ${msg}\n`);
+  console.error(
+    'Usage: tsx scripts/ingest-overture.ts --file <path.geojsonseq> ' +
+    '[--mode fast|refresh] [--prune-bbox=lngMin,latMin,lngMax,latMax] [--replace]',
   );
+  process.exit(1);
+}
+
+function parseArgs(): Args {
+  const args = process.argv.slice(2);
+  const valueOf = (flag: string): string | undefined => {
+    const eq = args.find((a) => a.startsWith(`${flag}=`));
+    if (eq) return eq.slice(flag.length + 1);
+    const idx = args.indexOf(flag);
+    return idx >= 0 ? args[idx + 1] : undefined;
+  };
+
+  const file = valueOf('--file');
+  if (!file) usageAndExit();
+
+  const modeRaw = valueOf('--mode') ?? 'fast';
+  if (modeRaw !== 'fast' && modeRaw !== 'refresh') usageAndExit(`unknown --mode "${modeRaw}"`);
+
+  let pruneBbox: Args['pruneBbox'] = null;
+  const bboxRaw = valueOf('--prune-bbox');
+  if (bboxRaw) {
+    if (modeRaw !== 'refresh') usageAndExit('--prune-bbox requires --mode refresh');
+    const parts = bboxRaw.split(',').map(Number);
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
+      usageAndExit(`--prune-bbox must be 4 comma-separated numbers, got "${bboxRaw}"`);
+    }
+    const [minLng, minLat, maxLng, maxLat] = parts;
+    if (minLng >= maxLng || minLat >= maxLat) {
+      usageAndExit('--prune-bbox must be lngMin,latMin,lngMax,latMax with min < max');
+    }
+    pruneBbox = { minLng, minLat, maxLng, maxLat };
+  }
+
+  return { file, mode: modeRaw, replace: args.includes('--replace'), pruneBbox };
+}
+
+// Poison-row isolation: a batch that fails wholesale (e.g. a row
+// Postgres rejects for a reason the transform didn't sanitize) falls
+// back to row-at-a-time writes, skipping only the offender. Before
+// this, one bad row aborted the process and silently truncated whole
+// metro loads — the endpoint then served partial regions with no
+// indication anything was missing.
+let skippedRows = 0;
+
+// fast: one INSERT ... ON CONFLICT DO NOTHING per batch — one round
+// trip per 500 rows. Existing rows untouched (first-load semantics).
+async function flushBatchFast(batch: OpenPlaceRow[]): Promise<number> {
+  try {
+    const { count } = await prisma.openPlace.createMany({ data: batch, skipDuplicates: true });
+    return count;
+  } catch {
+    let ok = 0;
+    for (const row of batch) {
+      try {
+        const { count } = await prisma.openPlace.createMany({ data: [row], skipDuplicates: true });
+        ok += count;
+      } catch (err) {
+        skippedRows += 1;
+        console.warn(`  ! skipping row ${row.sourceId} ("${row.name.slice(0, 40)}"): ${(err as Error).message?.split('\n')[0].slice(0, 140)}`);
+      }
+    }
+    return ok;
+  }
+}
+
+// refresh: upsert-per-row inside a transaction batch — slower (one
+// round trip per row) but updates existing places in place and stamps
+// ingestedAt, which the prune step keys on. Same isolation fallback.
+async function flushBatchRefresh(batch: OpenPlaceRow[]): Promise<number> {
+  const upsertOne = (row: OpenPlaceRow) =>
+    prisma.openPlace.upsert({
+      where: { source_sourceId: { source: row.source, sourceId: row.sourceId } },
+      create: row,
+      update: { ...row, ingestedAt: new Date() },
+    });
+  try {
+    await prisma.$transaction(batch.map(upsertOne));
+    return batch.length;
+  } catch {
+    let ok = 0;
+    for (const row of batch) {
+      try { await upsertOne(row); ok += 1; }
+      catch (err) {
+        skippedRows += 1;
+        console.warn(`  ! skipping row ${row.sourceId} ("${row.name.slice(0, 40)}"): ${(err as Error).message?.split('\n')[0].slice(0, 140)}`);
+      }
+    }
+    return ok;
+  }
 }
 
 async function main(): Promise<void> {
-  const { file, replace } = parseArgs();
+  const { file, mode, replace, pruneBbox } = parseArgs();
+  const runStart = new Date();
 
   if (replace) {
     const { count } = await prisma.openPlace.deleteMany({ where: { source: 'overture' } });
@@ -66,6 +156,7 @@ async function main(): Promise<void> {
   }
 
   const rl = createInterface({ input: createReadStream(file), crlfDelay: Infinity });
+  const flush = mode === 'fast' ? flushBatchFast : flushBatchRefresh;
 
   let read = 0;
   let kept = 0;
@@ -98,17 +189,33 @@ async function main(): Promise<void> {
     kept += 1;
 
     if (batch.length >= BATCH_SIZE) {
-      await flushBatch(batch);
+      await flush(batch);
       batch = [];
       console.log(`  …${kept} food places ingested (${read} features read)`);
     }
   }
 
-  if (batch.length > 0) await flushBatch(batch);
+  if (batch.length > 0) await flush(batch);
+
+  // Prune AFTER the full ingest so the region is never partially
+  // empty: every surviving place got a fresh ingestedAt above; rows
+  // in the bbox still carrying an older stamp weren't in this release.
+  if (pruneBbox) {
+    const { count } = await prisma.openPlace.deleteMany({
+      where: {
+        source: 'overture',
+        ingestedAt: { lt: runStart },
+        lat: { gte: pruneBbox.minLat, lte: pruneBbox.maxLat },
+        lng: { gte: pruneBbox.minLng, lte: pruneBbox.maxLng },
+      },
+    });
+    console.log(`Pruned ${count} places no longer present in this release (bbox-scoped).`);
+  }
 
   const total = await prisma.openPlace.count({ where: { source: 'overture' } });
-  console.log(`Done. Read ${read} features, ingested ${kept} food places` +
+  console.log(`Done (mode=${mode}). Read ${read} features, ingested ${kept} food places` +
     (skippedParse ? `, ${skippedParse} unparseable lines skipped` : '') +
+    (skippedRows ? `, ${skippedRows} rows skipped on DB write (see warnings above)` : '') +
     `. Table now holds ${total} overture rows.`);
 }
 

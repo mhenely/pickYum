@@ -169,6 +169,23 @@ describe('transformOvertureFeature', () => {
     expect(transformOvertureFeature({})).toBeNull();
     expect(transformOvertureFeature({ properties: { id: 7 } })).toBeNull();
   });
+
+  it('strips NUL bytes from every string field (Postgres rejects them)', () => {
+    // Real-world lesson: \u0000 is legal JSON but Postgres TEXT rejects
+    // it, and one poisoned row killed the NYC/LA/Chicago ingests
+    // wholesale. Every string reaching the DB must pass the sanitizer.
+    const row = transformOvertureFeature(feature({
+      name: 'Tasty\u0000 Slice',
+      addresses: [{ freeform: '123\u0000 SE Main St', locality: 'Port\u0000land' }],
+      phones: ['+1503\u00005551234'],
+    }));
+    expect(row).toMatchObject({
+      name: 'Tasty Slice',
+      address: '123 SE Main St',
+      locality: 'Portland',
+      phone: '+15035551234',
+    });
+  });
 });
 
 describe('haversineKm', () => {
