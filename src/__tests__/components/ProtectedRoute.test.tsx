@@ -21,14 +21,20 @@ describe('ProtectedRoute', () => {
     renderWithProviders(<TestApp />, {
       preloadedState: { auth: { user: null, status: 'idle', error: null } },
     });
-    expect(screen.getByText('Loading…')).toBeInTheDocument();
+    // ProtectedRoute renders the skeleton placeholder while auth
+    // resolves (replaced the old literal Loading… text). The pulse
+    // class is the skeleton's stable structural marker.
+    expect(document.querySelector('.animate-pulse')).not.toBeNull();
   });
 
   it('shows a loading indicator when auth status is loading', () => {
     renderWithProviders(<TestApp />, {
       preloadedState: { auth: { user: null, status: 'loading', error: null } },
     });
-    expect(screen.getByText('Loading…')).toBeInTheDocument();
+    // ProtectedRoute renders the skeleton placeholder while auth
+    // resolves (replaced the old literal Loading… text). The pulse
+    // class is the skeleton's stable structural marker.
+    expect(document.querySelector('.animate-pulse')).not.toBeNull();
   });
 
   it('allows guests through when unauthenticated (guest mode)', () => {

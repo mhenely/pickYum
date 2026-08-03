@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { requireAuth, getOptionalAuthUserId } from '../middleware/auth';
+import { trackGoogleCall } from '../lib/apiUsage';
 import { writeLimiter } from '../middleware/rateLimits';
 import { downloadAndStoreAll, type StoredPhoto } from '../lib/photoStorage';
 import { logger } from '../lib/logger';
@@ -442,6 +443,101 @@ router.get('/:id/reviews', async (req: Request, res: Response) => {
 // user-owned), and only custom rows (no googlePlaceId) accept the
 // toggle — there's no useful flag state for Google-sourced rows
 // since they can't match themselves.
+// ── Google enrichment for Overture-sourced rows ──────────────────
+//
+// POST /api/restaurants/:id/enrich — one-time (per 90 days) Google
+// backfill of rating/price/hours/photos for a row materialized from
+// the open-data index. Two calls, tier-controlled:
+//   1. RESOLVE: Text Search with an ID-ONLY field mask (Essentials
+//      SKU — the cheap tier). Adding ANY other field here bumps the
+//      tier; the tier-guard test enforces id-only.
+//   2. DETAILS: Place Details with rating/price/hours/photos/contact
+//      (Enterprise SKU, ~2c). NO Atmosphere fields — see the
+//      TEXT_FIELD_MASK warning in routes/places.ts for the history.
+// Failed resolves stamp googleDataUpdatedAt too, so an unmatched
+// food cart doesn't retry on every modal open (90-day backoff).
+const ENRICH_TTL_DAYS = 90;
+const MAX_ENRICH_PHOTOS = 3; // bump to 5 if testers want richer galleries
+export const ENRICH_RESOLVE_MASK = 'places.id';
+export const ENRICH_DETAILS_MASK = [
+  'id', 'rating', 'userRatingCount', 'priceLevel',
+  'regularOpeningHours', 'internationalPhoneNumber', 'websiteUri', 'photos',
+].join(',');
+
+router.post('/:id/enrich', requireAuth, async (req: Request, res: Response) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: 'id must be an integer' }); return; }
+  const row = await prisma.restaurant.findUnique({ where: { id } });
+  if (!row) { res.status(404).json({ error: 'Restaurant not found' }); return; }
+  if (!row.overtureId) { res.status(400).json({ error: 'Only Overture-sourced rows are enrichable' }); return; }
+
+  const cutoff = new Date(Date.now() - ENRICH_TTL_DAYS * 24 * 60 * 60 * 1000);
+  if (row.googleDataUpdatedAt && row.googleDataUpdatedAt > cutoff) {
+    res.json({ restaurant: row, enriched: false, reason: 'fresh' });
+    return;
+  }
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) { res.status(503).json({ error: 'Enrichment not configured' }); return; }
+
+  // 1. Resolve googlePlaceId if the row does not have one yet.
+  let placeId = row.googlePlaceId;
+  if (!placeId) {
+    const body: Record<string, unknown> = {
+      textQuery: [row.name, row.address].filter(Boolean).join(' '),
+      pageSize: 1,
+    };
+    if (row.lat != null && row.lng != null) {
+      body.locationBias = { circle: { center: { latitude: row.lat, longitude: row.lng }, radius: 500 } };
+    }
+    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': ENRICH_RESOLVE_MASK },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json() as { places?: Array<{ id?: string }> };
+    trackGoogleCall(req, 'textSearch', { status: r.ok ? 'ok' : 'error' });
+    placeId = (r.ok && typeof data.places?.[0]?.id === 'string') ? data.places[0].id : null;
+    if (!placeId) {
+      // No confident match — stamp the timestamp so we do not retry on
+      // every modal open. The row keeps serving its Overture data.
+      const updated = await prisma.restaurant.update({
+        where: { id }, data: { googleDataUpdatedAt: new Date() },
+      });
+      res.json({ restaurant: updated, enriched: false, reason: 'no-match' });
+      return;
+    }
+  }
+
+  // 2. Details.
+  const dRes = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`, {
+    headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': ENRICH_DETAILS_MASK },
+  });
+  const d = await dRes.json() as Record<string, unknown>;
+  trackGoogleCall(req, 'placeDetails', { status: dRes.ok ? 'ok' : 'error' });
+  if (!dRes.ok) { res.status(502).json({ error: 'Enrichment lookup failed' }); return; }
+
+  const photosRaw = Array.isArray(d.photos) ? (d.photos as unknown[]).slice(0, MAX_ENRICH_PHOTOS) : undefined;
+  const stored = photosRaw && photosRaw.length > 0 ? await materializePhotosToStorage(photosRaw, id) : undefined;
+  const priceLevelMap: Record<string, number> = {
+    PRICE_LEVEL_INEXPENSIVE: 1, PRICE_LEVEL_MODERATE: 2, PRICE_LEVEL_EXPENSIVE: 3, PRICE_LEVEL_VERY_EXPENSIVE: 4,
+  };
+  const updated = await prisma.restaurant.update({
+    where: { id },
+    data: {
+      googlePlaceId: row.googlePlaceId ?? placeId,
+      googleRating: typeof d.rating === 'number' ? d.rating : row.googleRating,
+      ratingCount: typeof d.userRatingCount === 'number' ? d.userRatingCount : row.ratingCount,
+      priceLevel: typeof d.priceLevel === 'string' ? (priceLevelMap[d.priceLevel] ?? row.priceLevel) : row.priceLevel,
+      phone:   row.phone   ?? (typeof d.internationalPhoneNumber === 'string' ? d.internationalPhoneNumber : null),
+      website: row.website ?? (typeof d.websiteUri === 'string' ? d.websiteUri : null),
+      regularOpeningHours: sanitizeRegularOpeningHours(d.regularOpeningHours) ?? undefined,
+      ...(stored !== undefined ? { photos: stored as unknown as Prisma.InputJsonValue } : {}),
+      googleDataUpdatedAt: new Date(),
+    },
+  });
+  res.json({ restaurant: updated, enriched: true });
+});
+
 router.patch('/:id/match-settings', requireAuth, async (req: Request, res: Response) => {
   const restaurantId = parseNumericId(req.params.id);
   if (!restaurantId) { res.status(400).json({ error: 'Invalid restaurant ID' }); return; }

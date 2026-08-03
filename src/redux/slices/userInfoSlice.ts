@@ -61,6 +61,7 @@ export interface CustomRestaurant {
   takeout: boolean;
   delivery: boolean;
   googlePlaceId: string | null;
+  overtureId?: string | null;
   lat: number | null;
   lng: number | null;
   photos: unknown[];
@@ -819,6 +820,7 @@ export const loadUserData = createAsyncThunk<void, LoadUserDataArg>(
           takeout: r.takeout ?? false,
           delivery: r.delivery ?? false,
           googlePlaceId: r.googlePlaceId ?? null,
+            overtureId: r.overtureId ?? null,
           lat: r.lat ?? null,
           lng: r.lng ?? null,
           photos: Array.isArray(r.photos) ? r.photos : [],
@@ -897,6 +899,7 @@ export const refreshStaleRestaurants = createAsyncThunk<void, void>(
             takeout: r.takeout ?? false,
             delivery: r.delivery ?? false,
             googlePlaceId: r.googlePlaceId ?? null,
+            overtureId: r.overtureId ?? null,
             lat: r.lat ?? null,
             lng: r.lng ?? null,
             googleDataUpdatedAt: r.googleDataUpdatedAt ?? null,

@@ -862,6 +862,13 @@ export const api = {
     // place row, then deletes the custom row if it was private. The
     // returned `mergedRestaurantId` is the Place row's id — caller
     // updates Redux to swap references.
+    // One-time Google enrichment for an Overture-sourced row — fires
+    // from the detail modal when rating/photos are missing. Server
+    // throttles to once per 90 days (including failed resolves).
+    enrich: (id: number | string) =>
+      request<{ restaurant: ApiRestaurant; enriched: boolean; reason?: string }>(
+        `/api/restaurants/${id}/enrich`, { method: 'POST' },
+      ),
     linkToPlace: (customId: number, body: { placeRestaurantId: number }) =>
       request<{ mergedRestaurantId: number }>(
         `/api/restaurants/${customId}/link-to-place`,

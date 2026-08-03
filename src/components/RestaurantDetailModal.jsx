@@ -242,6 +242,30 @@ const RestaurantDetailModal = ({
     refreshAttempted.add(numId);
 
     let cancelled = false;
+    // Overture-sourced rows (no googlePlaceId) take the enrichment
+    // path instead: one-time Google resolve+details, server-throttled
+    // to 90 days including failed matches. Fired alongside the
+    // refresh call — each endpoint no-ops cheaply on rows outside its
+    // domain, so we don't need the row's identity fields client-side.
+    api.restaurants.enrich(numId)
+      .then(({ enriched, restaurant }) => {
+        if (cancelled || !enriched || !restaurant) return;
+        dispatch(updateCustomRestaurant({
+          id: String(restaurant.id),
+          data: {
+            rating:  restaurant.googleRating != null ? Number(restaurant.googleRating) : null,
+            ratingCount: restaurant.ratingCount ?? null,
+            price:   restaurant.priceLevel ?? null,
+            phone:   restaurant.phone   ?? null,
+            website: restaurant.website ?? null,
+            photos: Array.isArray(restaurant.photos) ? restaurant.photos : [],
+            regularOpeningHours: restaurant.regularOpeningHours ?? null,
+            googleDataUpdatedAt: restaurant.googleDataUpdatedAt ?? null,
+          },
+        }));
+      })
+      .catch(() => { /* non-overture rows 400 here by design */ });
+
     api.users.refreshRestaurant(numId)
       .then(({ refreshed, restaurant }) => {
         if (cancelled || !refreshed || !restaurant) return;

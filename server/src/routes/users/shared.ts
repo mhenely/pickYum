@@ -125,6 +125,10 @@ export const RESTAURANT_CARD_SELECT = {
   takeout: true,
   delivery: true,
   googlePlaceId: true,
+  // Overture identity — SearchPage's cross-source dedupe matches redux
+  // rows against nearby-v2 results on this field; omitting it from the
+  // select silently breaks that matching (rows would re-materialize).
+  overtureId: true,
   // Needed for the Compare-page map. ~16 bytes per row — negligible
   // payload addition. Frontend skips rows where these are null.
   lat: true,

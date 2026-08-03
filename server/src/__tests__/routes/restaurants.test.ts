@@ -781,3 +781,30 @@ describe('GET /api/restaurants/:id/reviews', () => {
     expect(mockPrisma.review.findMany).not.toHaveBeenCalled();
   });
 });
+
+// ── Enrichment tier guards ──────────────────────────────────────
+// Same rationale as the search-mask guards: a stray field on either
+// enrichment mask silently multiplies its Google billing tier. The
+// resolve mask MUST stay id-only (Essentials SKU); the details mask
+// must never carry Enterprise+Atmosphere fields.
+import { ENRICH_RESOLVE_MASK, ENRICH_DETAILS_MASK } from '../../routes/restaurants';
+
+describe('enrichment field-mask tier guards', () => {
+  it('resolve mask is exactly places.id (Essentials SKU)', () => {
+    expect(ENRICH_RESOLVE_MASK).toBe('places.id');
+  });
+
+  it('details mask carries no Enterprise+Atmosphere fields', () => {
+    const ATMOSPHERE = [
+      'takeout', 'delivery', 'dineIn', 'curbsidePickup', 'reservable',
+      'servesVegetarianFood', 'servesBeer', 'servesWine', 'servesBrunch',
+      'reviews', 'editorialSummary', 'outdoorSeating', 'liveMusic',
+      'allowsDogs', 'goodForChildren', 'goodForGroups', 'parkingOptions',
+      'paymentOptions', 'restroom',
+    ];
+    const fields = ENRICH_DETAILS_MASK.split(',');
+    for (const f of fields) {
+      expect(ATMOSPHERE).not.toContain(f);
+    }
+  });
+});
