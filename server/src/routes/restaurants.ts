@@ -245,6 +245,16 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   if (!name) { res.status(400).json({ error: 'name is required' }); return; }
 
   const googlePlaceId = clipString(body.googlePlaceId, 200);
+  // Overture GERS id — the open-data identity from /api/places-v2
+  // results. Mirrors the googlePlaceId dedupe: find-or-create keyed
+  // on the unique column, rows are public (the place exists in the
+  // real world; nothing user-private about it).
+  const overtureId = clipString((body as { overtureId?: unknown }).overtureId, 64);
+
+  if (!googlePlaceId && overtureId) {
+    const existing = await prisma.restaurant.findUnique({ where: { overtureId } });
+    if (existing) { res.status(200).json({ restaurant: existing }); return; }
+  }
 
   // Find first — if the row already exists AND is visible to the caller,
   // return it (possibly with a narrow photo backfill — see below). Google-
@@ -288,11 +298,16 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       res.status(200).json({ restaurant: existing });
       return;
     }
-  } else {
+  } else if (!overtureId) {
+    // Custom user-typed entry — name-based dedupe. Skipped for
+    // Overture materializations: those dedupe on overtureId above, and
+    // letting a name match join them to someone's custom row would
+    // misattach the open-data identity to a private entry.
     const existing = await prisma.restaurant.findFirst({
       where: {
         name: { equals: name, mode: 'insensitive' },
         googlePlaceId: null,
+        overtureId: null,
         ...visibleTo(req.userId),
       },
     });
@@ -313,11 +328,12 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   const lng = (typeof body.lng === 'number' && Number.isFinite(body.lng) && body.lng >= -180 && body.lng <= 180) ? body.lng : null;
   const regularOpeningHours = sanitizeRegularOpeningHours(body.regularOpeningHours);
 
-  // Privacy rule: a Google Place is shared data (the place exists in the real
-  // world, everyone gets to see/refer to it); a user-typed custom name is
-  // private to the creator until they explicitly share it via a group event
-  // option or favorite (groups.ts auto-publishes at that point).
-  const isPrivate = !googlePlaceId;
+  // Privacy rule: a Google Place or Overture place is shared data (the
+  // place exists in the real world, everyone gets to see/refer to it);
+  // a user-typed custom name is private to the creator until they
+  // explicitly share it via a group event option or favorite
+  // (groups.ts auto-publishes at that point).
+  const isPrivate = !googlePlaceId && !overtureId;
 
   // Create the row WITHOUT photos first — the photo upload to Supabase
   // Storage needs the row's id for its deterministic storage path
@@ -328,6 +344,7 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   const restaurant = await prisma.restaurant.create({
     data: {
       googlePlaceId: googlePlaceId ?? null,
+      overtureId: overtureId ?? null,
       name,
       cuisineType: clipString(body.cuisineType, MAX_TEXT_FIELD),
       priceLevel,

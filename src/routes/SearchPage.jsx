@@ -20,6 +20,7 @@ import {
 } from "../redux/slices/searchSlice";
 import { CUISINE_OPTIONS } from "../utils/cuisineTypes";
 import useCurrentUser from "../hooks/useCurrentUser";
+import { useFlag } from "../hooks/useFlag";
 import { useSearchFilters } from "../hooks/useSearchFilters";
 import RestaurantCard from "../components/RestaurantCard";
 // Lazy: the maps chunk (~13 KB gzip via vendor-maps) loads only when the
@@ -115,7 +116,7 @@ function localSortKey(id, r, sortBy, currentUser, communityRatings) {
 // saved restaurants × 2 (a and b) = ~60k comparisons → ~600.
 function nearbySortKey(place, sortBy, currentUser, communityRatings, customByPlaceId, customByName) {
   const existingId =
-    customByPlaceId.get(place.googlePlaceId) ?? customByName.get(place.name);
+    customByPlaceId.get(placeIdentity(place)) ?? customByName.get(place.name);
 
   switch (sortBy) {
     case 'google-desc': return -(place.googleRating ?? -Infinity);
@@ -136,6 +137,13 @@ function nearbySortKey(place, sortBy, currentUser, communityRatings, customByPla
   }
 }
 
+// Stable cross-source identity for a nearby result. Google rows key by
+// googlePlaceId; Overture (nearby-v2) rows have googlePlaceId: null and
+// key by a prefixed overtureId so the two namespaces can never collide
+// in the maps/refs that dedupe materializations and drive hover state.
+const placeIdentity = (place) =>
+  place?.googlePlaceId ?? (place?.overtureId ? `ov:${place.overtureId}` : null);
+
 const pillClass = (active) =>
   `px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
     active
@@ -152,6 +160,13 @@ const EMPTY_DIETARY_TAGS = [];
 export default function SearchPage() {
   const dispatch = useDispatch();
   const currentUser = useCurrentUser();
+  // Overture-index search (self-hosted open data). When on, nearby
+  // searches hit /api/places-v2 — no Google spend, no 20-result cap.
+  const placesV2Enabled = useFlag('placesV2Search');
+  // Real match count + truncation from the last v2 search — v2 can
+  // report "1,807 places found, showing closest 200". null = last
+  // search was v1 (or none yet); the banner hides.
+  const [v2SearchMeta, setV2SearchMeta] = useState(null);
   const customRestaurants = useSelector((s) => s.userInfo.customRestaurants);
   const communityRatings  = useSelector((s) => s.rating.communityRatings);
   // Auth + data-load gates for empty-state suppression. Without these the
@@ -602,8 +617,24 @@ export default function SearchPage() {
       // dietaryToApply (Phase E) honors the user's dietary tags when
       // the toggle is enabled — vegetarian users won't see
       // steakhouses, etc. Empty list = no dietary filter applied.
-      const { restaurants: places, resolvedAddress: addr, resolvedLat, resolvedLng } =
-        await api.places.nearby(locationInput.trim(), radiusMeters, searchCuisineType, dietaryToApply);
+      let places; let addr; let resolvedLat; let resolvedLng;
+      if (placesV2Enabled) {
+        // Overture path — dietary tags aren't filterable here (no
+        // servesVegetarianFood in open data), so they're not sent.
+        const res = await api.places.nearbyV2(locationInput.trim(), radiusMeters, searchCuisineType);
+        places = res.restaurants;
+        addr = res.resolvedAddress;
+        resolvedLat = res.resolvedLat;
+        resolvedLng = res.resolvedLng;
+        setV2SearchMeta({ total: res.total, truncated: res.truncated, shown: res.restaurants.length });
+      } else {
+        const res = await api.places.nearby(locationInput.trim(), radiusMeters, searchCuisineType, dietaryToApply);
+        places = res.restaurants;
+        addr = res.resolvedAddress;
+        resolvedLat = res.resolvedLat;
+        resolvedLng = res.resolvedLng;
+        setV2SearchMeta(null);
+      }
       dispatch(setNearbyResults({
         results: places,
         resolvedAddress: addr ?? locationInput.trim(),
@@ -624,6 +655,7 @@ export default function SearchPage() {
     } catch (err) {
       setNearbyError(err.message ?? "Search failed. Please try again.");
       dispatch(clearNearby());
+      setV2SearchMeta(null);
     } finally {
       setNearbyLoading(false);
     }
@@ -632,6 +664,7 @@ export default function SearchPage() {
   const handleClearNearby = () => {
     dispatch(clearNearby());
     setNearbyError("");
+    setV2SearchMeta(null);
   };
 
   // Ensures a Places result is materialized as a Restaurant row + cached in
@@ -653,8 +686,10 @@ export default function SearchPage() {
     // real Place would never appear on cards because the custom row
     // can't be photo-refreshed (no upstream to query). Strict id-match
     // keeps custom rows and Google rows in their own lanes.
+    const identity = placeIdentity(place);
     const existingEntry = Object.entries(customRestaurants)
-      .find(([, r]) => r.googlePlaceId === place.googlePlaceId);
+      .find(([, r]) => (place.googlePlaceId ? r.googlePlaceId === place.googlePlaceId
+                                            : (place.overtureId != null && r.overtureId === place.overtureId)));
     if (existingEntry) {
       const [existingId, existingRow] = existingEntry;
       const cachedHasPhotos    = Array.isArray(existingRow.photos) && existingRow.photos.length > 0;
@@ -669,13 +704,16 @@ export default function SearchPage() {
       if (cachedHasPhotos || !incomingHasPhotos) return existingId;
     }
 
-    const inFlight = inFlightMaterializations.current.get(place.googlePlaceId);
+    const inFlight = inFlightMaterializations.current.get(identity);
     if (inFlight) return inFlight;
 
     const promise = (async () => {
       const { restaurant } = await api.restaurants.create({
         name: place.name,
-        googlePlaceId: place.googlePlaceId,
+        googlePlaceId: place.googlePlaceId ?? undefined,
+        // Overture identity for nearby-v2 results — the server
+        // find-or-creates on this the same way it does googlePlaceId.
+        overtureId: place.overtureId ?? undefined,
         cuisineType: place.cuisineType ?? undefined,
         priceLevel: place.priceLevel ?? undefined,
         googleRating: place.googleRating ?? undefined,
@@ -753,10 +791,10 @@ export default function SearchPage() {
       }));
       return id;
     })().finally(() => {
-      inFlightMaterializations.current.delete(place.googlePlaceId);
+      inFlightMaterializations.current.delete(identity);
     });
 
-    inFlightMaterializations.current.set(place.googlePlaceId, promise);
+    inFlightMaterializations.current.set(identity, promise);
     return promise;
   };
 
@@ -922,6 +960,9 @@ export default function SearchPage() {
     const m = new Map();
     for (const [id, r] of Object.entries(customRestaurants)) {
       if (r?.googlePlaceId) m.set(r.googlePlaceId, id);
+      // Overture-sourced rows key under the same prefixed namespace
+      // placeIdentity() produces for nearby-v2 results.
+      if (r?.overtureId) m.set(`ov:${r.overtureId}`, id);
     }
     return m;
   }, [customRestaurants]);
@@ -980,7 +1021,8 @@ export default function SearchPage() {
   useEffect(() => {
     const m = new Map();
     for (const p of nearbyResults ?? []) {
-      if (p?.googlePlaceId) m.set(p.googlePlaceId, p);
+      const key = placeIdentity(p);
+      if (key) m.set(key, p);
     }
     placesByIdRef.current = m;
   }, [nearbyResults]);
@@ -1479,7 +1521,11 @@ export default function SearchPage() {
             <p className="text-sm font-semibold text-gray-700">
               {searchMode === 'name' ? 'Results' : 'Nearby'}
               <span className="text-sm font-normal text-gray-500 ml-1">— {resolvedAddress}</span>
-              <span className="ml-1.5 text-sm font-normal text-gray-400">({sortedNearby.length})</span>
+              <span className="ml-1.5 text-sm font-normal text-gray-400">
+                {v2SearchMeta?.truncated
+                  ? `(${v2SearchMeta.total.toLocaleString()} found, showing closest ${sortedNearby.length})`
+                  : `(${sortedNearby.length})`}
+              </span>
             </p>
             <div className="flex items-center gap-3 ml-auto">
               {/* Map toggle — only meaningful when the env key is set
@@ -1525,7 +1571,8 @@ export default function SearchPage() {
                 //     → 3 at lg). Same as before.
                 <div className={`grid grid-cols-1 gap-4 ${mapShown ? 'lg:grid-cols-2' : 'sm:grid-cols-2 lg:grid-cols-3'}`}>
                   {pagedNearby.map((place) => {
-                    const { googlePlaceId: placeId, name } = place;
+                    const placeId = placeIdentity(place);
+                    const { name } = place;
 
                     // Match a freshly-fetched Place against the local customRestaurants
                     // cache so the card can be clickable (open detail) when the row

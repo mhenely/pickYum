@@ -22,6 +22,7 @@ const CACHE_TTL_MS = 60_000;
 // exists), so the longer TTL is purely a win.
 function ttlForPath(path: string): number {
   if (path.startsWith('/api/places/nearby')) return 5 * 60_000;
+  if (path.startsWith('/api/places-v2/nearby')) return 5 * 60_000;
   if (path.startsWith('/api/places/text-search')) return 5 * 60_000;
   return CACHE_TTL_MS;
 }
@@ -901,6 +902,35 @@ export const api = {
         informationalDietary?: string[];
         activeDietary?: string[];
       }>(`/api/places/nearby?${params.toString()}`);
+    },
+    // Overture-index nearby (self-hosted open data — see server
+    // routes/placesV2.ts). Same row shape as `nearby` plus:
+    //   - overtureId on each row (the materialize identity; rows have
+    //     googlePlaceId: null)
+    //   - total / truncated: real match count vs the shipped cap
+    //   - rating / priceLevel / photos are null/[] until the Google
+    //     enrichment path backfills them on engagement
+    // Gated by the `placesV2Search` feature flag at the call site.
+    nearbyV2: (
+      address: string,
+      radiusMeters: number,
+      cuisineType?: string | null,
+    ) => {
+      const params = new URLSearchParams({
+        address,
+        radiusMeters: String(radiusMeters),
+      });
+      if (cuisineType) params.set('cuisineType', cuisineType);
+      return request<{
+        restaurants: (PlacesRestaurant & { overtureId?: string; confidence?: number | null })[];
+        configured: boolean;
+        source: string;
+        total: number;
+        truncated: boolean;
+        resolvedAddress?: string;
+        resolvedLat?: number;
+        resolvedLng?: number;
+      }>(`/api/places-v2/nearby?${params.toString()}`);
     },
     // Optional bias triple anchors text-search results to a geographic
     // center (Google's `locationBias.circle`). Without it the search is

@@ -21,6 +21,8 @@ import { createSlice, createAsyncThunk, type PayloadAction } from '@reduxjs/tool
 
 export interface FeatureFlags {
   newDetailModal: boolean;
+  // Overture-index nearby search (see server flags.ts placesV2Search).
+  placesV2Search: boolean;
   insightsOptOutVisible: boolean;
   backgroundRefresh: boolean;
   strictApiSchemaValidation: boolean;
@@ -28,6 +30,7 @@ export interface FeatureFlags {
 
 export const defaultFlags: FeatureFlags = {
   newDetailModal:            false,
+  placesV2Search:            false,
   insightsOptOutVisible:     true,
   backgroundRefresh:         false,
   strictApiSchemaValidation: true,

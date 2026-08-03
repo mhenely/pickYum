@@ -314,6 +314,12 @@ model OAuthAccount {
 model Restaurant {
   id                       Int       @id @default(autoincrement())
   googlePlaceId            String?   @unique @map("google_place_id")
+  // Overture GERS id — the open-data twin of googlePlaceId. A
+  // Restaurant row materialized from the Overture index (nearby-v2)
+  // carries this instead of a googlePlaceId. Both may coexist on one
+  // row later if enrichment links an Overture place to its Google
+  // identity. Overture-sourced rows are public, like Google rows.
+  overtureId               String?   @unique @map("overture_id") @db.VarChar(64)
   name                     String
   cuisineType              String?   @map("cuisine_type")
   priceLevel               Int?      @map("price_level")

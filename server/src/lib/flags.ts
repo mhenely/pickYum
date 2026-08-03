@@ -38,6 +38,13 @@ export interface FeatureFlags {
    *  out + budget caps are validated against `api_usage`. */
   backgroundRefresh: boolean;
 
+  /** Serve nearby search from the self-hosted Overture places index
+   *  (/api/places-v2) instead of Google Places. Default false; flip on
+   *  via FLAG_PLACES_V2_SEARCH=true once the region a deployment
+   *  serves is loaded in open_places. Kill-switch back to Google is
+   *  an env change + restart. */
+  placesV2Search: boolean;
+
   /** Whether the client-side zod validation throws on contract drift.
    *  Default true; set false during a server change rollout so a brief
    *  contract gap doesn't lock users out (downgrade to a Sentry breadcrumb
@@ -63,4 +70,5 @@ export const flags: FeatureFlags = {
   insightsOptOutVisible:     envFlag('FLAG_INSIGHTS_OPT_OUT_VISIBLE',   true),
   backgroundRefresh:         envFlag('FLAG_BACKGROUND_REFRESH',         false),
   strictApiSchemaValidation: envFlag('FLAG_STRICT_API_SCHEMA',          true),
+  placesV2Search:            envFlag('FLAG_PLACES_V2_SEARCH',           false),
 };

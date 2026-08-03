@@ -116,6 +116,46 @@ describe('POST /api/restaurants', () => {
     expect(res.body.restaurant.name).toBe('Burger Joint');
   });
 
+  // ── Overture identity (open-data materialization) ─────────────
+  describe('overtureId materialization', () => {
+    it('find-or-creates on overtureId: existing row returns 200 without a create', async () => {
+      (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue({
+        id: 7, name: 'Tasty Slice', overtureId: 'gers-abc', googlePlaceId: null,
+      });
+
+      const res = await request(buildApp())
+        .post('/api/restaurants')
+        .set('Cookie', authCookie())
+        .send({ name: 'Tasty Slice', overtureId: 'gers-abc' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.restaurant.id).toBe(7);
+      expect(mockPrisma.restaurant.findUnique).toHaveBeenCalledWith({ where: { overtureId: 'gers-abc' } });
+      expect(mockPrisma.restaurant.create).not.toHaveBeenCalled();
+    });
+
+    it('creates a PUBLIC row carrying the overtureId when none exists', async () => {
+      (mockPrisma.restaurant.findUnique as jest.Mock).mockResolvedValue(null);
+      (mockPrisma.restaurant.create as jest.Mock).mockImplementation(async ({ data }) => ({ id: 8, ...data }));
+
+      const res = await request(buildApp())
+        .post('/api/restaurants')
+        .set('Cookie', authCookie())
+        .send({ name: 'Tasty Slice', overtureId: 'gers-abc', lat: 45.52, lng: -122.68 });
+
+      expect(res.status).toBe(201);
+      const createData = (mockPrisma.restaurant.create as jest.Mock).mock.calls[0][0].data;
+      expect(createData.overtureId).toBe('gers-abc');
+      // Overture places are real-world shared data — public like
+      // Google rows, NOT private like custom user-typed entries.
+      expect(createData.private).toBe(false);
+      // And the name-based custom-row dedupe must not have run — an
+      // overture materialize matching a custom row's name would
+      // misattach open-data identity to a private entry.
+      expect(mockPrisma.restaurant.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
   it('PERSISTS photos as Supabase Storage URLs when the client supplies Google refs', async () => {
     // Regression guard for the photo-storage migration. The materialize path
     // now does TWO writes for a new row with photos:
