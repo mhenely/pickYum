@@ -18,6 +18,8 @@
     "db:status:production": "dotenv -e .env.production -- prisma migrate status",
     "db:studio:staging": "dotenv -e .env.staging -- prisma studio",
     "db:studio:production": "dotenv -e .env.production -- prisma studio",
+    "ingest:overture:staging": "dotenv -e .env.staging -- tsx scripts/ingest-overture.ts",
+    "ingest:overture:production": "dotenv -e .env.production -- tsx scripts/ingest-overture.ts",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
@@ -63,6 +65,7 @@
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/supertest": "^7.2.0",
     "@types/web-push": "^3.6.4",
+    "dotenv-cli": "^11.0.0",
     "jest": "^30.3.0",
     "jest-mock-extended": "^4.0.1",
     "nodemon": "^3.1.4",

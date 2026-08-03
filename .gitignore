@@ -25,6 +25,13 @@ server/.env.*
 # Server build output
 server/dist
 
+# Overture Maps dataset downloads (ingested via server/scripts/
+# ingest-overture.ts — the raw files are 50-500MB and regenerable
+# from the public release, never commit them)
+*.geojsonseq
+*.geojson
+*.parquet
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -21,26 +21,26 @@ datasource db {
 }
 
 model User {
-  id              Int       @id @default(autoincrement())
+  id                     Int       @id @default(autoincrement())
   // Citext columns: comparison is case-insensitive at the DB level, so
   // the unique index serves all auth lookups (login, register, forgot-
   // password, profile uniqueness checks) in O(log N) regardless of case.
   // Original casing is preserved on display — citext stores values as
   // typed; only the equality/ordering operators are case-insensitive.
-  email           String    @unique @db.Citext
-  username        String    @unique @db.Citext
-  passwordHash    String?   @map("password_hash")
-  emailVerified   Boolean   @default(false) @map("email_verified")
-  emailVerifiedAt DateTime? @map("email_verified_at")
-  flipCount       Int       @default(0) @map("flip_count")
-  avatarUrl       String?   @map("avatar_url")
+  email                  String    @unique @db.Citext
+  username               String    @unique @db.Citext
+  passwordHash           String?   @map("password_hash")
+  emailVerified          Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt        DateTime? @map("email_verified_at")
+  flipCount              Int       @default(0) @map("flip_count")
+  avatarUrl              String?   @map("avatar_url")
   // Admin role gate. Default 'user' for every account; flip to
   // 'admin' manually (DB-level, or via a future admin-management
   // UI) to grant access to /api/admin/* endpoints. Kept as a string
   // rather than a Prisma enum so adding new roles later (e.g.
   // 'support', 'readOnly') doesn't require a migration — values
   // outside the known set are treated as 'user' by `requireAdmin`.
-  role            String    @default("user") @db.VarChar(16)
+  role                   String    @default("user") @db.VarChar(16)
   // Failed-login throttling counter — incremented by /auth/login on a
   // password mismatch, reset to 0 on successful login. When this hits
   // FAILED_LOGIN_LIMIT, `failedLoginLockedUntil` is set and the route
@@ -48,16 +48,16 @@ model User {
   // until the lockout window passes. Independent from the IP-based
   // rate limiter — defends against credential-stuffing botnets that
   // distribute attempts across many IPs.
-  failedLoginCount        Int       @default(0) @map("failed_login_count")
-  failedLoginLockedUntil  DateTime? @map("failed_login_locked_until")
+  failedLoginCount       Int       @default(0) @map("failed_login_count")
+  failedLoginLockedUntil DateTime? @map("failed_login_locked_until")
   // Free-form dietary tag list — surfaced in group/trip member rows so
   // meal planners can avoid incompatible candidates. Recommended values
   // are an allowlist in the frontend ("vegan", "halal", etc.) but the
   // column accepts any string so users can self-categorize for edge
   // cases (region-specific kosher levels, FODMAP, etc.). Validation
   // (max 10 tags, ≤40 chars each) lives in the PATCH endpoint.
-  dietaryTags     String[]  @default([]) @map("dietary_tags")
-  createdAt       DateTime  @default(now()) @map("created_at")
+  dietaryTags            String[]  @default([]) @map("dietary_tags")
+  createdAt              DateTime  @default(now()) @map("created_at")
 
   favorites          UserFavorite[]
   options            UserOption[]
@@ -69,18 +69,18 @@ model User {
   // rollout. New code reads from favoriteLists; UserFavorite is the
   // safety net and gets dropped in a follow-up migration after the
   // sprint has been in prod long enough.
-  favoriteLists      FavoriteList[] @relation("UserFavoriteLists")
-  createdRestaurants Restaurant[]   @relation("CreatedBy")
+  favoriteLists      FavoriteList[]     @relation("UserFavoriteLists")
+  createdRestaurants Restaurant[]       @relation("CreatedBy")
   oauthAccounts      OAuthAccount[]
   emailTokens        EmailToken[]
   savedAddresses     SavedAddress[]
   pushSubscriptions  PushSubscription[]
 
-  following        Follow[]         @relation("Follower")
-  followers        Follow[]         @relation("Following")
-  sentRequests     FriendRequest[]  @relation("SentRequests")
-  receivedRequests FriendRequest[]  @relation("ReceivedRequests")
-  recommendations  Recommendation[] @relation("SentRecommendations")
+  following           Follow[]             @relation("Follower")
+  followers           Follow[]             @relation("Following")
+  sentRequests        FriendRequest[]      @relation("SentRequests")
+  receivedRequests    FriendRequest[]      @relation("ReceivedRequests")
+  recommendations     Recommendation[]     @relation("SentRecommendations")
   // Curated recommendation lists this user owns. Distinct from the
   // private FavoriteList collection — these are outward-facing.
   recommendationLists RecommendationList[]
@@ -437,24 +437,24 @@ model UserOption {
 
 // Append-only — one row per acceptance so history + counts are simple queries
 model UserAccepted {
-  id              Int      @id @default(autoincrement())
-  userId          Int      @map("user_id")
-  restaurantId    Int      @map("restaurant_id")
-  acceptedAt      DateTime @default(now()) @map("accepted_at")
+  id                  Int      @id @default(autoincrement())
+  userId              Int      @map("user_id")
+  restaurantId        Int      @map("restaurant_id")
+  acceptedAt          DateTime @default(now()) @map("accepted_at")
   // Snapshot of the "consideration set" at acceptance time. For solo accepts
   // this is the user's options list; for group accepts it's the group event's
   // candidate pool. Stored as a JSON array of restaurant IDs (as strings).
   // Enables insights like "always-considered, never-chosen" and competitor sets.
-  optionsSnapshot Json?    @map("options_snapshot")
+  optionsSnapshot     Json?    @map("options_snapshot")
   // How the choice was reached: 'flip' | 'spin' | 'vote' | 'surprise' | 'direct'.
   // Null on legacy rows. Drives the decision-method breakdown chart on Insights.
-  chooseMethod    String?  @map("choose_method")
+  chooseMethod        String?  @map("choose_method")
   // Set on acceptances created by a group's accept-result flow — links the row
   // back to the originating GroupEvent so the Insights page can deep-link the
   // "Recent decisions" entry into the ballot detail modal. Null for solo
   // flip/spin/surprise/direct picks and for pre-rollout group acceptances
   // (we can't backfill historical rows safely).
-  eventId         Int?     @map("event_id")
+  eventId             Int?     @map("event_id")
   // Per-entry opt-out from the InsightsPage aggregation. Lets a user keep
   // a group/trip pick (or any solo pick they want to disown) in the visible
   // History log while excluding it from taste-profile signal. Default false
@@ -462,7 +462,7 @@ model UserAccepted {
   // ever drop out of insights. The /me/insights query filters on this column;
   // /me/all + /me/accepted still return excluded rows so History can render
   // them with an "off-the-record" badge.
-  excludeFromInsights Boolean @default(false) @map("exclude_from_insights")
+  excludeFromInsights Boolean  @default(false) @map("exclude_from_insights")
   // Decision-regret signal — user's one-tap answer to "would you pick this
   // again?" after the meal. Null = unanswered (default for any row); true =
   // would repeat; false = wouldn't. Drives the regret-rate stat on Insights
@@ -530,8 +530,8 @@ model Recommendation {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  fromUser   User       @relation("SentRecommendations", fields: [fromUserId], references: [id], onDelete: Cascade)
-  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  fromUser    User                      @relation("SentRecommendations", fields: [fromUserId], references: [id], onDelete: Cascade)
+  restaurant  Restaurant                @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   // Back-relation to the many-to-many join table — a recommendation can
   // be a member of any number of the owner's curated lists at the same
   // time. Empty array = standalone rec (the only shape that existed
@@ -610,7 +610,7 @@ model RecommendationListEntry {
   position         Int      @default(0)
   addedAt          DateTime @default(now()) @map("added_at")
 
-  list           RecommendationList @relation(fields: [listId],           references: [id], onDelete: Cascade)
+  list           RecommendationList @relation(fields: [listId], references: [id], onDelete: Cascade)
   recommendation Recommendation     @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
 
   @@id([listId, recommendationId])
@@ -1020,4 +1020,61 @@ model PushSubscription {
 
   @@index([userId])
   @@map("push_subscription")
+}
+
+// ── Open-data places index (Overture Maps POC) ────────────────────
+//
+// Self-hosted POI search index — the escape hatch from Google Places'
+// per-call billing and 20-result cap. Rows are ingested from Overture
+// Maps monthly releases (scripts/ingest-overture.ts) and served by
+// GET /api/places/nearby-v2, which mirrors /nearby's response shape
+// so the two can be A/B compared.
+//
+// Deliberately NOT PostGIS for the POC: plain lat/lng doubles with a
+// composite index + bounding-box prefilter handle metro-scale data
+// fine, and CI's migration smoke test runs against vanilla postgres
+// (no postgis binaries). If/when this graduates from POC, the upgrade
+// path is: enable postgis, add a generated geography column + GiST
+// index, and swap the bbox query for ST_DWithin.
+//
+// No rating / priceLevel / photos columns: Overture doesn't carry
+// them. Those stay Google-enriched on the existing Restaurant rows
+// (detail-modal refresh path) — this table is for discovery only.
+model OpenPlace {
+  id              Int      @id @default(autoincrement())
+  // Dataset provenance. 'overture' today; the (source, sourceId)
+  // unique key leaves room for FSQ OS Places or others later.
+  source          String   @default("overture") @db.VarChar(16)
+  // Overture GERS id — stable across releases, so re-ingesting a
+  // newer release upserts instead of duplicating.
+  sourceId        String   @map("source_id") @db.VarChar(64)
+  name            String   @db.VarChar(200)
+  // Overture taxonomy slug ("italian_restaurant", "coffee_shop").
+  // Same shape as Google's type slugs for most food categories, so
+  // the existing cuisineType query param values work unchanged.
+  categoryPrimary String?  @map("category_primary") @db.VarChar(64)
+  // Alternate category slugs — used for cuisine filtering the same
+  // way places.ts matches Google's types[].
+  categories      String[]
+  lat             Float
+  lng             Float
+  address         String?  @db.VarChar(300)
+  locality        String?  @db.VarChar(100)
+  region          String?  @db.VarChar(50)
+  postcode        String?  @db.VarChar(20)
+  phone           String?  @db.VarChar(40)
+  website         String?  @db.VarChar(500)
+  // Overture's 0-1 existence confidence. Low values are often closed
+  // or hallucinated-by-merge places; nearby-v2 filters at >= 0.4 by
+  // default (tunable per request while we calibrate).
+  confidence      Float?
+  ingestedAt      DateTime @default(now()) @map("ingested_at")
+
+  @@unique([source, sourceId])
+  // Bounding-box prefilter scans lat first, then filters lng — the
+  // composite index serves the lat range; lng narrows in the same
+  // index without a heap visit for non-matching rows.
+  @@index([lat, lng])
+  @@index([categoryPrimary])
+  @@map("open_places")
 }

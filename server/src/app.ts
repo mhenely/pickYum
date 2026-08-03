@@ -19,6 +19,7 @@ import authRoutes from './routes/auth';
 import restaurantRoutes from './routes/restaurants';
 import userRoutes from './routes/users';
 import placesRoutes from './routes/places';
+import placesV2Routes from './routes/placesV2';
 import sessionsRoutes from './routes/sessions';
 import socialRoutes from './routes/social';
 import groupRoutes from './routes/groups';
@@ -75,6 +76,11 @@ export function createApp() {
   app.use('/api/restaurants', restaurantRoutes);
   app.use('/api/users', userRoutes);
   app.use('/api/places', placesRoutes);
+  // Open-data (Overture) POC. Own prefix — sharing /api/places would
+  // run BOTH routers' middleware on fall-through (v1's 20-per-5-min
+  // limiter would count every v2 request against v1's budget, and
+  // vice versa). See routes/placesV2.ts.
+  app.use('/api/places-v2', placesV2Routes);
   app.use('/api/sessions', sessionsRoutes);
   app.use('/api/social', socialRoutes);
   app.use('/api/groups', groupRoutes);
