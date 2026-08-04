@@ -40,10 +40,11 @@ const rows = [
 describe('GET /api/places-v2/nearby', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns 401 without auth', async () => {
+  it('serves unauthenticated (guest) requests — the $0-marginal index needs no spend gate', async () => {
+    (mockPrisma.openPlace.findMany as jest.Mock).mockResolvedValue([]);
     const res = await request(buildApp())
       .get('/api/places-v2/nearby?lat=45.52&lng=-122.68&radiusMeters=8047');
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
   });
 
   it('returns 400 without a radius', async () => {

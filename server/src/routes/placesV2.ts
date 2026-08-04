@@ -23,7 +23,6 @@
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import prisma from '../lib/prisma';
-import { requireAuth } from '../middleware/auth';
 import { trackGoogleCall } from '../lib/apiUsage';
 import { haversineKm, bboxForRadius, cuisineLabel } from '../lib/overture';
 
@@ -46,7 +45,12 @@ const v2Limiter = rateLimit({
   skip: () => process.env.NODE_ENV === 'test',
 });
 
-router.use(requireAuth);
+// No requireAuth: unlike v1 (where every search spent Google budget
+// and auth was the spend gate), the Overture index costs $0 marginal
+// — so guest-mode users get real nearby search. The per-IP limiter
+// still bounds abuse, and the only Google exposure (address geocode)
+// is Essentials-tier + capped by Cloud quotas. trackGoogleCall
+// records unauthenticated calls under its documented userId=0 bucket.
 router.use(v2Limiter);
 
 // GET /api/places-v2/nearby

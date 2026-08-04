@@ -30,7 +30,12 @@ export interface FeatureFlags {
 
 export const defaultFlags: FeatureFlags = {
   newDetailModal:            false,
-  placesV2Search:            false,
+  // Default TRUE: v2 (Overture) is the primary search path. The flag
+  // is a kill-switch, not an opt-in — if the flags fetch fails or
+  // races the first search, users must land on the working $0 path,
+  // not the auth-gated Google path. Set FLAG_PLACES_V2_SEARCH=false
+  // server-side to force everyone back to Google in an emergency.
+  placesV2Search:            true,
   insightsOptOutVisible:     true,
   backgroundRefresh:         false,
   strictApiSchemaValidation: true,
