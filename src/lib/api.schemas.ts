@@ -46,6 +46,8 @@ export const RegularOpeningHoursSchema = z.object({
 export const ApiRestaurantSchema = z.object({
   id: z.number(),
   googlePlaceId: z.string().nullable(),
+  // Optional: only present on servers deployed after the Overture rollout.
+  overtureId: z.string().nullable().optional(),
   name: z.string(),
   cuisineType: z.string().nullable(),
   priceLevel: z.number().nullable(),

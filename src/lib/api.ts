@@ -168,6 +168,8 @@ export interface SavedAddress {
 export interface ApiRestaurant {
   id: number;
   googlePlaceId: string | null;
+  // Overture GERS id — open-data identity twin (see Restaurant model).
+  overtureId?: string | null;
   name: string;
   cuisineType: string | null;
   priceLevel: number | null;
